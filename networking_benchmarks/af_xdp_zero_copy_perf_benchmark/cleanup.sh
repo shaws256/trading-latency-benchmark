@@ -8,7 +8,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Define interface
-INTERFACE="enp39s0"
+INTERFACE="${1:?Usage: cleanup.sh <interface>}"
 IFINDEX=$(ip link show dev $INTERFACE | grep -o "^[0-9]*" | head -n1)
 echo "Interface $INTERFACE has ifindex $IFINDEX"
 
@@ -26,7 +26,7 @@ xdp-loader unload $INTERFACE --all 2>/dev/null || true
 
 # Remove any BPF maps that might be lingering
 echo "Cleaning up BPF maps..."
-rm -rf /sys/fs/bpf/* 2>/dev/null || true
+rm -rf /sys/fs/bpf/afxdp_bench 2>/dev/null || true
 
 # Reset the interface
 echo "Resetting network interface..."

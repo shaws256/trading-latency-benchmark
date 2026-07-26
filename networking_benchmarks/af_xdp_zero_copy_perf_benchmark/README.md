@@ -35,19 +35,24 @@ Egress is always AF_XDP zero-copy unicast UDP to each registered subscriber, wit
 ### Build
 ```bash
 # Install dependencies (Amazon Linux 2023)
-sudo yum install clang libbpf-devel elfutils-libelf-devel -y
-sudo yum groupinstall "Development Tools" -y
+sudo dnf install -y gcc-c++ gcc make clang llvm elfutils-libelf-devel \
+    kernel-headers libbpf libbpf-devel glibc-devel zlib-devel git ethtool
 
-# Clone and build xdp-tools
-git clone https://github.com/xdp-project/xdp-tools.git
-cd xdp-tools && ./configure && make && sudo make install
+# Build xdp-tools from source (AL2023 does not package libxdp).
+# Note: AL2023 gcc requires a stdbool.h patch for xdp-tools - see deployment README.
+git clone --depth 1 https://github.com/xdp-project/xdp-tools.git
+cd xdp-tools && ./configure && make && sudo make install && sudo ldconfig
+
+# If xdp-dispatcher.o is not found at runtime:
+export LIBXDP_OBJECT_PATH=/usr/local/lib/bpf
 
 # Build all binaries and eBPF programs
 make all
 ```
 
-Produced binaries: `packet_replicator`, `control_client`, `test_client`, `market_data_provider_client`.
+Produced binaries: `packet_replicator`, `control_client`, `test_client`, `market_data_provider_client`, `latency_client`.
 Produced eBPF objects: `unicast_filter.o`, `gre_filter.o`.
+Scripts: `run_comparison.sh`, `generate_comparison_report.py`.
 
 ---
 
@@ -171,8 +176,8 @@ sudo tcpdump -i eth0 proto gre -c 5
 **ARP resolution (required for AF_XDP TX on ENA/VPC)**
 ```bash
 cat /proc/net/arp | grep <subscriber_ip>
-# If broadcast FF:FF:FF:FF:FF:FF appears, the feeder falls back to kernel socket
-# and self-heals within 100 ms once ARP resolves
+# If ARP is not resolved, addDestination will throw an error.
+# Ensure the subscriber is reachable before registering.
 ```
 
 ---
@@ -187,17 +192,20 @@ cat /proc/net/arp | grep <subscriber_ip>
 | `market_data_provider_client` | RTT benchmark: self-registers, sends trade messages, reports latency percentiles |
 | `unicast_filter.o` | eBPF XDP: matches target unicast IP:port → AF_XDP |
 | `gre_filter.o` | eBPF XDP: matches GRE unicast frames carrying inner multicast UDP → AF_XDP |
+| `latency_client` | Lock-free RTT client: kernel RX timestamps, busy-poll, CPU pinning, coordinated omission tracking |
+| `run_comparison.sh` | Multi-rate comparison harness (interleaved old + new client runs) |
+| `generate_comparison_report.py` | Produces terminal table, HTML report, and JSON summary from results |
 
 ---
 
 ## Performance Features
 
-- **Sub-microsecond latency** packet forwarding via AF_XDP zero-copy
+- **Low-latency** packet forwarding via AF_XDP zero-copy (measured p50=44us RTT through replicator in CPG)
 - **Zero hot-path syscalls** — interface IP/MAC cached at init, destination MACs cached at `add` time
 - **Multi-queue** processing with one dedicated thread per NIC queue
 - **Lock-free** thread-local destination cache refreshed every 100 ms
 - **CPU affinity** binding for cache-resident hot paths
-- **Self-healing MAC resolution** — broadcast-MAC destinations fall back to kernel socket while ARP resolves, then automatically switch to AF_XDP fast path
+- **Fail-loud MAC resolution** — `addDestination` retries ARP 3 times and rejects if unresolved (no silent broadcast fallback that would corrupt measurements)
 - **Single driver kick per TX batch** — `requestDriverPoll()` is called once after fanning out to all K subscribers, not K times; eliminates redundant `sendto` syscalls under load
 - **TX ring overflow recovery** — on full TX ring, kicks driver, drains completions, and retries once before falling back to the kernel socket; no silent drops
 - **Mode-adaptive RX batch size** — 256 frames in GRE mode (handles multi-hundred-frame exchange bursts), 64 in unicast mode
@@ -218,8 +226,8 @@ cat /proc/net/arp | grep <subscriber_ip>
 
 **Device busy / XDP program conflict**:
 ```bash
-sudo ./cleanup.sh
-# or manually: sudo ip link set eth0 xdp off
+sudo ./cleanup.sh <interface>
+# or manually: sudo ip link set <interface> xdp off
 ```
 
 **Zero-copy fails**: Driver falls back to copy mode automatically. Check driver support:
@@ -246,7 +254,7 @@ response from port 12345.
 
 ## Requirements
 
-- Linux kernel 5.10+ (AF_XDP zero-copy; `XDP_USE_NEED_WAKEUP` available from 5.11)
+- Linux kernel 6.1+ recommended (Amazon Linux 2023); minimum 5.10 for AF_XDP zero-copy
 - AF_XDP compatible NIC driver (ENA on AWS, i40e, ixgbe, mlx5_core)
 - Root privileges for AF_XDP and XDP program loading
 - `clang` with BPF target support for eBPF compilation

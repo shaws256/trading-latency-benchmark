@@ -50,7 +50,7 @@ static int g_debug_enabled = 0;
 #define DEBUG_PRINT(fmt, ...)                                  \
     do                                                         \
     {                                                          \
-        if (0)                                                 \
+        if (__builtin_expect(g_debug_enabled, 0))                                                 \
             fprintf(stderr, "DEBUG CPP: " fmt, ##__VA_ARGS__); \
     } while (0)
 

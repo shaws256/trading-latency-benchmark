@@ -77,9 +77,9 @@ bool PacketReplicator::Destination::operator<(const Destination& other) const {
 }
 
 // PacketReplicator implementation
-PacketReplicator::PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort)
+PacketReplicator::PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort, int numQueues)
     : listen_interface_(interface), listen_ip_(listenIp), listen_port_(listenPort),
-      num_queues_(4), gre_mode_(false),
+      num_queues_(numQueues), gre_mode_(false),
       control_socket_(-1), output_socket_(-1),
       ctrl_multicast_port_(0), producer_port_(0),
       ctrl_multicast_socket_(-1), ctrl_forward_socket_(-1),
@@ -505,13 +505,19 @@ void PacketReplicator::addDestination(const std::string& ipAddress, uint16_t por
     // ARP trigger and MAC lookup happen outside the lock: triggerArpResolution sleeps
     // 100ms and getDestinationMac reads /proc/net/arp — both unacceptable inside the
     // mutex that the packet-processing hot path acquires via getCachedGroupDestinations().
-    triggerArpResolution(ipAddress);
-
     Destination dest(ipAddress, port);
-    if (!getDestinationMac(ipAddress, dest.mac)) {
-        std::cerr << "Warning: ARP not resolved for " << ipAddress
-                  << " — using broadcast MAC until next addDestination call" << std::endl;
-        // dest.mac already set to 0xFF:FF:FF:FF:FF:FF in constructor
+
+    // Resolve MAC with retries. A benchmark measurement with a broadcast-MAC
+    // destination is silently invalid, so reject rather than continue.
+    bool resolved = false;
+    for (int attempt = 0; attempt < 3 && !resolved; ++attempt) {
+        triggerArpResolution(ipAddress);
+        if (getDestinationMac(ipAddress, dest.mac))
+            resolved = true;
+    }
+    if (!resolved) {
+        throw std::runtime_error("Failed to resolve MAC for " + ipAddress +
+                                 " after 3 attempts - refusing to add destination");
     }
 
     std::lock_guard<std::mutex> lock(destinations_mutex_);

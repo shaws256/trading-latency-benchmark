@@ -152,7 +152,7 @@ int unicast_filter(struct xdp_md *ctx)
     __u8 matched = 0;
     #pragma unroll
     for (int _idx = 0; _idx < MAX_GROUPS; _idx++) {
-        if (!matched) {
+    if (!matched) {
             __u32 _k = (__u32)_idx;
             struct unicast_config *cfg = bpf_map_lookup_elem(&config_map, &_k);
             if (!cfg || cfg->target_ip == 0)
@@ -170,5 +170,6 @@ int unicast_filter(struct xdp_md *ctx)
     // between loadXdpProgram and registerXskMap), packets fall through to the kernel
     // stack rather than being silently dropped.  This also avoids the extra
     // bpf_map_lookup_elem that the old explicit-check pattern incurred per packet.
+    increment_counter(3);  // matched + redirecting
     return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS);
 }

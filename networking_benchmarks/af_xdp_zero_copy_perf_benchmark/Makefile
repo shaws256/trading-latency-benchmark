@@ -2,7 +2,7 @@ CXX = g++
 # HFT OPTIMIZED COMPILATION FLAGS
 CXXFLAGS = -std=c++17 -Wall -Wextra -O3 -march=native -mtune=native
 CXXFLAGS += -flto -g
-CXXFLAGS += -DNDEBUG -ffast-math -funroll-loops
+CXXFLAGS += -DNDEBUG -funroll-loops -MMD -MP
 CXXFLAGS += -msse4.2 -mavx2 -mfma  # Enable SIMD instructions for maximum performance
 CXXFLAGS += -fno-stack-protector  # Remove stack protection overhead for HFT
 CXXFLAGS += -fomit-frame-pointer  # Optimize register usage
@@ -16,7 +16,7 @@ SOURCES = AFXDPSocket.cpp NetworkInterfaceConfigurator.cpp PacketReplicator.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 
 # Executables and XDP programs
-TARGETS = packet_replicator control_client test_client market_data_provider_client
+TARGETS = packet_replicator control_client test_client market_data_provider_client latency_client
 XDP_PROGRAMS = unicast_filter.o gre_filter.o
 
 # Default target
@@ -42,6 +42,10 @@ test_client: TestClient.o
 market_data_provider_client: MarketDataProviderClient.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+# Latency Client (lock-free timing, kernel timestamps, busy-poll)
+latency_client: latency_client.o
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
 # XDP Programs (BPF bytecode)
 unicast_filter.o: unicast_filter.c
 	clang -O2 -g -Wall -target bpf -c $< -o $@
@@ -51,7 +55,7 @@ gre_filter.o: gre_filter.c
 
 # Clean
 clean:
-	rm -f *.o $(TARGETS) multicast_converter_demo multi_queue_demo $(XDP_PROGRAMS)
+	rm -f *.o *.d $(TARGETS) $(XDP_PROGRAMS)
 
 # Install dependencies
 install-deps:
@@ -144,3 +148,5 @@ help:
 	@echo "  Terminal 3: ./test_client 192.168.1.100 8080"
 
 .PHONY: all clean install-deps install-runtime check-deps help
+
+-include $(wildcard *.d)

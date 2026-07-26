@@ -1,0 +1,558 @@
+/*
+ * latency_client - High-precision RTT measurement client for the AF_XDP benchmark.
+ *
+ * Measures round-trip latency through the packet replicator with minimal
+ * measurement overhead. Timestamps are taken as close to the wire as possible:
+ *
+ *   TX side: invariant TSC (rdtsc), calibrated against CLOCK_MONOTONIC at startup.
+ *            ENA does not support TX hardware timestamps - TSC is the best available.
+ *
+ *   RX side (descending priority, auto-detected at startup):
+ *     1. Nitro timestamping engine / ENA PHC hardware timestamp (SO_TIMESTAMPING
+ *        with SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_RAW_HARDWARE)
+ *     2. Kernel software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE)
+ *     3. Userspace steady_clock (fallback if neither is available)
+ *
+ * Design:
+ *   - Lock-free preallocated slot array indexed by sequence ID (no map, no mutex)
+ *   - Busy-poll receive with SO_BUSY_POLL (no poll()/select() wakeup jitter)
+ *   - CPU pinning for send and receive threads
+ *   - In-process control subscription (no system() to external binary)
+ *   - Warmup phase excluded from statistics
+ *   - Coordinated omission tracking (intended vs actual send time)
+ *   - Pacing via clock_nanosleep(TIMER_ABSTIME)
+ *
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: MIT-0
+ */
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <numeric>
+#include <cstring>
+#include <cstdint>
+#include <cstdio>
+#include <atomic>
+#include <thread>
+#include <chrono>
+
+#include <unistd.h>
+#include <signal.h>
+#include <sched.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <linux/net_tstamp.h>
+#include <linux/sockios.h>
+#include <linux/ethtool.h>
+#include <net/if.h>
+#include <immintrin.h>  // _mm_pause for busy-poll spin
+
+// ---------------------------------------------------------------------------
+// TSC calibration
+// ---------------------------------------------------------------------------
+static inline uint64_t rdtsc() {
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+struct TscCalibration {
+    double ns_per_tick;  // multiply tsc delta by this to get nanoseconds
+
+    void calibrate() {
+        // Warm up
+        rdtsc();
+        struct timespec ts1, ts2;
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        uint64_t tsc1 = rdtsc();
+        // Spin ~50ms
+        struct timespec delay = {0, 50000000};
+        clock_nanosleep(CLOCK_MONOTONIC, 0, &delay, nullptr);
+        uint64_t tsc2 = rdtsc();
+        clock_gettime(CLOCK_MONOTONIC, &ts2);
+
+        int64_t elapsed_ns = (ts2.tv_sec - ts1.tv_sec) * 1000000000LL +
+                             (ts2.tv_nsec - ts1.tv_nsec);
+        uint64_t tsc_delta = tsc2 - tsc1;
+        ns_per_tick = static_cast<double>(elapsed_ns) / static_cast<double>(tsc_delta);
+    }
+
+    int64_t tsc_to_ns(uint64_t tsc_val) const {
+        return static_cast<int64_t>(static_cast<double>(tsc_val) * ns_per_tick);
+    }
+};
+
+static TscCalibration g_tsc;
+
+// ---------------------------------------------------------------------------
+// Timestamp source detection and RX timestamping
+// ---------------------------------------------------------------------------
+enum class RxTimestampMode { HW_PHC, SW_KERNEL, USERSPACE };
+
+static RxTimestampMode detect_timestamp_mode(int sock_fd) {
+    // For RTT measurement, we need send and receive timestamps in the SAME clock domain.
+    // ENA's Nitro PHC hardware timestamps use a wall-clock epoch (like CLOCK_REALTIME),
+    // while our send timestamp uses CLOCK_MONOTONIC. Mixing them produces invalid RTTs.
+    //
+    // Priority for RTT measurement:
+    //   1. Kernel software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE) - uses
+    //      CLOCK_MONOTONIC, taken at driver interrupt (before socket buffer queue).
+    //      This removes poll()/schedule jitter while staying in the same clock domain.
+    //   2. Userspace fallback (steady_clock after recvmsg returns).
+    //
+    // NOTE: For one-way latency (with clock sync), HW PHC timestamps would be used.
+    // For RTT, kernel SW is the correct choice on ENA.
+
+    int sw_flags = SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_SOFTWARE;
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_TIMESTAMPING, &sw_flags, sizeof(sw_flags)) == 0) {
+        // Also enable the older SO_TIMESTAMP as a belt-and-suspenders (some kernels
+        // only populate SCM_TIMESTAMP, not SCM_TIMESTAMPING, for UDP)
+        int one = 1;
+        setsockopt(sock_fd, SOL_SOCKET, SO_TIMESTAMP, &one, sizeof(one));
+        std::cout << "Timestamp mode: kernel software RX (CLOCK_MONOTONIC, taken at NIC interrupt)"
+                  << std::endl;
+        return RxTimestampMode::SW_KERNEL;
+    }
+
+    std::cout << "Timestamp mode: userspace fallback (steady_clock)" << std::endl;
+    return RxTimestampMode::USERSPACE;
+}
+
+// Extract RX timestamp from cmsg ancillary data (handles both new and old API)
+static int64_t extract_rx_timestamp_ns(struct msghdr* msg) {
+    for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+        // New API: SO_TIMESTAMPING -> array of 3 timespecs [SW, deprecated, HW]
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SO_TIMESTAMPING) {
+            struct timespec* ts = reinterpret_cast<struct timespec*>(CMSG_DATA(cmsg));
+            // Prefer HW (index 2), fall back to SW (index 0)
+            if (ts[2].tv_sec != 0 || ts[2].tv_nsec != 0) {
+                return ts[2].tv_sec * 1000000000LL + ts[2].tv_nsec;
+            }
+            if (ts[0].tv_sec != 0 || ts[0].tv_nsec != 0) {
+                return ts[0].tv_sec * 1000000000LL + ts[0].tv_nsec;
+            }
+        }
+        // Old API: SO_TIMESTAMP -> struct timeval (microsecond precision, CLOCK_REALTIME-ish)
+        // We convert to ns. Note: this is wall-clock, but for short RTTs the mono/wall
+        // delta is negligible (no NTP step during a 10-second run).
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_TIMESTAMP) {
+            struct timeval* tv = reinterpret_cast<struct timeval*>(CMSG_DATA(cmsg));
+            return tv->tv_sec * 1000000000LL + tv->tv_usec * 1000LL;
+        }
+    }
+    return -1;  // No timestamp found
+}
+
+// ---------------------------------------------------------------------------
+// Lock-free timing slots
+// ---------------------------------------------------------------------------
+struct alignas(64) TimingSlot {
+    uint64_t send_tsc;            // TSC at actual send (for TSC-only mode)
+    int64_t  send_monotonic_ns;   // CLOCK_MONOTONIC at send (for HW PHC RTT)
+    uint64_t intended_send_ns;    // intended send time (for coordinated omission)
+    int64_t  recv_ns;             // RX timestamp (ns, from HW/SW/userspace)
+    uint8_t  received;            // 1 if response arrived
+};
+
+// ---------------------------------------------------------------------------
+// Message encoding (wire-compatible with the existing market_data_provider_client)
+// ---------------------------------------------------------------------------
+static constexpr size_t TRADE_ID_OFFSET = 38;
+static constexpr size_t TRADE_ID_DIGITS = 10;
+
+static const char* MSG_TEMPLATE =
+    R"({"e":"trade","E":1234567890123,"s":"BTC-USDT","t":0000000000,"p":"45000","q":"1.5","b":1000000001,"a":1000000002,"T":1234567890000,"S":"1","X":"MARKET"})";
+static size_t MSG_LEN = 0;  // set at init
+
+static void encode_message(char* buf, uint64_t seq_id) {
+    memcpy(buf, MSG_TEMPLATE, MSG_LEN);
+    char* pos = buf + TRADE_ID_OFFSET;
+    for (int i = TRADE_ID_DIGITS - 1; i >= 0; --i) {
+        pos[i] = '0' + (seq_id % 10);
+        seq_id /= 10;
+    }
+}
+
+static uint64_t decode_seq_id(const char* buf, size_t len) {
+    if (len < TRADE_ID_OFFSET + TRADE_ID_DIGITS) return 0;
+    uint64_t id = 0;
+    const char* pos = buf + TRADE_ID_OFFSET;
+    for (size_t i = 0; i < TRADE_ID_DIGITS; ++i) {
+        if (pos[i] < '0' || pos[i] > '9') return 0;
+        id = id * 10 + (pos[i] - '0');
+    }
+    return id;
+}
+
+// ---------------------------------------------------------------------------
+// Control protocol (in-process, no external binary)
+// ---------------------------------------------------------------------------
+static bool subscribe_to_replicator(const char* replicator_ip, [[maybe_unused]] uint16_t replicator_port,
+                                    const char* local_ip, uint16_t local_port) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return false;
+
+    // Set receive timeout for response
+    struct timeval tv = {2, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in server = {};
+    server.sin_family = AF_INET;
+    server.sin_port = htons(12345);  // control port
+    inet_pton(AF_INET, replicator_ip, &server.sin_addr);
+
+    // Wire format: [1=ADD][4B IP network order][2B port network order]
+    uint8_t msg[7];
+    msg[0] = 1;  // CTRL_ADD_DESTINATION
+    inet_pton(AF_INET, local_ip, &msg[1]);
+    uint16_t port_net = htons(local_port);
+    memcpy(&msg[5], &port_net, 2);
+
+    ssize_t sent = sendto(fd, msg, 7, 0, (struct sockaddr*)&server, sizeof(server));
+    if (sent != 7) { close(fd); return false; }
+
+    // Wait for ACK
+    uint8_t ack = 0;
+    ssize_t r = recv(fd, &ack, 1, 0);
+    close(fd);
+
+    if (r == 1 && ack == 1) {
+        std::cout << "Subscribed to replicator at " << replicator_ip << ":9000" << std::endl;
+        return true;
+    }
+
+    // Retry once
+    std::cerr << "Subscription failed (ack=" << (int)ack << "), retrying..." << std::endl;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    sent = sendto(fd, msg, 7, 0, (struct sockaddr*)&server, sizeof(server));
+    if (sent == 7) { r = recv(fd, &ack, 1, 0); }
+    close(fd);
+    return (r == 1 && ack == 1);
+}
+
+// ---------------------------------------------------------------------------
+// CPU pinning
+// ---------------------------------------------------------------------------
+static void pin_to_cpu(int cpu) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    if (sched_setaffinity(0, sizeof(set), &set) == 0) {
+        std::cout << "  pinned to CPU " << cpu << std::endl;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global state
+// ---------------------------------------------------------------------------
+static volatile bool g_running = true;
+static void sig_handler(int) { g_running = false; }
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[]) {
+    if (argc < 7 || argc > 10) {
+        std::cerr << "Usage: " << argv[0]
+                  << " <replicator_ip> <replicator_port> <local_ip> <local_port>"
+                  << " <total_messages> <rate_per_sec>"
+                  << " [warmup=10000] [send_cpu=1] [recv_cpu=2]" << std::endl;
+        return 1;
+    }
+
+    const char* replicator_ip = argv[1];
+    uint16_t    replicator_port = static_cast<uint16_t>(atoi(argv[2]));
+    const char* local_ip = argv[3];
+    uint16_t    local_port = static_cast<uint16_t>(atoi(argv[4]));
+    uint64_t    total_msgs = strtoull(argv[5], nullptr, 10);
+    uint64_t    rate_per_sec = strtoull(argv[6], nullptr, 10);
+    uint64_t    warmup = (argc > 7) ? strtoull(argv[7], nullptr, 10) : 10000;
+    int         send_cpu = (argc > 8) ? atoi(argv[8]) : 1;
+    int         recv_cpu = (argc > 9) ? atoi(argv[9]) : 2;
+
+    if (total_msgs == 0 || rate_per_sec == 0) {
+        std::cerr << "total_messages and rate must be positive" << std::endl;
+        return 1;
+    }
+
+    signal(SIGINT, sig_handler);
+    signal(SIGTERM, sig_handler);
+
+    // Initialize message template length
+    MSG_LEN = strlen(MSG_TEMPLATE);
+
+    // Calibrate TSC
+    std::cout << "Calibrating TSC..." << std::endl;
+    g_tsc.calibrate();
+    std::cout << "  TSC: " << g_tsc.ns_per_tick << " ns/tick" << std::endl;
+
+    // Allocate timing slots (warmup + measured messages)
+    uint64_t slot_count = warmup + total_msgs;
+    std::vector<TimingSlot> slots(slot_count);
+    memset(slots.data(), 0, slot_count * sizeof(TimingSlot));
+
+    // Create and bind receive socket
+    int recv_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (recv_fd < 0) { perror("socket"); return 1; }
+
+    // Enable busy poll (reduces wakeup jitter by ~10-30us)
+    int busy_poll_us = 50;  // poll NIC for 50us before sleeping
+    setsockopt(recv_fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll_us, sizeof(busy_poll_us));
+
+    // Increase receive buffer
+    int rcvbuf = 4 * 1024 * 1024;
+    setsockopt(recv_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+    struct sockaddr_in bind_addr = {};
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_port = htons(local_port);
+    inet_pton(AF_INET, local_ip, &bind_addr.sin_addr);
+    if (bind(recv_fd, (struct sockaddr*)&bind_addr, sizeof(bind_addr)) < 0) {
+        perror("bind"); close(recv_fd); return 1;
+    }
+
+    // Detect and configure RX timestamp mode
+    RxTimestampMode ts_mode = detect_timestamp_mode(recv_fd);
+
+    // Subscribe to the replicator
+    if (!subscribe_to_replicator(replicator_ip, replicator_port, local_ip, local_port)) {
+        std::cerr << "Failed to subscribe to replicator" << std::endl;
+        close(recv_fd); return 1;
+    }
+
+    // Create send socket
+    int send_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (send_fd < 0) { perror("send socket"); close(recv_fd); return 1; }
+
+    struct sockaddr_in dest_addr = {};
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(replicator_port);
+    inet_pton(AF_INET, replicator_ip, &dest_addr.sin_addr);
+
+    // --- Receiver thread ---
+    std::atomic<uint64_t> total_received{0};
+    std::atomic<bool> recv_started{false};
+
+    std::thread receiver([&]() {
+        pin_to_cpu(recv_cpu);
+        recv_started.store(true);
+
+        char buf[2048];
+        char ctrl[256];
+        struct iovec iov = { buf, sizeof(buf) };
+        struct msghdr msg = {};
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = ctrl;
+        msg.msg_controllen = sizeof(ctrl);
+
+        while (g_running) {
+            msg.msg_controllen = sizeof(ctrl);  // reset each iteration
+            ssize_t n = recvmsg(recv_fd, &msg, MSG_DONTWAIT);
+            if (n <= 0) {
+                _mm_pause();
+                continue;
+            }
+
+            // Get RX timestamp
+            int64_t rx_ns;
+            if (ts_mode == RxTimestampMode::USERSPACE) {
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                rx_ns = now.tv_sec * 1000000000LL + now.tv_nsec;
+            } else {
+                rx_ns = extract_rx_timestamp_ns(&msg);
+                if (rx_ns < 0) {
+                    // Fallback to userspace if cmsg missing
+                    struct timespec now;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    rx_ns = now.tv_sec * 1000000000LL + now.tv_nsec;
+                }
+            }
+
+            uint64_t seq = decode_seq_id(buf, n);
+            if (seq > 0 && seq <= slot_count) {
+                slots[seq - 1].recv_ns = rx_ns;
+                slots[seq - 1].received = 1;
+                total_received.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    // Wait for receiver to start
+    while (!recv_started.load()) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // --- Sender ---
+    std::cout << "Running: " << total_msgs << " messages + " << warmup << " warmup @ "
+              << rate_per_sec << " msg/sec" << std::endl;
+    std::cout << "  send_cpu=" << send_cpu << " recv_cpu=" << recv_cpu << std::endl;
+
+    pin_to_cpu(send_cpu);
+
+    char msg_buf[512];
+    uint64_t interval_ns = 1000000000ULL / rate_per_sec;
+
+    struct timespec start_ts;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+    uint64_t start_ns = start_ts.tv_sec * 1000000000ULL + start_ts.tv_nsec;
+
+    for (uint64_t i = 1; i <= slot_count && g_running; ++i) {
+        uint64_t intended_ns = start_ns + (i - 1) * interval_ns;
+
+        // Pace via absolute deadline
+        struct timespec deadline;
+        deadline.tv_sec = intended_ns / 1000000000ULL;
+        deadline.tv_nsec = intended_ns % 1000000000ULL;
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
+
+        // Encode and send
+        encode_message(msg_buf, i);
+
+        // TX timestamp: use CLOCK_REALTIME to match the receive-side kernel timestamp
+        // (SO_TIMESTAMP/SCM_TIMESTAMP reports in wall-clock time). For short benchmark
+        // runs (<60s), NTP steering is negligible and the RTT is accurate.
+        uint64_t send_tsc = rdtsc();
+        struct timespec send_ts;
+        clock_gettime(CLOCK_REALTIME, &send_ts);
+
+        sendto(send_fd, msg_buf, MSG_LEN, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+
+        // Record both TSC and monotonic - use monotonic for HW PHC comparison
+        slots[i - 1].send_tsc = send_tsc;
+        slots[i - 1].send_monotonic_ns = send_ts.tv_sec * 1000000000LL + send_ts.tv_nsec;
+        slots[i - 1].intended_send_ns = intended_ns;
+
+        // Progress every 10K
+        if (i % 10000 == 0) {
+            std::cout << "  sent " << i << "/" << slot_count
+                      << " (received=" << total_received.load() << ")" << std::endl;
+        }
+    }
+
+    // Wait for stragglers (up to 3 seconds)
+    std::cout << "Sending complete. Waiting for responses..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    g_running = false;
+    receiver.join();
+    close(send_fd);
+    close(recv_fd);
+
+    // --- Compute statistics (skip warmup) ---
+    std::vector<int64_t> service_rtts;   // recv_ns - send_monotonic_ns (same clock domain)
+    std::vector<int64_t> response_rtts;  // recv_ns - intended_send_ns (coordinated omission)
+    uint64_t lost = 0;
+
+    for (uint64_t i = warmup; i < slot_count; ++i) {
+        if (!slots[i].received) { ++lost; continue; }
+
+        // RTT = recv timestamp - send timestamp (both in CLOCK_MONOTONIC domain
+        // when using Nitro PHC, since EC2's PHC is synced to system clock)
+        int64_t rtt = slots[i].recv_ns - slots[i].send_monotonic_ns;
+        if (rtt > 0 && rtt < 100000000) {  // sanity: 0 < RTT < 100ms
+            service_rtts.push_back(rtt);
+        }
+
+        int64_t resp_rtt = slots[i].recv_ns - static_cast<int64_t>(slots[i].intended_send_ns);
+        if (resp_rtt > 0 && resp_rtt < 100000000) {
+            response_rtts.push_back(resp_rtt);
+        }
+    }
+
+    // Sort for percentiles
+    std::sort(service_rtts.begin(), service_rtts.end());
+    std::sort(response_rtts.begin(), response_rtts.end());
+
+    auto percentile = [](const std::vector<int64_t>& v, double p) -> int64_t {
+        if (v.empty()) return 0;
+        size_t idx = std::min(v.size() - 1, static_cast<size_t>(v.size() * p / 100.0));
+        return v[idx];
+    };
+
+    auto mean = [](const std::vector<int64_t>& v) -> double {
+        if (v.empty()) return 0;
+        return static_cast<double>(std::accumulate(v.begin(), v.end(), 0LL)) / v.size();
+    };
+
+    // --- Print results ---
+    uint64_t measured = total_msgs;
+    std::cout << "\n=== RTT Latency Results  ===" << std::endl;
+    std::cout << "Messages: " << measured << " measured (+ " << warmup << " warmup)" << std::endl;
+    std::cout << "Rate: " << rate_per_sec << " msg/sec" << std::endl;
+    std::cout << "Lost: " << lost << " (" << (100.0 * lost / measured) << "%)" << std::endl;
+    std::cout << "Timestamp mode: "
+              << (ts_mode == RxTimestampMode::HW_PHC ? "Nitro PHC (hardware)" :
+                  ts_mode == RxTimestampMode::SW_KERNEL ? "kernel software" : "userspace")
+              << std::endl;
+    std::cout << "TX timestamp: TSC (calibrated, " << g_tsc.ns_per_tick << " ns/tick)" << std::endl;
+
+    if (!service_rtts.empty()) {
+        std::cout << "\nService-time RTT (recv - actual_send):" << std::endl;
+        std::cout << "  Min:    " << service_rtts.front() / 1000 << " us" << std::endl;
+        std::cout << "  Mean:   " << static_cast<int64_t>(mean(service_rtts) / 1000) << " us" << std::endl;
+        std::cout << "  p50:    " << percentile(service_rtts, 50) / 1000 << " us" << std::endl;
+        std::cout << "  p90:    " << percentile(service_rtts, 90) / 1000 << " us" << std::endl;
+        std::cout << "  p95:    " << percentile(service_rtts, 95) / 1000 << " us" << std::endl;
+        std::cout << "  p99:    " << percentile(service_rtts, 99) / 1000 << " us" << std::endl;
+        std::cout << "  p99.9:  " << percentile(service_rtts, 99.9) / 1000 << " us" << std::endl;
+        std::cout << "  Max:    " << service_rtts.back() / 1000 << " us" << std::endl;
+    }
+
+    if (!response_rtts.empty()) {
+        std::cout << "\nResponse-time RTT (recv - intended_send, incl. coordinated omission):" << std::endl;
+        std::cout << "  p50:    " << percentile(response_rtts, 50) / 1000 << " us" << std::endl;
+        std::cout << "  p99:    " << percentile(response_rtts, 99) / 1000 << " us" << std::endl;
+        std::cout << "  p99.9:  " << percentile(response_rtts, 99.9) / 1000 << " us" << std::endl;
+    }
+
+    std::cout << "====================================================" << std::endl;
+
+    // --- Write JSON summary ---
+    std::string json_file = "/tmp/latency_client_results.json";
+    FILE* jf = fopen(json_file.c_str(), "w");
+    if (jf) {
+        fprintf(jf, "{\n");
+        fprintf(jf, "  \"client\": \"latency_client\",\n");
+        fprintf(jf, "  \"messages\": %lu,\n", measured);
+        fprintf(jf, "  \"warmup\": %lu,\n", warmup);
+        fprintf(jf, "  \"rate_mps\": %lu,\n", rate_per_sec);
+        fprintf(jf, "  \"lost\": %lu,\n", lost);
+        fprintf(jf, "  \"loss_pct\": %.4f,\n", 100.0 * lost / measured);
+        fprintf(jf, "  \"timestamp_rx\": \"%s\",\n",
+                ts_mode == RxTimestampMode::HW_PHC ? "nitro_phc_hw" :
+                ts_mode == RxTimestampMode::SW_KERNEL ? "kernel_sw" : "userspace");
+        fprintf(jf, "  \"timestamp_tx\": \"tsc\",\n");
+        fprintf(jf, "  \"tsc_ns_per_tick\": %.6f,\n", g_tsc.ns_per_tick);
+        if (!service_rtts.empty()) {
+            fprintf(jf, "  \"service_rtt_us\": {\n");
+            fprintf(jf, "    \"min\": %ld,\n", service_rtts.front() / 1000);
+            fprintf(jf, "    \"mean\": %ld,\n", static_cast<int64_t>(mean(service_rtts) / 1000));
+            fprintf(jf, "    \"p50\": %ld,\n", percentile(service_rtts, 50) / 1000);
+            fprintf(jf, "    \"p90\": %ld,\n", percentile(service_rtts, 90) / 1000);
+            fprintf(jf, "    \"p95\": %ld,\n", percentile(service_rtts, 95) / 1000);
+            fprintf(jf, "    \"p99\": %ld,\n", percentile(service_rtts, 99) / 1000);
+            fprintf(jf, "    \"p999\": %ld,\n", percentile(service_rtts, 99.9) / 1000);
+            fprintf(jf, "    \"max\": %ld\n", service_rtts.back() / 1000);
+            fprintf(jf, "  },\n");
+        }
+        if (!response_rtts.empty()) {
+            fprintf(jf, "  \"response_rtt_us\": {\n");
+            fprintf(jf, "    \"p50\": %ld,\n", percentile(response_rtts, 50) / 1000);
+            fprintf(jf, "    \"p99\": %ld,\n", percentile(response_rtts, 99) / 1000);
+            fprintf(jf, "    \"p999\": %ld\n", percentile(response_rtts, 99.9) / 1000);
+            fprintf(jf, "  }\n");
+        }
+        fprintf(jf, "}\n");
+        fclose(jf);
+        std::cout << "\nJSON results written to " << json_file << std::endl;
+    }
+
+    return (lost > measured / 10) ? 1 : 0;  // exit 1 if >10% loss
+}

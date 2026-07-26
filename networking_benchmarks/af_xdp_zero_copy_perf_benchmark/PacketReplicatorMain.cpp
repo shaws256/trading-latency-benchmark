@@ -102,6 +102,7 @@ int main(int argc, char* argv[]) {
     uint16_t    ctrl_port = 0;
     std::string producer_ip;
     uint16_t    producer_port = 0;
+    int         num_queues = 4;
 
     for (int i = 4; i < argc; ++i) {
         std::string arg = argv[i];
@@ -117,6 +118,12 @@ int main(int argc, char* argv[]) {
             }
             ctrl_group = val.substr(0, colon);
             ctrl_port  = static_cast<uint16_t>(std::stoi(val.substr(colon + 1)));
+        } else if (arg == "--queues" && i + 1 < argc) {
+            num_queues = std::stoi(argv[++i]);
+            if (num_queues < 1 || num_queues > 8) {
+                std::cerr << "Error: --queues must be 1-8" << std::endl;
+                return 1;
+            }
         } else if (arg == "--producer" && i + 1 < argc) {
             // Format: <ip>:<port>
             std::string val = argv[++i];
@@ -155,7 +162,7 @@ int main(int argc, char* argv[]) {
 
     try {
         // Create and initialize the replicator
-        g_replicator = std::make_unique<PacketReplicator>(interface, listen_ip, listen_port);
+        g_replicator = std::make_unique<PacketReplicator>(interface, listen_ip, listen_port, num_queues);
 
         if (use_gre) {
             g_replicator->setGREMode(true);

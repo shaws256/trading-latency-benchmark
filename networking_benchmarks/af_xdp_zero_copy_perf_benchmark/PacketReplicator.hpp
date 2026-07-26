@@ -151,7 +151,7 @@ public:
      * @param listenPort Port to listen on
      * @throws std::runtime_error If initialization fails
      */
-    PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort);
+    PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort, int numQueues = 4);
 
     /**
      * Destructor
