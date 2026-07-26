@@ -15,40 +15,62 @@ import {
 } from 'aws-cdk-lib/aws-ec2';
 import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 
+/** A single entry in the heterogeneous fleet specification. */
+export interface FleetEntry {
+  /** EC2 instance type, e.g. "c7i.4xlarge" */
+  type: string;
+  /** Number of instances of this type. Default: 1 */
+  count?: number;
+}
+
 export interface SingleRegionStackProps extends cdk.StackProps {
   /** SSH key pair name (must exist in the target region) */
   keyPairName: string;
-  /** EC2 instance type for all three nodes. Default: c7i.4xlarge */
+
+  // ── Simple mode (backward-compatible) ───────────────────────────────────
+  /** EC2 instance type for all nodes. Default: c7i.4xlarge. Ignored if fleet is set. */
   instanceType?: string;
   /** Custom AMI ID. Default: latest Amazon Linux 2023 */
   amiId?: string;
-  /** Number of subscriber instances. Default: 1 */
+  /** Number of subscriber instances. Default: 1. Ignored if fleet is set. */
   subscriberCount?: number;
+
+  // ── Fleet mode (new — for matrix/heterogeneous deployments) ─────────────
+  /**
+   * Heterogeneous fleet specification. When provided, overrides instanceType
+   * and subscriberCount. All nodes are peers (no exchange/feeder/subscriber
+   * role distinction). Mixing instance families forces ZPM to place on
+   * different host platforms → different racks → reveals intra-CPG variance.
+   *
+   * Example: [{"type":"c7i.4xlarge","count":2},{"type":"c6in.4xlarge","count":2}]
+   */
+  fleet?: FleetEntry[];
 }
 
 /**
- * Deploys three EC2 instances (exchange, feeder, subscriber) inside a single
- * Cluster Placement Group in a single-AZ public VPC.
+ * Deploys EC2 instances inside a single Cluster Placement Group in a
+ * single-AZ public VPC.
  *
- * Stack inputs: region (via env.region), keyPairName.
- * Optional:     instanceType, amiId.
+ * Two modes:
+ *   1. Simple (legacy): exchange + feeder + N subscribers, single instance type.
+ *   2. Fleet: arbitrary mix of instance types, all peers. Better for matrix
+ *      benchmarks and intra-CPG variability analysis.
  *
- * Deploy:
- *   cd deployment/af_xdp/cdk
- *   npm ci
- *   cdk deploy --context keyPairName=my-key --context region=eu-west-2
+ * Deploy (simple):
+ *   cdk deploy --context keyPairName=my-key --context instanceType=c7i.4xlarge
+ *
+ * Deploy (fleet):
+ *   cdk deploy --context keyPairName=my-key \
+ *     --context fleet='[{"type":"c7i.4xlarge","count":2},{"type":"c6in.4xlarge","count":2}]'
  */
 export class SingleRegionStack extends cdk.Stack {
   constructor(scope: cdk.App, id: string, props: SingleRegionStackProps) {
     super(scope, id, props);
 
-    const instanceTypeStr  = props.instanceType   ?? 'c7i.4xlarge';
-    const subscriberCount  = props.subscriberCount ?? 1;
     // Use first AZ of the deployed region — avoids hardcoding a region-specific AZ.
     const az = this.availabilityZones[0];
 
     // ── VPC ──────────────────────────────────────────────────────────────────
-    // Single public subnet, no NAT — all instances get public IPs directly.
     const vpc = new Vpc(this, 'Vpc', {
       natGateways: 0,
       availabilityZones: [az],
@@ -100,14 +122,13 @@ export class SingleRegionStack extends cdk.Stack {
       : MachineImage.latestAmazonLinux2023();
 
     const keyPair = KeyPair.fromKeyPairName(this, 'KeyPair', props.keyPairName);
-    const instanceType = new InstanceType(instanceTypeStr);
     const vpcSubnets = { availabilityZones: [az] };
 
-    // ── Instances ─────────────────────────────────────────────────────────────
-    const mkInstance = (id: string, name: string, role: string) => {
+    // ── Helper: create an instance ────────────────────────────────────────────
+    const mkInstance = (id: string, name: string, role: string, instType: string) => {
       const inst = new Instance(this, id, {
         vpc,
-        instanceType,
+        instanceType: new InstanceType(instType),
         machineImage: ami,
         securityGroup: sg,
         vpcSubnets,
@@ -119,27 +140,66 @@ export class SingleRegionStack extends cdk.Stack {
       (inst.node.defaultChild as cdk.aws_ec2.CfnInstance).placementGroupName = pg.ref;
       Tags.of(inst).add('Name', name);
       Tags.of(inst).add('Role', role);
+      Tags.of(inst).add('InstanceType', instType);
       Tags.of(inst).add('PlacementGroup', pg.ref);
       return inst;
     };
 
     const addOutputs = (inst: Instance, prefix: string, description: string) => {
-      new cdk.CfnOutput(this, `${prefix}InstanceId`, { value: inst.instanceId,   description: `${description} instance ID` });
-      new cdk.CfnOutput(this, `${prefix}PublicIp`,   { value: inst.instancePublicIp,  description: `${description} public IP` });
-      new cdk.CfnOutput(this, `${prefix}PrivateIp`,  { value: inst.instancePrivateIp, description: `${description} private IP` });
+      new cdk.CfnOutput(this, `${prefix}InstanceId`, { value: inst.instanceId,        description: `${description} instance ID` });
+      new cdk.CfnOutput(this, `${prefix}PublicIp`,   { value: inst.instancePublicIp,   description: `${description} public IP` });
+      new cdk.CfnOutput(this, `${prefix}PrivateIp`,  { value: inst.instancePrivateIp,  description: `${description} private IP` });
     };
 
-    addOutputs(mkInstance('ExchangeInstance', 'Trading-Exchange', 'exchange'), 'Exchange', 'Exchange');
-    addOutputs(mkInstance('FeederInstance',   'Trading-Feeder',   'feeder'),   'Feeder',   'Feeder');
+    // ── Deploy instances ──────────────────────────────────────────────────────
+    if (props.fleet && props.fleet.length > 0) {
+      // Fleet mode: all nodes are peers, heterogeneous types
+      let globalIndex = 0;
+      const fleetManifest: { index: number; instanceType: string; outputPrefix: string }[] = [];
 
-    for (let i = 1; i <= subscriberCount; i++) {
-      addOutputs(
-        mkInstance(`Subscriber${i}Instance`, `Trading-Subscriber-${i}`, 'subscriber'),
-        `Subscriber${i}`,
-        `Subscriber ${i}`,
-      );
+      for (const entry of props.fleet) {
+        const count = entry.count ?? 1;
+        for (let i = 0; i < count; i++) {
+          const shortType = entry.type.replace('.', '-');
+          const nodeId = `Node${globalIndex}`;
+          const nodeName = `node-${globalIndex}-${shortType}`;
+          const inst = mkInstance(nodeId, nodeName, 'matrix-node', entry.type);
+          const prefix = `Node${globalIndex}`;
+          addOutputs(inst, prefix, `Node ${globalIndex} (${entry.type})`);
+          fleetManifest.push({ index: globalIndex, instanceType: entry.type, outputPrefix: prefix });
+          globalIndex++;
+        }
+      }
+
+      // Export fleet manifest as a JSON output for scripts to consume
+      new cdk.CfnOutput(this, 'FleetManifest', {
+        value: JSON.stringify(fleetManifest),
+        description: 'JSON fleet manifest: [{index, instanceType, outputPrefix}]',
+      });
+
+      new cdk.CfnOutput(this, 'FleetSize', {
+        value: String(globalIndex),
+        description: 'Total number of instances in the fleet',
+      });
+
+    } else {
+      // Simple mode (backward-compatible): exchange + feeder + N subscribers
+      const instanceTypeStr = props.instanceType ?? 'c7i.4xlarge';
+      const subscriberCount = props.subscriberCount ?? 1;
+
+      addOutputs(mkInstance('ExchangeInstance', 'Trading-Exchange', 'exchange', instanceTypeStr), 'Exchange', 'Exchange');
+      addOutputs(mkInstance('FeederInstance',   'Trading-Feeder',   'feeder',   instanceTypeStr), 'Feeder',   'Feeder');
+
+      for (let i = 1; i <= subscriberCount; i++) {
+        addOutputs(
+          mkInstance(`Subscriber${i}Instance`, `Trading-Subscriber-${i}`, 'subscriber', instanceTypeStr),
+          `Subscriber${i}`,
+          `Subscriber ${i}`,
+        );
+      }
     }
 
+    // ── Common outputs ────────────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'PlacementGroupName', {
       value: pg.ref,
       description: 'Cluster placement group name',

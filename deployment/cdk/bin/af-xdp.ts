@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
-import { SingleRegionStack } from '../lib/af-xdp-single-region-stack';
+import { SingleRegionStack, FleetEntry } from '../lib/af-xdp-single-region-stack';
 import { SourceStack, SubscriberStack, PeeringStack } from '../lib/af-xdp-cross-region-stack';
 
 const app = new cdk.App();
@@ -79,6 +79,25 @@ switch (deploymentType.toLowerCase()) {
     const instanceType    = app.node.tryGetContext('instanceType')    || 'c7i.4xlarge';
     const amiId           = app.node.tryGetContext('amiId')           || undefined;
     const subscriberCount = app.node.tryGetContext('subscriberCount');
+    const fleetRaw        = app.node.tryGetContext('fleet');
+
+    // Parse fleet JSON if provided
+    let fleet: FleetEntry[] | undefined;
+    if (fleetRaw) {
+      try {
+        fleet = JSON.parse(fleetRaw) as FleetEntry[];
+        if (!Array.isArray(fleet) || fleet.length === 0) {
+          throw new Error('fleet must be a non-empty JSON array');
+        }
+        for (const entry of fleet) {
+          if (!entry.type || typeof entry.type !== 'string') {
+            throw new Error(`Invalid fleet entry: each must have a "type" string. Got: ${JSON.stringify(entry)}`);
+          }
+        }
+      } catch (e: any) {
+        throw new Error(`Failed to parse fleet context: ${e.message}\nExpected: '[{"type":"c7i.4xlarge","count":2},{"type":"c6in.4xlarge","count":2}]'`);
+      }
+    }
 
     new SingleRegionStack(app, 'SingleRegionStack', {
       env: { account: process.env.CDK_DEFAULT_ACCOUNT, region },
@@ -86,6 +105,7 @@ switch (deploymentType.toLowerCase()) {
       instanceType,
       amiId,
       subscriberCount: subscriberCount ? parseInt(subscriberCount, 10) : undefined,
+      fleet,
     });
     break;
   }
