@@ -128,12 +128,12 @@
     # ── PTP hardware clock ─────────────────────────────────────────────────
     - name: Make ptp.sh executable
       ansible.builtin.file:
-        path: /home/ec2-user/gre-benchmark/deployment/af_xdp/ptp.sh
+        path: /home/ec2-user/gre-benchmark/deployment/scripts/af_xdp_ptp.sh
         mode: '0755'
 
     - name: Run ptp.sh to enable ENA PTP hardware clock
       ansible.builtin.shell: |
-        /home/ec2-user/gre-benchmark/deployment/af_xdp/ptp.sh
+        /home/ec2-user/gre-benchmark/deployment/scripts/af_xdp_ptp.sh
       register: ptp_result
       changed_when: true
       # exit 2 = phc_enable was 0; modprobe config written, reboot required.

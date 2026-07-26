@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
-import { SingleRegionStack } from '../lib/single-region-stack';
-import { SourceStack, SubscriberStack, PeeringStack } from '../lib/cross-region-stack';
+import { SingleRegionStack } from '../lib/af-xdp-single-region-stack';
+import { SourceStack, SubscriberStack, PeeringStack } from '../lib/af-xdp-cross-region-stack';
 
 const app = new cdk.App();
 

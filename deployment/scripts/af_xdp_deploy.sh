@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-INVENTORY="${INVENTORY:-$SCRIPT_DIR/inventory.aws_ec2.yml}"
+INVENTORY="${INVENTORY:-$SCRIPT_DIR/../ansible/inventory/af_xdp_inventory.aws_ec2.yml}"
 
 # ── Prerequisites ──────────────────────────────────────────────────────────────
 for cmd in cdk aws ansible-playbook jq; do
@@ -124,7 +124,7 @@ else
         exit 1
     fi
     step "Deploying $STACK_NAME to $REGION..."
-    cdk deploy --all $CTX --require-approval never
+    cdk deploy --all --app "npx ts-node --prefer-ts-exts bin/af-xdp.ts" $CTX --require-approval never
 fi
 
 # ── Fetch stack outputs ────────────────────────────────────────────────────────
@@ -206,10 +206,10 @@ export AWS_DEFAULT_REGION="$REGION"
 ANSIBLE_OPTS=(-i "$INVENTORY" --ssh-extra-args '-o StrictHostKeyChecking=no')
 
 step "Feeder tuning (BPF JIT + ENA XDP queue headroom)..."
-ansible-playbook "${ANSIBLE_OPTS[@]}" -l feeder "$SCRIPT_DIR/tune_feeder.yaml"
+ansible-playbook "${ANSIBLE_OPTS[@]}" -l feeder "$SCRIPT_DIR/../ansible/af_xdp_tune_feeder.yaml"
 
 step "Provisioning nodes (xdp-tools + binaries + GRE + services)..."
-ansible-playbook "${ANSIBLE_OPTS[@]}" "$SCRIPT_DIR/configure.yaml" \
+ansible-playbook "${ANSIBLE_OPTS[@]}" "$SCRIPT_DIR/../ansible/af_xdp_configure.yaml" \
     --extra-vars "feeder_private_ip=$FEEDER_PRIVATE_IP"
 
 
