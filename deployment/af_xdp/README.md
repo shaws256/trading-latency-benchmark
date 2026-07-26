@@ -1,4 +1,4 @@
-# mcast_gre — GRE-based Market Data Distribution
+# af_xdp — GRE-based Market Data Distribution
 
 Low-latency market data fan-out across AWS VPCs using AF_XDP kernel bypass on the feeder and GRE tunnelling on the exchange. AWS VPC does not support native IP multicast routing between instances or across regions, so the system tunnels multicast traffic inside GRE unicast and fans it out in userspace.
 
@@ -330,7 +330,7 @@ comparing P50 / P99 Hop 1.
 ## Directory structure
 
 ```
-mcast_gre/
+af_xdp/
 ├── README.md                          ← this file
 ├── deploy.sh                          ← single-region CDK + Ansible deploy
 ├── configure.yaml                     ← unified provisioning: all nodes (build,

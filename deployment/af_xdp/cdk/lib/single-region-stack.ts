@@ -34,7 +34,7 @@ export interface SingleRegionStackProps extends cdk.StackProps {
  * Optional:     instanceType, amiId.
  *
  * Deploy:
- *   cd deployment/mcast_gre/cdk
+ *   cd deployment/af_xdp/cdk
  *   npm ci
  *   cdk deploy --context keyPairName=my-key --context region=eu-west-2
  */

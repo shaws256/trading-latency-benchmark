@@ -68,7 +68,7 @@
     # ── trading-latency-benchmark ──────────────────────────────────────────
     - name: Check if benchmark is already built
       ansible.builtin.stat:
-        path: /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/test_client
+        path: /home/ec2-user/trading-latency-benchmark/af_xdp/test_client
       register: bench_stat
 
     - name: Sync trading-latency-benchmark from local repo
@@ -84,7 +84,7 @@
 
     - name: Build benchmark binaries
       ansible.builtin.shell: |
-        cd /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark
+        cd /home/ec2-user/trading-latency-benchmark/af_xdp
         make all
         chown -R ec2-user:ec2-user /home/ec2-user/trading-latency-benchmark
       # when: not bench_stat.stat.exists
@@ -95,8 +95,8 @@
         path: "{{ item }}"
       register: bin_check
       loop:
-        - /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/test_client
-        - /home/ec2-user/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark/market_data_provider_client
+        - /home/ec2-user/trading-latency-benchmark/af_xdp/test_client
+        - /home/ec2-user/trading-latency-benchmark/af_xdp/market_data_provider_client
 
     - name: Fail if expected binaries are missing
       ansible.builtin.fail:
@@ -171,5 +171,5 @@
           - "Multicast route: {{ route_verify.stdout }}"
           - ""
           - "Send test traffic:"
-          - "  cd ~/trading-latency-benchmark/af_xdp_zero_copy_perf_benchmark"
+          - "  cd ~/trading-latency-benchmark/af_xdp"
           - "  ./test_client 224.0.31.50 5000 10 'trade' --iface eth0"

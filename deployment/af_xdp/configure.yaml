@@ -69,10 +69,20 @@
       ansible.builtin.shell: |
         set -e
         cd /opt/xdp-tools
+        # AL2023 gcc predates C23 - xdp-tools uses bare bool/true/false without stdbool.h
+        grep -rlZ --include='*.c' --include='*.h' \
+            -e '\bbool\b' -e '\btrue\b' -e '\bfalse\b' lib headers 2>/dev/null \
+          | while IFS= read -r -d '' f; do
+              grep -q 'stdbool.h' "$f" || sed -i '1i #include <stdbool.h>' "$f"
+            done
         ./configure
+        echo 'CFLAGS += -Wno-error' >> config.mk
         make -j$(nproc)
         make install
         ldconfig
+        # Ensure xdp-dispatcher.o is findable
+        mkdir -p /usr/lib64/bpf
+        cp -f lib/libxdp/xdp-dispatcher.o /usr/lib64/bpf/ 2>/dev/null || true
       when: not libxdp_stat.stat.exists
 
     # ── trading-latency-benchmark ──────────────────────────────────────────
@@ -88,16 +98,11 @@
     - name: Build benchmark binaries and eBPF objects
       ansible.builtin.shell: |
         set -e
-        cd /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark
-        make all
+        cd /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp
+        make full
         chown -R ec2-user:ec2-user /home/ec2-user/gre-benchmark
 
-    - name: Build latency benchmark binaries and XDP subscriber filter
-      ansible.builtin.shell: |
-        set -e
-        cd /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark
-        make all
-        chown -R ec2-user:ec2-user /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark
+    # mcast binaries now built by 'make full' above (mcast_sender, mcast_receiver)
 
     # ── Verify binaries ────────────────────────────────────────────────────
     - name: Confirm binaries exist
@@ -105,12 +110,12 @@
         path: "{{ item }}"
       register: bin_check
       loop:
-        - /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/packet_replicator
-        - /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/gre_filter.o
-        - /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/unicast_filter.o
-        - /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/receiver
-        - /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/sender
-        - /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/subscriber_filter.o
+        - /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp/packet_replicator
+        - /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp/xdp/gre_filter.o
+        - /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp/xdp/unicast_filter.o
+        - /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp/latency_client
+        - /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp/mcast_sender
+        - /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp/mcast_receiver
 
     - name: Fail if expected binaries are missing
       ansible.builtin.fail:
@@ -123,12 +128,12 @@
     # ── PTP hardware clock ─────────────────────────────────────────────────
     - name: Make ptp.sh executable
       ansible.builtin.file:
-        path: /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/ptp.sh
+        path: /home/ec2-user/gre-benchmark/deployment/af_xdp/ptp.sh
         mode: '0755'
 
     - name: Run ptp.sh to enable ENA PTP hardware clock
       ansible.builtin.shell: |
-        /home/ec2-user/gre-benchmark/deployment/mcast_gre/benchmark/ptp.sh
+        /home/ec2-user/gre-benchmark/deployment/af_xdp/ptp.sh
       register: ptp_result
       changed_when: true
       # exit 2 = phc_enable was 0; modprobe config written, reboot required.
@@ -213,8 +218,8 @@
           - "=== Node provisioning complete ==="
           - "Host: {{ inventory_hostname }}"
           - "libxdp: /usr/local/lib/libxdp.so"
-          - "packet_replicator: /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/packet_replicator"
-          - "latency tools: deployment/mcast_gre/benchmark/{receiver,sender}"
+          - "packet_replicator: /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp/packet_replicator"
+          - "latency tools: deployment/af_xdp/benchmark/{receiver,sender}"
 
 
 # ── Play 2: Exchange — GRE tunnel to feeder ───────────────────────────────────
@@ -368,7 +373,7 @@
         content: |
           #!/bin/bash
           IFACE=$(ip -4 route show default | awk '{% raw %}{print $5}{% endraw %}' | head -1)
-          exec /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/packet_replicator \
+          exec /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp/packet_replicator \
                "$IFACE" {{ mcast_group | default('224.0.31.50') }} {{ data_port | default(5000) }} --gre
 
     - name: Install packet_replicator systemd service
@@ -384,7 +389,7 @@
           [Service]
           Type=simple
           User=root
-          WorkingDirectory=/home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark
+          WorkingDirectory=/home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp
           ExecStart=/usr/local/bin/start-packet-replicator.sh
           Restart=on-failure
           RestartSec=5
@@ -459,7 +464,7 @@
 
     - name: Join multicast group via feeder control channel
       ansible.builtin.shell: >
-        /home/ec2-user/gre-benchmark/af_xdp_zero_copy_perf_benchmark/control_client
+        /home/ec2-user/gre-benchmark/networking_benchmarks/af_xdp/control_client
         {{ feeder_private_ip }} mcast {{ mcast_group }}
       register: join_result
       failed_when: join_result.rc != 0

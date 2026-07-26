@@ -50,9 +50,9 @@ export LIBXDP_OBJECT_PATH=/usr/local/lib/bpf
 make all
 ```
 
-Produced binaries: `packet_replicator`, `control_client`, `test_client`, `market_data_provider_client`, `latency_client`.
-Produced eBPF objects: `unicast_filter.o`, `gre_filter.o`.
-Scripts: `run_comparison.sh`, `generate_comparison_report.py`.
+Produced binaries (make all): `packet_replicator`, `control_client`, `test_client`, `market_data_provider_client`, `latency_client`.
+Produced binaries (make mcast): `mcast_sender`, `mcast_receiver`.
+Produced XDP objects: `xdp/unicast_filter.o` (core), `xdp/gre_filter.o` (mcast).
 
 ---
 
@@ -182,19 +182,47 @@ cat /proc/net/arp | grep <subscriber_ip>
 
 ---
 
-## Components
+## Repository Layout
 
-| Binary / Object | Role |
-|----------------|------|
-| `packet_replicator` | AF_XDP ingress + zero-copy fan-out engine; in GRE mode stamps `feeder_ns` (`CLOCK_REALTIME`) into each forwarded packet for per-hop latency breakdown |
-| `control_client` | CLI to add/remove/list subscribers at runtime |
-| `test_client` | UDP traffic generator; supports unicast and multicast targets |
-| `market_data_provider_client` | RTT benchmark: self-registers, sends trade messages, reports latency percentiles |
-| `unicast_filter.o` | eBPF XDP: matches target unicast IP:port → AF_XDP |
-| `gre_filter.o` | eBPF XDP: matches GRE unicast frames carrying inner multicast UDP → AF_XDP |
-| `latency_client` | Lock-free RTT client: kernel RX timestamps, busy-poll, CPU pinning, coordinated omission tracking |
-| `run_comparison.sh` | Multi-rate comparison harness (interleaved old + new client runs) |
-| `generate_comparison_report.py` | Produces terminal table, HTML report, and JSON summary from results |
+```
+networking_benchmarks/af_xdp/
+  Makefile                    # Build system: make all | make mcast | make full
+  README.md
+
+  replicator/                 # AF_XDP packet forwarding engine
+    PacketReplicator.cpp/hpp  # Multi-queue fan-out with cached MAC, generation-gated cache
+    AFXDPSocket.cpp/hpp       # XSK socket lifecycle, UMEM, frame management
+    PacketReplicatorMain.cpp  # CLI entry point (--gre, --queues, --ctrl, --producer)
+    NetworkInterfaceConfigurator.cpp/hpp
+
+  xdp/                        # BPF/XDP filter programs (clang -target bpf)
+    unicast_filter.c          # Match target unicast IP:port -> redirect to AF_XDP
+    gre_filter.c              # Match GRE (proto 47) with inner UDP -> redirect to AF_XDP
+
+  clients/                    # Measurement and control binaries
+    latency_client.cpp        # RTT: lock-free, kernel timestamps, busy-poll, CPU pinning
+    market_data_provider_client.cpp  # RTT: legacy (mutex-based, poll() wakeup)
+    mcast_sender.cpp          # One-way: AF_XDP TX zero-copy GRE (exchange -> feeder)
+    mcast_receiver.cpp        # One-way: AF_XDP RX with per-hop latency breakdown
+    control_client.cpp        # CLI: add/remove/list subscribers, mcast join/leave
+    test_client.cpp           # Simple UDP packet sender (unicast or multicast)
+
+  scripts/                    # Non-compiled utilities
+    run_comparison.sh         # Multi-rate orchestrator (interleaved old + new client)
+    generate_comparison_report.py  # Produces HTML + JSON comparison reports
+    cleanup.sh                # Remove XDP programs from NIC between runs
+```
+
+### Related: Deployment Orchestration
+
+```
+deployment/af_xdp/            # Instance provisioning and orchestration (no source code)
+  deploy.sh                   # CDK deploy + Ansible provision in one command
+  configure.yaml              # Installs xdp-tools, syncs repo, builds, PTP, coalescing
+  ptp.sh                      # Configures chrony refclock PHC (cross-host time sync)
+  tune_feeder.yaml            # Feeder-specific OS tuning
+  cdk/                        # CDK stacks (single-region CPG, cross-region peering)
+```
 
 ---
 

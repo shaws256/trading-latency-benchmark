@@ -226,7 +226,7 @@ for i in "${!SUBSCRIBER_PUBLIC_IPS[@]}"; do
     info "  ${SUBSCRIBER_PUBLIC_IPS[$i]} (public) / ${SUBSCRIBER_PRIVATE_IPS[$i]:-unknown} (private)"
 done
 info ""
-BENCH="~/gre-benchmark/deployment/mcast_gre/benchmark"
+BENCH="~/gre-benchmark/deployment/af_xdp/benchmark"
 
 info "Next steps:"
 info ""
