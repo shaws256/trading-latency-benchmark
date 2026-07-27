@@ -58,7 +58,7 @@ void printUsage(const char* progName) {
     std::cout << "                Required for native multicast; optional for GRE mode." << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
-    std::cout << "  # Unicast to feeder:" << std::endl;
+    std::cout << "  # Unicast to replicator:" << std::endl;
     std::cout << "  " << progName << " 10.0.1.20 5000" << std::endl;
     std::cout << "  # GRE mode — omit --iface; kernel routes 224/4 via gre_feed tunnel:" << std::endl;
     std::cout << "  " << progName << " 224.0.31.50 5000 100 'trade'" << std::endl;

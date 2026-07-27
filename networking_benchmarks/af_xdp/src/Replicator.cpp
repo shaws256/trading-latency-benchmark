@@ -16,7 +16,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "PacketReplicator.hpp"
+#include "Replicator.hpp"
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
@@ -58,7 +58,7 @@
     } while(0)
 
 // Destination implementation
-PacketReplicator::Destination::Destination(const std::string& ip, uint16_t p)
+Replicator::Destination::Destination(const std::string& ip, uint16_t p)
     : ip_address(ip), port(p) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -69,15 +69,15 @@ PacketReplicator::Destination::Destination(const std::string& ip, uint16_t p)
     memset(mac, 0xFF, sizeof(mac));  // Default: broadcast; replaced after ARP resolution
 }
 
-bool PacketReplicator::Destination::operator<(const Destination& other) const {
+bool Replicator::Destination::operator<(const Destination& other) const {
     if (ip_address != other.ip_address) {
         return ip_address < other.ip_address;
     }
     return port < other.port;
 }
 
-// PacketReplicator implementation
-PacketReplicator::PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort, int numQueues)
+// Replicator implementation
+Replicator::Replicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort, int numQueues)
     : listen_interface_(interface), listen_ip_(listenIp), listen_port_(listenPort),
       num_queues_(numQueues), gre_mode_(false),
       control_socket_(-1), output_socket_(-1),
@@ -95,11 +95,11 @@ PacketReplicator::PacketReplicator(const std::string& interface, const std::stri
     // Initialize CPU core assignments
     initializeCpuCores();
 
-    std::cout << "PacketReplicator initializing for " << listen_ip_ << ":" << listen_port_
+    std::cout << "Replicator initializing for " << listen_ip_ << ":" << listen_port_
               << " on interface " << listen_interface_ << " with " << num_queues_ << " queues" << std::endl;
 }
 
-PacketReplicator::~PacketReplicator() {
+Replicator::~Replicator() {
     stop();
 
     if (control_socket_ >= 0) {
@@ -110,7 +110,7 @@ PacketReplicator::~PacketReplicator() {
     }
 }
 
-PacketReplicator::PacketReplicator(PacketReplicator&& other) noexcept
+Replicator::Replicator(Replicator&& other) noexcept
     : listen_interface_(std::move(other.listen_interface_)),
       listen_ip_(std::move(other.listen_ip_)),
       listen_port_(other.listen_port_),
@@ -158,7 +158,7 @@ PacketReplicator::PacketReplicator(PacketReplicator&& other) noexcept
     other.running_ = false;
 }
 
-PacketReplicator& PacketReplicator::operator=(PacketReplicator&& other) noexcept {
+Replicator& Replicator::operator=(Replicator&& other) noexcept {
     if (this != &other) {
         stop();
 
@@ -209,11 +209,11 @@ PacketReplicator& PacketReplicator::operator=(PacketReplicator&& other) noexcept
     return *this;
 }
 
-void PacketReplicator::initialize(bool useZeroCopy) {
-    std::cout << "Initializing PacketReplicator with zero-copy: " << (useZeroCopy ? "enabled" : "disabled") << std::endl;
+void Replicator::initialize(bool useZeroCopy) {
+    std::cout << "Initializing Replicator with zero-copy: " << (useZeroCopy ? "enabled" : "disabled") << std::endl;
     
     // Set resource limits for AF_XDP
-    AFXDPSocket::setResourceLimits();
+    XdpSocket::setResourceLimits();
     
     // Create AF_XDP sockets for all queues
     xdp_sockets_.resize(num_queues_);
@@ -221,10 +221,10 @@ void PacketReplicator::initialize(bool useZeroCopy) {
     // Select XDP program:
     //   gre_mode_  → mcast_filter.o     (outer unicast GRE carries inner multicast)
     //   otherwise  → ucast_filter.o (direct unicast feed)
-    std::string xdp_program_path = gre_mode_ ? "./xdp/mcast_filter.o" : "./xdp/ucast_filter.o";
+    std::string xdp_program_path = gre_mode_ ? "./src/xdp/mcast.o" : "./src/xdp/ucast.o";
     std::cout << "Loading XDP program: " << xdp_program_path
               << (gre_mode_ ? " (GRE tunnel mode)" : "") << std::endl;
-    AFXDPSocket::loadXdpProgram(listen_interface_, xdp_program_path, useZeroCopy);
+    XdpSocket::loadXdpProgram(listen_interface_, xdp_program_path, useZeroCopy);
 
     // Cache listen_ip_ as NBO for use by configureXdpProgram() and updateDestinationCache()
     listen_ip_nbo_ = parseIpAddress(listen_ip_);
@@ -233,19 +233,19 @@ void PacketReplicator::initialize(bool useZeroCopy) {
     configureXdpProgram();
 
     // In GRE mode seed the inner multicast group immediately into config_map slot 0
-    // so the BPF filter starts redirecting frames before any subscriber joins.
+    // so the BPF filter starts redirecting frames before any destination joins.
     if (gre_mode_) {
         addGroupDynamic(listen_ip_nbo_);
     }
     
     // Create and configure AF_XDP socket for each queue
-    int xdp_flags = useZeroCopy ? AFXDPSocket::XDP_FLAGS_ZERO_COPY : AFXDPSocket::XDP_FLAGS_DRV_MODE;
+    int xdp_flags = useZeroCopy ? XdpSocket::XDP_FLAGS_ZERO_COPY : XdpSocket::XDP_FLAGS_DRV_MODE;
     
     for (int queue_id = 0; queue_id < num_queues_; queue_id++) {
         std::cout << "Creating AF_XDP socket for queue " << queue_id << std::endl;
         
         // Create AF_XDP socket for this queue with proper frame count (following ena-xdp)
-        xdp_sockets_[queue_id] = std::make_unique<AFXDPSocket>(4096, AFXDPSocket::DEFAULT_UMEM_FRAMES, 0);
+        xdp_sockets_[queue_id] = std::make_unique<XdpSocket>(4096, XdpSocket::DEFAULT_UMEM_FRAMES, 0);
         
         // Setup UMEM
         xdp_sockets_[queue_id]->setupUMem();
@@ -312,13 +312,13 @@ void PacketReplicator::initialize(bool useZeroCopy) {
                   << ctrl_multicast_port_ << " → " << producer_ip_ << ":" << producer_port_ << std::endl;
     }
 
-    std::cout << "PacketReplicator initialized successfully with " << num_queues_ << " queues" << std::endl;
+    std::cout << "Replicator initialized successfully with " << num_queues_ << " queues" << std::endl;
 }
 
-void PacketReplicator::configureXdpProgram() {
+void Replicator::configureXdpProgram() {
     static constexpr int MAX_GROUPS = 16;
 
-    config_map_fd_ = AFXDPSocket::getXdpMapFd("config_map");
+    config_map_fd_ = XdpSocket::getXdpMapFd("config_map");
     if (config_map_fd_ < 0) {
         throw std::runtime_error("Could not find config_map in loaded XDP program — cannot configure filter");
     }
@@ -352,7 +352,7 @@ void PacketReplicator::configureXdpProgram() {
         free_slots_.push_back(static_cast<uint32_t>(i));
 }
 
-void PacketReplicator::addGroupDynamic(uint32_t group_nbo) {
+void Replicator::addGroupDynamic(uint32_t group_nbo) {
     const std::string group_str = formatIpAddress(group_nbo);
 
     std::lock_guard<std::mutex> lock(group_mutex_);
@@ -391,7 +391,7 @@ void PacketReplicator::addGroupDynamic(uint32_t group_nbo) {
               << " → config_map[" << slot << "]" << std::endl;
 }
 
-void PacketReplicator::removeGroupDynamic(uint32_t group_nbo) {
+void Replicator::removeGroupDynamic(uint32_t group_nbo) {
     const std::string group_str = formatIpAddress(group_nbo);
 
     std::lock_guard<std::mutex> lock(group_mutex_);
@@ -399,7 +399,7 @@ void PacketReplicator::removeGroupDynamic(uint32_t group_nbo) {
     auto ref_it = group_ref_counts_.find(group_nbo);
     if (ref_it == group_ref_counts_.end()) return;
 
-    // Decrement — only remove when the last subscriber leaves
+    // Decrement — only remove when the last destination leaves
     if (--ref_it->second > 0) return;
 
     // Zero the BPF map slot so the verifier loop stops matching this group
@@ -415,7 +415,7 @@ void PacketReplicator::removeGroupDynamic(uint32_t group_nbo) {
     std::cout << "[GRE] Removed group " << group_str << std::endl;
 }
 
-void PacketReplicator::setUpstreamControl(const std::string& ctrlGroup, uint16_t ctrlPort,
+void Replicator::setUpstreamControl(const std::string& ctrlGroup, uint16_t ctrlPort,
                                           const std::string& producerIp, uint16_t producerPort) {
     ctrl_multicast_group_ = ctrlGroup;
     ctrl_multicast_port_  = ctrlPort;
@@ -423,7 +423,7 @@ void PacketReplicator::setUpstreamControl(const std::string& ctrlGroup, uint16_t
     producer_port_        = producerPort;
 }
 
-void PacketReplicator::joinControlMulticastGroup() {
+void Replicator::joinControlMulticastGroup() {
     ctrl_multicast_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (ctrl_multicast_socket_ < 0)
         throw std::runtime_error("Failed to create ctrl multicast socket: " + std::string(strerror(errno)));
@@ -462,7 +462,7 @@ void PacketReplicator::joinControlMulticastGroup() {
               << " on interface " << listen_interface_ << std::endl;
 }
 
-void PacketReplicator::handleUpstreamControl() {
+void Replicator::handleUpstreamControl() {
     std::cout << "Upstream control thread started: " << ctrl_multicast_group_ << ":"
               << ctrl_multicast_port_ << " → " << producer_ip_ << ":" << producer_port_ << std::endl;
 
@@ -501,7 +501,7 @@ void PacketReplicator::handleUpstreamControl() {
     std::cout << "Upstream control thread stopped" << std::endl;
 }
 
-void PacketReplicator::addDestination(const std::string& ipAddress, uint16_t port) {
+void Replicator::addDestination(const std::string& ipAddress, uint16_t port) {
     // ARP trigger and MAC lookup happen outside the lock: triggerArpResolution sleeps
     // 100ms and getDestinationMac reads /proc/net/arp — both unacceptable inside the
     // mutex that the packet-processing hot path acquires via getCachedGroupDestinations().
@@ -525,7 +525,7 @@ void PacketReplicator::addDestination(const std::string& ipAddress, uint16_t por
     std::cout << "Added destination: " << ipAddress << ":" << port << std::endl;
 }
 
-void PacketReplicator::removeDestination(const std::string& ipAddress, uint16_t port) {
+void Replicator::removeDestination(const std::string& ipAddress, uint16_t port) {
     std::vector<uint32_t> orphaned_groups;
     {
         std::lock_guard<std::mutex> lock(destinations_mutex_);
@@ -543,7 +543,7 @@ void PacketReplicator::removeDestination(const std::string& ipAddress, uint16_t 
     }
 
     // Release destinations_mutex_ before removeGroupDynamic (acquires group_mutex_).
-    // Without this, groups whose last subscriber was removed via CTRL_REMOVE_DESTINATION
+    // Without this, groups whose last destination was removed via CTRL_REMOVE_DESTINATION
     // would permanently consume a config_map slot and never return it to free_slots_,
     // exhausting the 16-slot limit over time.
     for (uint32_t g : orphaned_groups)
@@ -552,7 +552,7 @@ void PacketReplicator::removeDestination(const std::string& ipAddress, uint16_t 
     std::cout << "Removed destination: " << ipAddress << ":" << port << std::endl;
 }
 
-std::vector<PacketReplicator::Destination> PacketReplicator::getDestinations() const {
+std::vector<Replicator::Destination> Replicator::getDestinations() const {
     std::lock_guard<std::mutex> lock(destinations_mutex_);
     std::vector<Destination> result;
     result.reserve(all_destinations_.size());
@@ -562,9 +562,9 @@ std::vector<PacketReplicator::Destination> PacketReplicator::getDestinations() c
     return result;
 }
 
-void PacketReplicator::start() {
-    if (!running_.exchange(true)) {
-        std::cout << "Starting HFT-optimized PacketReplicator..." << std::endl;
+void Replicator::start() {
+    if (!running_.source(true)) {
+        std::cout << "Starting HFT-optimized Replicator..." << std::endl;
         
         // Start packet processing threads for each queue
         packet_processor_threads_.resize(num_queues_);
@@ -582,22 +582,22 @@ void PacketReplicator::start() {
         }
         
         // Start control protocol thread (don't bind to specific core to avoid interference)
-        control_thread_ = std::make_unique<std::thread>(&PacketReplicator::handleControlProtocol, this);
+        control_thread_ = std::make_unique<std::thread>(&Replicator::handleControlProtocol, this);
 
         // Start upstream control forwarding thread if configured
         if (!ctrl_multicast_group_.empty()) {
-            ctrl_upstream_thread_ = std::make_unique<std::thread>(&PacketReplicator::handleUpstreamControl, this);
+            ctrl_upstream_thread_ = std::make_unique<std::thread>(&Replicator::handleUpstreamControl, this);
             std::cout << "Started upstream control thread" << std::endl;
         }
 
-        std::cout << "HFT-optimized PacketReplicator started with " << num_queues_ << " processing threads" << std::endl;
+        std::cout << "HFT-optimized Replicator started with " << num_queues_ << " processing threads" << std::endl;
         std::cout << "CPU affinity applied, busy polling enabled, lock-free operations active" << std::endl;
     }
 }
 
-void PacketReplicator::stop() {
-    if (running_.exchange(false)) {
-        std::cout << "Stopping PacketReplicator..." << std::endl;
+void Replicator::stop() {
+    if (running_.source(false)) {
+        std::cout << "Stopping Replicator..." << std::endl;
         
         // Wait for all packet processor threads to finish
         for (auto& thread : packet_processor_threads_) {
@@ -642,7 +642,7 @@ void PacketReplicator::stop() {
             free_slots_.clear();
         }
 
-        // Clear subscriber routing tables so a restart begins clean
+        // Clear destination routing tables so a restart begins clean
         {
             std::lock_guard<std::mutex> lock(destinations_mutex_);
             group_destinations_.clear();
@@ -650,17 +650,17 @@ void PacketReplicator::stop() {
         }
 
         // Unload XDP program
-        AFXDPSocket::unloadXdpProgram(listen_interface_, true);
+        XdpSocket::unloadXdpProgram(listen_interface_, true);
         
-        std::cout << "PacketReplicator stopped" << std::endl;
+        std::cout << "Replicator stopped" << std::endl;
     }
 }
 
-bool PacketReplicator::isRunning() const {
+bool Replicator::isRunning() const {
     return running_.load();
 }
 
-PacketReplicator::Statistics PacketReplicator::getStatistics() const {
+Replicator::Statistics Replicator::getStatistics() const {
     std::lock_guard<std::mutex> lock(destinations_mutex_);
     return {
         packets_received_.load(),
@@ -671,9 +671,9 @@ PacketReplicator::Statistics PacketReplicator::getStatistics() const {
     };
 }
 
-void PacketReplicator::printStatistics() const {
+void Replicator::printStatistics() const {
     auto stats = getStatistics();
-    std::cout << "=== PacketReplicator Statistics ===" << std::endl;
+    std::cout << "=== Replicator Statistics ===" << std::endl;
     std::cout << "Packets received: " << stats.packets_received << std::endl;
     std::cout << "Packets sent: " << stats.packets_sent << std::endl;
     std::cout << "Bytes received: " << stats.bytes_received << std::endl;
@@ -684,11 +684,11 @@ void PacketReplicator::printStatistics() const {
 
 // HFT OPTIMIZED: Removed processPackets() method - using processPacketsForQueue() instead
 
-void PacketReplicator::processPacketsForQueue(int queueId) {
+void Replicator::processPacketsForQueue(int queueId) {
     std::cout << "HFT-optimized packet processing thread started for queue " << queueId << std::endl;
     
     // HFT OPTIMIZATION: Pre-allocate batch vectors with cache-aligned memory.
-    // GRE mode: exchange sends multi-hundred-frame bursts — use 256 to drain in one peek.
+    // GRE mode: source sends multi-hundred-frame bursts — use 256 to drain in one peek.
     // Unicast mode: sparse arrivals; 64 is never the limiting factor.
     // 256 fits well within the 2048-frame RX UMEM partition (256 in-flight + 1792 in fill queue).
     const int rx_batch = gre_mode_ ? 256 : 64;
@@ -759,7 +759,7 @@ void PacketReplicator::processPacketsForQueue(int queueId) {
     std::cout << "HFT-optimized packet processing thread stopped for queue " << queueId << std::endl;
 }
 
-void PacketReplicator::handleControlProtocol() {
+void Replicator::handleControlProtocol() {
     std::cout << "Control protocol thread started on port " << CONTROL_PORT << std::endl;
     
     std::vector<uint8_t> buffer(1024);
@@ -803,7 +803,7 @@ void PacketReplicator::handleControlProtocol() {
     std::cout << "Control protocol thread stopped" << std::endl;
 }
 
-int PacketReplicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
+int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
     const uint8_t* payload_data = nullptr;
     size_t payload_len = 0;
     uint32_t group_nbo = 0;
@@ -812,24 +812,24 @@ int PacketReplicator::replicatePacket(const uint8_t* packetData, size_t packetLe
         return 0; // Not a valid UDP packet
     }
 
-    // GRE mode: stamp feeder RX time into inner UDP payload[16..23] (big-endian uint64_t).
+    // GRE mode: stamp replicator RX time into inner UDP payload[16..23] (big-endian uint64_t).
     // payload_data points to the inner IPv4 header; UDP payload starts at ihl*4 + 8 bytes in.
     // The sender reserved this slot (zeroed in the UMEM template). The receiver uses it to
-    // split reported latency into hop1 (exchange→feeder) and hop2 (feeder→subscriber).
+    // split reported latency into hop1 (source→replicator) and hop2 (replicator→destination).
     if (gre_mode_) {
         const struct iphdr* inner = reinterpret_cast<const struct iphdr*>(payload_data);
         size_t udp_payload_off = static_cast<size_t>(inner->ihl) * 4 + sizeof(struct udphdr);
         if (payload_len >= udp_payload_off + 24) {  // HDR_SIZE = 24
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            uint64_t feeder_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
+            uint64_t replicator_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
                                  + static_cast<uint64_t>(ts.tv_nsec);
-            feeder_ns = __builtin_bswap64(feeder_ns);  // to big-endian (x86 is LE)
-            memcpy(const_cast<uint8_t*>(payload_data) + udp_payload_off + 16, &feeder_ns, 8);
+            replicator_ns = __builtin_bswap64(replicator_ns);  // to big-endian (x86 is LE)
+            memcpy(const_cast<uint8_t*>(payload_data) + udp_payload_off + 16, &replicator_ns, 8);
         }
     }
 
-    // Per-group fan-out: only send to subscribers that joined this multicast group via IGMP.
+    // Per-group fan-out: only send to destinations that joined this multicast group via IGMP.
     // Const ref to thread-local per-group cache — no copy, no lock on hot path.
     const std::vector<Destination>& current_destinations = getCachedGroupDestinations(group_nbo);
     if (current_destinations.empty()) {
@@ -845,7 +845,7 @@ int PacketReplicator::replicatePacket(const uint8_t* packetData, size_t packetLe
         }
     }
 
-    // One driver kick after all K subscribers have been queued — avoids K-1 redundant
+    // One driver kick after all K destinations have been queued — avoids K-1 redundant
     // needs_wakeup checks and potential sendto syscalls inside the per-destination loop.
     if (sent_count > 0)
         xdp_sockets_[queueId]->requestDriverPoll();
@@ -853,7 +853,7 @@ int PacketReplicator::replicatePacket(const uint8_t* packetData, size_t packetLe
     return sent_count;
 }
 
-bool PacketReplicator::extractUdpPayloadGre(const uint8_t* packetData, size_t packetLen,
+bool Replicator::extractUdpPayloadGre(const uint8_t* packetData, size_t packetLen,
                                              const uint8_t*& payloadData, size_t& payloadLen,
                                              uint32_t& group_nbo) {
     // Minimum: Eth(14) + outerIP(20) + GRE(4) + innerIP(20) + UDP(8) = 66 bytes
@@ -913,8 +913,8 @@ bool PacketReplicator::extractUdpPayloadGre(const uint8_t* packetData, size_t pa
         return false;
 
     // Return the inner IP datagram verbatim (inner IPv4 + UDP + payload).
-    // The feeder re-encapsulates it in a new outer GRE unicast to each subscriber,
-    // so the subscriber receives the original multicast UDP packet intact.
+    // The replicator re-encapsulates it in a new outer GRE unicast to each destination,
+    // so the destination receives the original multicast UDP packet intact.
     size_t inner_datagram_len = ntohs(inner_ip->tot_len);
     if (inner_datagram_len < inner_ip_len + sizeof(struct udphdr))
         return false;
@@ -927,7 +927,7 @@ bool PacketReplicator::extractUdpPayloadGre(const uint8_t* packetData, size_t pa
     return true;
 }
 
-bool PacketReplicator::extractUdpPayload(const uint8_t* packetData, size_t packetLen,
+bool Replicator::extractUdpPayload(const uint8_t* packetData, size_t packetLen,
                                          const uint8_t*& payloadData, size_t& payloadLen,
                                          uint32_t& group_nbo) {
     if (gre_mode_)
@@ -984,7 +984,7 @@ bool PacketReplicator::extractUdpPayload(const uint8_t* packetData, size_t packe
     return true;
 }
 
-bool PacketReplicator::sendToDestinationFallback(const Destination& destination, const uint8_t* data, size_t length) {
+bool Replicator::sendToDestinationFallback(const Destination& destination, const uint8_t* data, size_t length) {
     if (gre_mode_) {
         // GRE fallback: prepend minimal 4-byte GRE header; kernel builds outer IP.
         // output_socket_ was created as SOCK_RAW/IPPROTO_GRE in initialize().
@@ -1018,7 +1018,7 @@ bool PacketReplicator::sendToDestinationFallback(const Destination& destination,
     return sent == static_cast<ssize_t>(length);
 }
 
-bool PacketReplicator::sendToDestinationWithQueue(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
+bool Replicator::sendToDestinationWithQueue(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
     // If ARP has not yet resolved for this destination, the cached MAC is all-broadcast.
     // ENA/VPC drops frames with broadcast dst MAC, so route through the kernel socket
     // which handles ARP internally.  updateDestinationCache() will re-resolve the MAC on
@@ -1041,9 +1041,9 @@ bool PacketReplicator::sendToDestinationWithQueue(const Destination& destination
     }
 }
 
-bool PacketReplicator::sendSinglePacketDirect(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
+bool Replicator::sendSinglePacketDirect(const Destination& destination, const uint8_t* data, size_t length, int queueId) {
     // Direct single packet transmission following ena-xdp exactly (no batching)
-    AFXDPSocket* xdp_socket = xdp_sockets_[queueId].get();
+    XdpSocket* xdp_socket = xdp_sockets_[queueId].get();
     
     DEBUG_TX_PRINT("DEBUG TX: Starting TX for " << destination.ip_address << ":" << destination.port 
               << ", data_len=" << length << ", queue=" << queueId);
@@ -1072,7 +1072,7 @@ bool PacketReplicator::sendSinglePacketDirect(const Destination& destination, co
 
     // Frame address derived from ring slot — power-of-2 modulo via bitmask
     static constexpr uint64_t FRAME_SIZE     = 4096;
-    static constexpr uint64_t TX_FRAMES_MASK = AFXDPSocket::DEFAULT_TX_FRAMES - 1;
+    static constexpr uint64_t TX_FRAMES_MASK = XdpSocket::DEFAULT_TX_FRAMES - 1;
     uint64_t tx_frame_addr = (static_cast<uint64_t>(tx_idx) & TX_FRAMES_MASK) * FRAME_SIZE;
 
     DEBUG_TX_PRINT("DEBUG TX: tx_idx=" << tx_idx << ", tx_frame_addr=0x"
@@ -1097,7 +1097,7 @@ bool PacketReplicator::sendSinglePacketDirect(const Destination& destination, co
               << std::dec << ", len=" << packet_len);
     
     // Submit TX ring entry — driver kick is batched at the replicatePacket() call site
-    // so the wakeup is issued once for all K subscribers rather than K times.
+    // so the wakeup is issued once for all K destinations rather than K times.
     xdp_socket->submitTxRing(1);
 
     DEBUG_TX_PRINT("DEBUG TX: Submitted to TX ring");
@@ -1105,7 +1105,7 @@ bool PacketReplicator::sendSinglePacketDirect(const Destination& destination, co
     return true;
 }
 
-size_t PacketReplicator::createUdpPacket(const Destination& destination, const uint8_t* payload, size_t payloadLen,
+size_t Replicator::createUdpPacket(const Destination& destination, const uint8_t* payload, size_t payloadLen,
                                          uint8_t* buffer, size_t bufferSize) {
     // Calculate required packet size
     size_t eth_hdr_len = sizeof(struct ethhdr);
@@ -1171,7 +1171,7 @@ size_t PacketReplicator::createUdpPacket(const Destination& destination, const u
     return total_len;
 }
 
-size_t PacketReplicator::createGrePacket(const Destination& destination,
+size_t Replicator::createGrePacket(const Destination& destination,
                                           const uint8_t* inner_ip, size_t inner_ip_len,
                                           uint8_t* buffer, size_t bufferSize) {
     // Layout: Eth(14) + outer IPv4(20) + GRE(4) + inner IP datagram
@@ -1191,7 +1191,7 @@ size_t PacketReplicator::createGrePacket(const Destination& destination,
     memcpy(eth->h_source, cached_iface_mac_, ETH_ALEN);
     eth->h_proto = htons(ETH_P_IP);
 
-    // Outer IPv4 header — unicast feeder → subscriber
+    // Outer IPv4 header — unicast replicator → destination
     struct iphdr* ip = reinterpret_cast<struct iphdr*>(buffer + ETH_LEN);
     ip->version  = 4;
     ip->ihl      = 5;
@@ -1222,7 +1222,7 @@ size_t PacketReplicator::createGrePacket(const Destination& destination,
     return total_len;
 }
 
-std::vector<uint8_t> PacketReplicator::processControlMessage(const uint8_t* message, size_t messageLen, 
+std::vector<uint8_t> Replicator::processControlMessage(const uint8_t* message, size_t messageLen, 
                                                              const struct sockaddr_in& clientAddr) {
     if (messageLen < 1) {
         return {}; // Invalid message
@@ -1300,10 +1300,10 @@ std::vector<uint8_t> PacketReplicator::processControlMessage(const uint8_t* mess
         
         case CTRL_MCAST_JOIN: {
             // [4][4B group IP NBO]
-            // Subscriber IP is inferred from the UDP source address (clientAddr).
+            // Destination IP is inferred from the UDP source address (clientAddr).
             // Only valid in GRE mode; in unicast mode use CTRL_ADD_DESTINATION instead.
             // No port in the wire format: inner UDP dst is preserved verbatim from the
-            // exchange, so subscribers always receive on listen_port_.
+            // source, so destinations always receive on listen_port_.
             if (!gre_mode_) {
                 std::cerr << "Control: MCAST_JOIN ignored in unicast mode — use ADD_DESTINATION\n";
                 response.push_back(0);
@@ -1313,36 +1313,36 @@ std::vector<uint8_t> PacketReplicator::processControlMessage(const uint8_t* mess
                 uint32_t group_ip;
                 memcpy(&group_ip, message + 1, 4);
 
-                std::string subscriber_ip(client_ip);
+                std::string destination_ip(client_ip);
                 std::cout << "Control: MCAST_JOIN group=" << formatIpAddress(group_ip)
-                          << " subscriber=" << subscriber_ip << std::endl;
+                          << " destination=" << destination_ip << std::endl;
 
                 try {
                     // ARP resolution outside any lock
-                    triggerArpResolution(subscriber_ip);
-                    Destination dest(subscriber_ip, listen_port_);
-                    getDestinationMac(subscriber_ip, dest.mac);
+                    triggerArpResolution(destination_ip);
+                    Destination dest(destination_ip, listen_port_);
+                    getDestinationMac(destination_ip, dest.mac);
 
                     // Only call addGroupDynamic (which increments ref count) if this
-                    // subscriber is not already registered for the group.  A re-join
+                    // destination is not already registered for the group.  A re-join
                     // with a different port should update the destination without
                     // double-counting the reference, which would leave the BPF slot
-                    // live after the subscriber sends a single MCAST_LEAVE.
+                    // live after the destination sends a single MCAST_LEAVE.
                     bool already_in_group = false;
                     {
                         std::lock_guard<std::mutex> lock(destinations_mutex_);
                         auto git = group_destinations_.find(group_ip);
-                        if (git != group_destinations_.end() && git->second.count(subscriber_ip))
+                        if (git != group_destinations_.end() && git->second.count(destination_ip))
                             already_in_group = true;
                     }
                     if (!already_in_group)
                         addGroupDynamic(group_ip);
 
-                    // Register subscriber for this specific group+port
+                    // Register destination for this specific group+port
                     {
                         std::lock_guard<std::mutex> lock(destinations_mutex_);
-                        group_destinations_[group_ip].insert_or_assign(subscriber_ip, dest);
-                        all_destinations_.insert_or_assign(subscriber_ip, dest);
+                        group_destinations_[group_ip].insert_or_assign(destination_ip, dest);
+                        all_destinations_.insert_or_assign(destination_ip, dest);
                     }
                     response.push_back(1);
                 } catch (const std::exception& e) {
@@ -1359,35 +1359,35 @@ std::vector<uint8_t> PacketReplicator::processControlMessage(const uint8_t* mess
                 uint32_t group_ip;
                 memcpy(&group_ip, message + 1, 4);
 
-                std::string subscriber_ip(client_ip);
+                std::string destination_ip(client_ip);
                 std::cout << "Control: MCAST_LEAVE group=" << formatIpAddress(group_ip)
-                          << " subscriber=" << subscriber_ip << std::endl;
+                          << " destination=" << destination_ip << std::endl;
 
-                bool last_subscriber = false;
+                bool last_destination = false;
                 {
                     std::lock_guard<std::mutex> lock(destinations_mutex_);
                     auto git = group_destinations_.find(group_ip);
                     if (git != group_destinations_.end()) {
-                        git->second.erase(subscriber_ip);
+                        git->second.erase(destination_ip);
                         if (git->second.empty()) {
                             group_destinations_.erase(git);
-                            last_subscriber = true;
+                            last_destination = true;
                         }
                     }
-                    // Remove from all_destinations_ only if this subscriber is no
-                    // longer in any group.  A subscriber registered for N groups
+                    // Remove from all_destinations_ only if this destination is no
+                    // longer in any group.  A destination registered for N groups
                     // sends N MCAST_LEAVE messages; premature removal here would
                     // make ctl list show them as gone while they are
                     // still receiving traffic for the remaining groups.
                     bool still_in_group = false;
                     for (const auto& [g, subs] : group_destinations_) {
-                        if (subs.count(subscriber_ip)) { still_in_group = true; break; }
+                        if (subs.count(destination_ip)) { still_in_group = true; break; }
                     }
                     if (!still_in_group)
-                        all_destinations_.erase(subscriber_ip);
+                        all_destinations_.erase(destination_ip);
                 }
                 // Release destinations_mutex_ before removeGroupDynamic (uses group_mutex_)
-                if (last_subscriber)
+                if (last_destination)
                     removeGroupDynamic(group_ip);
 
                 response.push_back(1);
@@ -1404,7 +1404,7 @@ std::vector<uint8_t> PacketReplicator::processControlMessage(const uint8_t* mess
     return response;
 }
 
-uint32_t PacketReplicator::parseIpAddress(const std::string& ipStr) {
+uint32_t Replicator::parseIpAddress(const std::string& ipStr) {
     struct in_addr addr;
     if (inet_aton(ipStr.c_str(), &addr) == 0) {
         throw std::invalid_argument("Invalid IP address: " + ipStr);
@@ -1412,7 +1412,7 @@ uint32_t PacketReplicator::parseIpAddress(const std::string& ipStr) {
     return addr.s_addr; // Already in network byte order
 }
 
-std::string PacketReplicator::formatIpAddress(uint32_t ipAddr) {
+std::string Replicator::formatIpAddress(uint32_t ipAddr) {
     struct in_addr addr;
     addr.s_addr = ipAddr;
     char buf[INET_ADDRSTRLEN];
@@ -1420,7 +1420,7 @@ std::string PacketReplicator::formatIpAddress(uint32_t ipAddr) {
     return std::string(buf);
 }
 
-bool PacketReplicator::getInterfaceIp(const std::string& interface, std::string& ip_address) {
+bool Replicator::getInterfaceIp(const std::string& interface, std::string& ip_address) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         return false;
@@ -1444,7 +1444,7 @@ bool PacketReplicator::getInterfaceIp(const std::string& interface, std::string&
     return true;
 }
 
-bool PacketReplicator::getInterfaceMac(const std::string& interface, uint8_t* mac_address) {
+bool Replicator::getInterfaceMac(const std::string& interface, uint8_t* mac_address) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         return false;
@@ -1529,7 +1529,7 @@ static bool lookupGateway(const std::string& dest_ip, std::string& gateway_ip) {
     return true;
 }
 
-bool PacketReplicator::getDestinationMac(const std::string& ip_address, uint8_t* mac_address) {
+bool Replicator::getDestinationMac(const std::string& ip_address, uint8_t* mac_address) {
     // Fast path: destination is directly reachable (same subnet)
     if (lookupArpEntry(ip_address, mac_address)) return true;
 
@@ -1548,7 +1548,7 @@ bool PacketReplicator::getDestinationMac(const std::string& ip_address, uint8_t*
     return false;
 }
 
-void PacketReplicator::triggerArpResolution(const std::string& ip_address) {
+void Replicator::triggerArpResolution(const std::string& ip_address) {
     std::cout << "Triggering ARP resolution for " << ip_address << std::endl;
     
     // Create a temporary socket to send a UDP packet to trigger ARP resolution
@@ -1610,9 +1610,9 @@ void PacketReplicator::triggerArpResolution(const std::string& ip_address) {
 // HFT OPTIMIZATION IMPLEMENTATIONS
 
 // Thread-local destination cache definition
-thread_local PacketReplicator::ThreadLocalDestCache PacketReplicator::dest_cache_;
+thread_local Replicator::ThreadLocalDestCache Replicator::dest_cache_;
 
-bool PacketReplicator::setCpuAffinity(std::thread& thread, int cpu_core) {
+bool Replicator::setCpuAffinity(std::thread& thread, int cpu_core) {
     // HFT OPTIMIZATION: Bind thread to specific CPU core for deterministic performance
     if (!enable_cpu_affinity_) {
         return true;  // CPU affinity disabled
@@ -1635,7 +1635,7 @@ bool PacketReplicator::setCpuAffinity(std::thread& thread, int cpu_core) {
     return true;
 }
 
-void PacketReplicator::initializeCpuCores() {
+void Replicator::initializeCpuCores() {
     // HFT OPTIMIZATION: Initialize CPU core assignments for optimal performance
     // Reserve cores for packet processing threads (avoid core 0 which handles interrupts)
     
@@ -1657,7 +1657,7 @@ void PacketReplicator::initializeCpuCores() {
     std::cout << std::endl;
 }
 
-const std::vector<PacketReplicator::Destination>& PacketReplicator::getCachedGroupDestinations(uint32_t group_nbo) {
+const std::vector<Replicator::Destination>& Replicator::getCachedGroupDestinations(uint32_t group_nbo) {
     auto now = std::chrono::steady_clock::now();
     if (!dest_cache_.valid ||
         (now - dest_cache_.last_update) > ThreadLocalDestCache::CACHE_TIMEOUT) {
@@ -1669,7 +1669,7 @@ const std::vector<PacketReplicator::Destination>& PacketReplicator::getCachedGro
     return it->second;  // const ref — zero copy on hot path
 }
 
-void PacketReplicator::updateDestinationCache() {
+void Replicator::updateDestinationCache() {
     std::unordered_map<uint32_t, std::unordered_map<std::string, Destination>> gd_copy;
     std::unordered_map<std::string, Destination> all_copy;
     {
@@ -1688,7 +1688,7 @@ void PacketReplicator::updateDestinationCache() {
             vec.push_back(dest);
     }
 
-    // Unicast mode: all_destinations_ subscribers keyed by listen_ip_nbo_
+    // Unicast mode: all_destinations_ destinations keyed by listen_ip_nbo_
     if (!gre_mode_ && !all_copy.empty()) {
         auto& vec = dest_cache_.group_dests[listen_ip_nbo_];
         vec.reserve(all_copy.size());

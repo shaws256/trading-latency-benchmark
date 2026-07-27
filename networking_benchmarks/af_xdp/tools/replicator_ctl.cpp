@@ -25,7 +25,7 @@
 #include <unistd.h>
 #include <errno.h>
 
-class ControlClient {
+class ReplicatorCtl {
 private:
     static constexpr int CONTROL_PORT = 12345;
     static constexpr uint8_t CTRL_ADD_DESTINATION    = 1;
@@ -38,7 +38,7 @@ private:
     std::string server_address_;
 
 public:
-    ControlClient(const std::string& serverAddress) : socket_fd_(-1), server_address_(serverAddress) {
+    ReplicatorCtl(const std::string& serverAddress) : socket_fd_(-1), server_address_(serverAddress) {
         socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (socket_fd_ < 0) {
             throw std::runtime_error("Failed to create socket: " + std::string(strerror(errno)));
@@ -52,7 +52,7 @@ public:
         }
     }
 
-    ~ControlClient() {
+    ~ReplicatorCtl() {
         if (socket_fd_ >= 0) {
             close(socket_fd_);
         }
@@ -96,11 +96,11 @@ public:
         return sendMessage(message);
     }
 
-    // Register this subscriber for a multicast group via the feeder control protocol
+    // Register this destination for a multicast group via the replicator control protocol
     // (CTRL_MCAST_JOIN).  No raw socket or root required.
-    // The feeder infers the subscriber IP from the UDP source address of this message.
+    // The replicator infers the destination IP from the UDP source address of this message.
     // No port argument: in GRE mode the inner UDP dst port is preserved verbatim from
-    // the exchange, so subscribers always receive on the exchange data port.
+    // the source, so destinations always receive on the source data port.
     bool joinGroup(const std::string& groupAddress) {
         struct in_addr group_addr{};
         if (inet_aton(groupAddress.c_str(), &group_addr) == 0) {
@@ -121,7 +121,7 @@ public:
         return sendMessage(message);
     }
 
-    // Deregister this subscriber from a specific multicast group (CTRL_MCAST_LEAVE).
+    // Deregister this destination from a specific multicast group (CTRL_MCAST_LEAVE).
     bool leaveGroup(const std::string& groupAddress) {
         struct in_addr group_addr{};
         if (inet_aton(groupAddress.c_str(), &group_addr) == 0) {
@@ -234,22 +234,22 @@ private:
 };
 
 void printUsage(const char* progName) {
-    std::cout << "Usage: " << progName << " <feeder_ip> <command> [args...]" << std::endl;
+    std::cout << "Usage: " << progName << " <replicator_ip> <command> [args...]" << std::endl;
     std::cout << "Commands:" << std::endl;
-    std::cout << "  add <dest_ip> <dest_port>              - Register subscriber IP:port with feeder" << std::endl;
-    std::cout << "  remove <dest_ip> <dest_port>           - Deregister subscriber" << std::endl;
-    std::cout << "  list                                   - List all registered subscribers" << std::endl;
+    std::cout << "  add <dest_ip> <dest_port>              - Register destination IP:port with replicator" << std::endl;
+    std::cout << "  remove <dest_ip> <dest_port>           - Deregister destination" << std::endl;
+    std::cout << "  list                                   - List all registered destinations" << std::endl;
     std::cout << "  mcast <group>                          - Subscribe to <group>" << std::endl;
     std::cout << "  mcast-leave <group>                    - Unsubscribe from <group>" << std::endl;
     std::cout << std::endl;
-    std::cout << "Typical subscriber setup:" << std::endl;
-    std::cout << "  sudo " << progName << " <feeder_ip> add <my_ip> <my_port>" << std::endl;
-    std::cout << "  sudo " << progName << " <feeder_ip> mcast 224.0.31.50" << std::endl;
-    std::cout << "  sudo " << progName << " <feeder_ip> mcast 224.0.31.51    # second group" << std::endl;
+    std::cout << "Typical destination setup:" << std::endl;
+    std::cout << "  sudo " << progName << " <replicator_ip> add <my_ip> <my_port>" << std::endl;
+    std::cout << "  sudo " << progName << " <replicator_ip> mcast 224.0.31.50" << std::endl;
+    std::cout << "  sudo " << progName << " <replicator_ip> mcast 224.0.31.51    # second group" << std::endl;
     std::cout << std::endl;
     std::cout << "Notes:" << std::endl;
     std::cout << "  mcast/mcast-leave require CAP_NET_RAW (run with sudo)." << std::endl;
-    std::cout << "  The IGMPv2 report is sent unicast to <feeder_ip>, so it works" << std::endl;
+    std::cout << "  The IGMPv2 report is sent unicast to <replicator_ip>, so it works" << std::endl;
     std::cout << "  across VPC peering and GRE tunnels without multicast routing." << std::endl;
 }
 
@@ -263,7 +263,7 @@ int main(int argc, char* argv[]) {
     std::string command = argv[2];
 
     try {
-        ControlClient client(server_ip);
+        ReplicatorCtl client(server_ip);
 
         if (command == "add") {
             if (argc != 5) {
@@ -308,7 +308,7 @@ int main(int argc, char* argv[]) {
             }
             std::string group = argv[3];
             std::cout << "Joining multicast group " << group
-                      << " via feeder " << server_ip << std::endl;
+                      << " via replicator " << server_ip << std::endl;
             if (!client.joinGroup(group)) {
                 return 1;
             }
@@ -321,7 +321,7 @@ int main(int argc, char* argv[]) {
             }
             std::string group = argv[3];
             std::cout << "Leaving multicast group " << group
-                      << " via feeder " << server_ip << std::endl;
+                      << " via replicator " << server_ip << std::endl;
             if (!client.leaveGroup(group)) {
                 return 1;
             }

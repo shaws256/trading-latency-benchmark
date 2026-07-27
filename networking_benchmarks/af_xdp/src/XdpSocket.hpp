@@ -16,8 +16,8 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef AFXDP_SOCKET_HPP
-#define AFXDP_SOCKET_HPP
+#ifndef XDP_SOCKET_HPP
+#define XDP_SOCKET_HPP
 
 #include <memory>
 #include <vector>
@@ -31,7 +31,7 @@ struct xsk_socket_wrapper;
 /**
  * C++ wrapper for AF_XDP socket with true zero-copy support
  */
-class AFXDPSocket {
+class XdpSocket {
 public:
     // XDP flags (same as Java version)
     static constexpr int XDP_FLAGS_UPDATE_IF_NOEXIST = 1;
@@ -98,20 +98,20 @@ public:
      * @param headroom   Headroom for each frame
      * @throws std::runtime_error If allocation fails
      */
-    AFXDPSocket(int frameSize = 4096, int frameCount = 4096, int headroom = 0);
+    XdpSocket(int frameSize = 4096, int frameCount = 4096, int headroom = 0);
 
     /**
      * Destructor
      */
-    ~AFXDPSocket();
+    ~XdpSocket();
 
     // Copy constructor and assignment operator are deleted
-    AFXDPSocket(const AFXDPSocket&) = delete;
-    AFXDPSocket& operator=(const AFXDPSocket&) = delete;
+    XdpSocket(const XdpSocket&) = delete;
+    XdpSocket& operator=(const XdpSocket&) = delete;
 
     // Move constructor and assignment operator
-    AFXDPSocket(AFXDPSocket&& other) noexcept;
-    AFXDPSocket& operator=(AFXDPSocket&& other) noexcept;
+    XdpSocket(XdpSocket&& other) noexcept;
+    XdpSocket& operator=(XdpSocket&& other) noexcept;
 
     /**
      * Get direct access to the UMEM buffer
@@ -287,4 +287,4 @@ private:
     void checkOpen() const;
 };
 
-#endif // AFXDP_SOCKET_HPP
+#endif // XDP_SOCKET_HPP

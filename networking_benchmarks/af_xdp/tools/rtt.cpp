@@ -1,5 +1,5 @@
 /*
- * probe - High-precision RTT measurement client for the AF_XDP benchmark.
+ * rtt - High-precision RTT measurement client for the AF_XDP benchmark.
  *
  * Measures round-trip latency through the packet replicator with minimal
  * measurement overhead. Timestamps are taken as close to the wire as possible:
@@ -515,11 +515,11 @@ int main(int argc, char* argv[]) {
     std::cout << "====================================================" << std::endl;
 
     // --- Write JSON summary ---
-    std::string json_file = "/tmp/probe_results.json";
+    std::string json_file = "/tmp/rtt_results.json";
     FILE* jf = fopen(json_file.c_str(), "w");
     if (jf) {
         fprintf(jf, "{\n");
-        fprintf(jf, "  \"client\": \"probe\",\n");
+        fprintf(jf, "  \"client\": \"rtt\",\n");
         fprintf(jf, "  \"messages\": %lu,\n", measured);
         fprintf(jf, "  \"warmup\": %lu,\n", warmup);
         fprintf(jf, "  \"rate_mps\": %lu,\n", rate_per_sec);

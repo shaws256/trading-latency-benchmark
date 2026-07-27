@@ -52,14 +52,14 @@ def parse_old_client_txt(filepath):
 
 
 def parse_new_client_json(filepath):
-    """Parse probe JSON output."""
+    """Parse rtt JSON output."""
     try:
         raw = json.loads(filepath.read_text())
     except (json.JSONDecodeError, FileNotFoundError):
         return None
 
     data = {
-        "client": "probe",
+        "client": "rtt",
         "file": filepath.name,
         "rate_mps": raw.get("rate_mps", 0),
         "messages_sent": raw.get("messages", 0),
@@ -148,7 +148,7 @@ td:first-child, td:nth-child(2) {{ text-align: left; }}
 <th>p90</th><th>p99</th><th>p99.9</th><th>Max</th><th>p99 bar</th></tr>
 {rows_html}
 </table>
-<p><span style="color:#4CAF50">Green</span> = probe (new),
+<p><span style="color:#4CAF50">Green</span> = rtt (new),
 <span style="color:#2196F3">Blue</span> = mdp_client (original)</p>
 </body></html>"""
 
@@ -175,7 +175,7 @@ def main():
             results.append(data)
 
     # Parse new client JSON outputs
-    for jf in results_dir.glob("probe_*.json"):
+    for jf in results_dir.glob("rtt_*.json"):
         data = parse_new_client_json(jf)
         if data and data.get("p50_us"):
             results.append(data)

@@ -1,7 +1,7 @@
 /*
- * latency_receiver.cpp — AF_XDP GRE latency receiver.
+ * AF_XDP GRE multicast receiver.
  *
- * Attaches mcast_filter.o to the NIC via XDP, opens an AF_XDP
+ * Attaches mcast.o to the NIC via XDP, opens an AF_XDP
  * socket on the chosen queue, and polls the RX ring directly — no
  * kernel IP stack involvement after the XDP redirect.
  *
@@ -46,12 +46,12 @@ static constexpr uint32_t FILL_SIZE   = 2048;   /* XSK_RING_PROD__DEFAULT_NUM_DE
 static constexpr uint32_t RX_SIZE     = 2048;
 static constexpr uint32_t BATCH       = 64;
 static constexpr uint16_t ETH_P_IPV4  = 0x0800;
-static constexpr int      HDR_SIZE    = 24;     /* seq(8) + ts_ns(8) + feeder_ns(8) */
+static constexpr int      HDR_SIZE    = 24;     /* seq(8) + ts_ns(8) + replicator_ns(8) */
 
 struct __attribute__((packed)) pkt_hdr {
 	uint64_t seq;
 	uint64_t ts_ns;
-	uint64_t feeder_ns;  /* 0 if no feeder stamp; non-zero enables per-hop breakdown */
+	uint64_t replicator_ns;  /* 0 if no replicator stamp; non-zero enables per-hop breakdown */
 };
 
 /* ── globals for signal handler cleanup ──────────────────────────────── */
@@ -112,8 +112,8 @@ static void usage(const char *prog)
 	       "  -c <count>   packets to receive        (default: %d)\n"
 	       "  -t <timeout> seconds before giving up  (default: %d)\n"
 	       "  -q <queue>   XDP/AF_XDP queue index    (default: %d)\n"
-	       "  -B <path>    path to mcast_filter.o\n"
-	       "               (default: ./mcast_filter.o)\n"
+	       "  -B <path>    path to mcast.o\n"
+	       "               (default: ./src/xdp/mcast.o)\n"
 	       "  -r           print raw latencies (ns)\n"
 	       "  -h           this help\n"
 	       "\nRequires root (XDP attach + AF_XDP).\n",
@@ -123,7 +123,7 @@ static void usage(const char *prog)
 int main(int argc, char *argv[])
 {
 	const char *iface    = nullptr;
-	const char *bpf_path = "./mcast_filter.o";
+	const char *bpf_path = "./src/xdp/mcast.o";
 	int  port    = DEF_PORT;
 	int  count   = DEF_COUNT;
 	int  timeout = DEF_TIMEOUT;
@@ -169,9 +169,9 @@ int main(int argc, char *argv[])
 	}
 
 	struct bpf_program *bpf_prog =
-	    bpf_object__find_program_by_name(g_bpf_obj, "mcast_filter");
+	    bpf_object__find_program_by_name(g_bpf_obj, "mcast");
 	if (!bpf_prog) {
-		fprintf(stderr, "error: XDP program 'mcast_filter' not found in %s\n", bpf_path);
+		fprintf(stderr, "error: XDP program 'mcast' not found in %s\n", bpf_path);
 		return 1;
 	}
 	g_xdp_prog_fd = bpf_program__fd(bpf_prog);
@@ -251,8 +251,8 @@ int main(int argc, char *argv[])
 
 	/* ── stats ────────────────────────────────────────────────────────── */
 	std::vector<uint64_t> latencies;       /* total: rx_ns - tx_ns */
-	std::vector<uint64_t> latencies_hop1;  /* hop1:  feeder_ns - tx_ns   (exchange → feeder) */
-	std::vector<uint64_t> latencies_hop2;  /* hop2:  rx_ns - feeder_ns   (feeder → subscriber) */
+	std::vector<uint64_t> latencies_hop1;  /* hop1:  replicator_ns - tx_ns   (source → replicator) */
+	std::vector<uint64_t> latencies_hop2;  /* hop2:  rx_ns - replicator_ns   (replicator → destination) */
 	latencies.reserve(count);
 	latencies_hop1.reserve(count);
 	latencies_hop2.reserve(count);
@@ -269,8 +269,8 @@ int main(int argc, char *argv[])
 	uint64_t min_lat2      = UINT64_MAX;
 	uint64_t max_lat2      = 0;
 	uint64_t sum_lat2      = 0;
-	int      n_neg_h2      = 0;   /* rx_ns < feeder_ns: feeder clock leads subscriber */
-	bool     has_feeder_ts = false;
+	int      n_neg_h2      = 0;   /* rx_ns < replicator_ns: replicator clock leads destination */
+	bool     has_replicator_ts = false;
 
 	printf("AF_XDP listening on %s queue %d  inner UDP dst port=%d  "
 	       "expect=%d  timeout=%ds\n\n",
@@ -352,7 +352,7 @@ int main(int argc, char *argv[])
 
 			uint64_t seq       = betoh64_(hdr->seq);
 			uint64_t tx_ns     = betoh64_(hdr->ts_ns);
-			uint64_t feeder_ns = betoh64_(hdr->feeder_ns);
+			uint64_t replicator_ns = betoh64_(hdr->replicator_ns);
 
 			uint64_t ulat = (rx_ns >= tx_ns) ? (rx_ns - tx_ns) : 0;
 			latencies.push_back(ulat);
@@ -361,13 +361,13 @@ int main(int argc, char *argv[])
 			if (ulat < min_lat) min_lat = ulat;
 			if (ulat > max_lat) max_lat = ulat;
 
-			if (feeder_ns != 0) {
-				has_feeder_ts = true;
-				uint64_t h1 = (feeder_ns >= tx_ns) ? (feeder_ns - tx_ns) : 0;
+			if (replicator_ns != 0) {
+				has_replicator_ts = true;
+				uint64_t h1 = (replicator_ns >= tx_ns) ? (replicator_ns - tx_ns) : 0;
 				latencies_hop1.push_back(h1);
 				sum_lat1 += h1;  if (h1 < min_lat1) min_lat1 = h1;  if (h1 > max_lat1) max_lat1 = h1;
 
-				int64_t h2_signed = (int64_t)rx_ns - (int64_t)feeder_ns;
+				int64_t h2_signed = (int64_t)rx_ns - (int64_t)replicator_ns;
 				if (h2_signed <= 0) {
 					n_neg_h2++;
 				} else {
@@ -433,7 +433,7 @@ next:
 	printf("  Lost:          %d packets\n", lost);
 	printf("  Out of order:  %d\n", ooo);
 
-	if (has_feeder_ts) {
+	if (has_replicator_ts) {
 		uint64_t n1 = (uint64_t)latencies_hop1.size();
 		uint64_t n2 = (uint64_t)latencies_hop2.size();
 
@@ -443,10 +443,10 @@ next:
 		for (int p : pcts)
 			printf("    P%-3d  %8.1f\n", p, pct(latencies_hop1, p) / 1000.0);
 
-		printf("\n  Hop 2 — Feeder → Subscriber (usec):\n");
+		printf("\n  Hop 2 — Feeder → Destination (usec):\n");
 		if (n_neg_h2 > 0) {
 			int total_h2 = n_neg_h2 + (int)latencies_hop2.size();
-			printf("    [!] %d/%d samples negative (feeder clock leads subscriber by > transit time)\n",
+			printf("    [!] %d/%d samples negative (replicator clock leads destination by > transit time)\n",
 			       n_neg_h2, total_h2);
 			printf("        Ensure refclock PHC /dev/ptp0 is active on all nodes (phc_enable=1).\n");
 		}
@@ -460,8 +460,8 @@ next:
 		}
 	}
 
-	printf("\n  Total — Exchange → Subscriber (usec):%s\n",
-	       has_feeder_ts ? "" : "  (no feeder timestamps; single-hop view)");
+	printf("\n  Total — Exchange → Destination (usec):%s\n",
+	       has_replicator_ts ? "" : "  (no replicator timestamps; single-hop view)");
 	printf("    Min: %8.1f   Avg: %8.1f   Max: %8.1f\n",
 	       min_lat / 1000.0, avg_lat / 1000.0, max_lat / 1000.0);
 	for (int p : pcts)

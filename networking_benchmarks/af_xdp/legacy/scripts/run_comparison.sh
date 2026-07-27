@@ -3,7 +3,7 @@
 #
 # Usage: ./run_comparison.sh <server_ip> <client_ip> <local_port> [config_file]
 #
-# Runs probe and mdp_client back-to-back for comparison,
+# Runs rtt and mdp_client back-to-back for comparison,
 # at multiple rates, collecting results into results/<timestamp>/.
 # Generates a comparison report via generate_comparison_report.py.
 
@@ -59,14 +59,14 @@ run_old_client() {
 
 run_new_client() {
     local rate=$1
-    local label="probe_${rate}mps"
-    echo "[${label}] Running probe @ ${rate} msg/sec..."
-    "${SCRIPT_DIR}/probe" \
+    local label="rtt_${rate}mps"
+    echo "[${label}] Running rtt @ ${rate} msg/sec..."
+    "${SCRIPT_DIR./rtt" \
         "${SERVER_IP}" 9000 "${CLIENT_IP}" "$((LOCAL_PORT + 1))" \
         "${MESSAGES}" "${rate}" "${WARMUP}" "${SEND_CPU}" "${RECV_CPU}" \
         > "${RESULTS_DIR}/${label}.txt" 2>&1 || true
     # Copy JSON output
-    cp /tmp/probe_results.json "${RESULTS_DIR}/${label}.json" 2>/dev/null || true
+    cp /tm./rtt_results.json "${RESULTS_DIR}/${label}.json" 2>/dev/null || true
     echo "[${label}] Done."
     sleep 2
 }
