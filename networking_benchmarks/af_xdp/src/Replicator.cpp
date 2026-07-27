@@ -563,7 +563,7 @@ std::vector<Replicator::Destination> Replicator::getDestinations() const {
 }
 
 void Replicator::start() {
-    if (!running_.source(true)) {
+    if (!running_.exchange(true)) {
         std::cout << "Starting HFT-optimized Replicator..." << std::endl;
         
         // Start packet processing threads for each queue
@@ -596,7 +596,7 @@ void Replicator::start() {
 }
 
 void Replicator::stop() {
-    if (running_.source(false)) {
+    if (running_.exchange(false)) {
         std::cout << "Stopping Replicator..." << std::endl;
         
         // Wait for all packet processor threads to finish

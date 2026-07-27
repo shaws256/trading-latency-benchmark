@@ -746,7 +746,7 @@ void XdpSocket::checkOpen() const {
 }
 
 void XdpSocket::close() {
-    if (closed_.source(true) == false) {
+    if (closed_.exchange(true) == false) {
         // Complete any pending TX (use class-level outstanding_tx_, not wrapper_->outstanding_tx
         // which is never updated and always reads 0)
         if (wrapper_ && wrapper_->xsk && outstanding_tx_ > 0) {
