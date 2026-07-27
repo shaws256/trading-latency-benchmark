@@ -16,7 +16,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "AFXDPSocket.hpp"
+#include "XdpSocket.hpp"
 #include <stdexcept>
 #include <cstring>
 #include <cstdlib>
@@ -78,12 +78,12 @@ struct xsk_socket_wrapper
 };
 
 // Static methods
-void AFXDPSocket::enableDebug(bool enable) {
+void XdpSocket::enableDebug(bool enable) {
     g_debug_enabled = enable;
     DEBUG_PRINT("Debug mode %s\n", enable ? "enabled" : "disabled");
 }
 
-void* AFXDPSocket::allocateAlignedBuffer(int size) {
+void* XdpSocket::allocateAlignedBuffer(int size) {
     // Get page size
     long pageSize = sysconf(_SC_PAGESIZE);
 
@@ -117,7 +117,7 @@ void* AFXDPSocket::allocateAlignedBuffer(int size) {
     return buffer;
 }
 
-void AFXDPSocket::freeAlignedBuffer(void* buffer, size_t size) {
+void XdpSocket::freeAlignedBuffer(void* buffer, size_t size) {
     if (!buffer) {
         return;
     }
@@ -127,7 +127,7 @@ void AFXDPSocket::freeAlignedBuffer(void* buffer, size_t size) {
     DEBUG_PRINT("Freed aligned buffer at %p, size %zu\n", buffer, size);
 }
 
-int AFXDPSocket::setResourceLimits() {
+int XdpSocket::setResourceLimits() {
     struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
 
     DEBUG_PRINT("Setting RLIMIT_MEMLOCK to INFINITY\n");
@@ -153,7 +153,7 @@ int AFXDPSocket::setResourceLimits() {
     return 0;
 }
 
-void AFXDPSocket::loadXdpProgram(const std::string& ifName, const std::string& programPath, bool nativeMode) {
+void XdpSocket::loadXdpProgram(const std::string& ifName, const std::string& programPath, bool nativeMode) {
     if (!nativeMode) {
         opt_attach_mode = XDP_MODE_SKB;
     }
@@ -204,7 +204,7 @@ void AFXDPSocket::loadXdpProgram(const std::string& ifName, const std::string& p
     }
 }
 
-int AFXDPSocket::getXdpMapFd(const std::string& mapName) {
+int XdpSocket::getXdpMapFd(const std::string& mapName) {
     if (!xdp_prog)
         return -1;
     struct bpf_object *bpf_obj = xdp_program__bpf_obj(xdp_prog);
@@ -216,7 +216,7 @@ int AFXDPSocket::getXdpMapFd(const std::string& mapName) {
     return bpf_map__fd(map);
 }
 
-void AFXDPSocket::unloadXdpProgram(const std::string& ifName, bool nativeMode) {
+void XdpSocket::unloadXdpProgram(const std::string& ifName, bool nativeMode) {
     if (!nativeMode) {
         opt_attach_mode = XDP_MODE_SKB;
     }
@@ -231,7 +231,7 @@ void AFXDPSocket::unloadXdpProgram(const std::string& ifName, bool nativeMode) {
 }
 
 // Constructor
-AFXDPSocket::AFXDPSocket(int frameSize, int frameCount, int headroom)
+XdpSocket::XdpSocket(int frameSize, int frameCount, int headroom)
     : closed_(false), chunk_size_(frameSize), headroom_(headroom),
       tx_frames_(DEFAULT_TX_FRAMES), rx_frames_(DEFAULT_RX_FRAMES),
       outstanding_tx_(0) {
@@ -260,12 +260,12 @@ AFXDPSocket::AFXDPSocket(int frameSize, int frameCount, int headroom)
     // Use page-aligned allocation for AF_XDP compatibility
     umem_buffer_ = allocateAlignedBuffer(umem_buffer_size_);
     
-    DEBUG_PRINT("AFXDPSocket created: TX frames=%d, RX frames=%d, chunk_size=%d, buffer_size=%zu\n",
+    DEBUG_PRINT("XdpSocket created: TX frames=%d, RX frames=%d, chunk_size=%d, buffer_size=%zu\n",
                 tx_frames_, rx_frames_, chunk_size_, umem_buffer_size_);
 }
 
 // Move constructor
-AFXDPSocket::AFXDPSocket(AFXDPSocket&& other) noexcept
+XdpSocket::XdpSocket(XdpSocket&& other) noexcept
     : wrapper_(std::move(other.wrapper_)),
       umem_buffer_(other.umem_buffer_),
       umem_buffer_size_(other.umem_buffer_size_),
@@ -283,7 +283,7 @@ AFXDPSocket::AFXDPSocket(AFXDPSocket&& other) noexcept
 }
 
 // Move assignment operator
-AFXDPSocket& AFXDPSocket::operator=(AFXDPSocket&& other) noexcept {
+XdpSocket& XdpSocket::operator=(XdpSocket&& other) noexcept {
     if (this != &other) {
         close();
         wrapper_ = std::move(other.wrapper_);
@@ -305,7 +305,7 @@ AFXDPSocket& AFXDPSocket::operator=(AFXDPSocket&& other) noexcept {
 }
 
 // Destructor
-AFXDPSocket::~AFXDPSocket() {
+XdpSocket::~XdpSocket() {
     close();
     if (umem_buffer_) {
         freeAlignedBuffer(umem_buffer_, umem_buffer_size_);
@@ -314,18 +314,18 @@ AFXDPSocket::~AFXDPSocket() {
     }
 }
 
-uint8_t* AFXDPSocket::getUmemBuffer() {
+uint8_t* XdpSocket::getUmemBuffer() {
     if (closed_.load()) {
         return nullptr;
     }
     return static_cast<uint8_t*>(umem_buffer_);
 }
 
-size_t AFXDPSocket::getUmemBufferSize() const {
+size_t XdpSocket::getUmemBufferSize() const {
     return umem_buffer_size_;
 }
 
-int AFXDPSocket::setupUMem() {
+int XdpSocket::setupUMem() {
     checkOpen();
 
     if (!umem_buffer_) {
@@ -372,7 +372,7 @@ int AFXDPSocket::setupUMem() {
     return 0;
 }
 
-int AFXDPSocket::bind(const std::string& ifName, int queueId, int flags) {
+int XdpSocket::bind(const std::string& ifName, int queueId, int flags) {
     checkOpen();
 
     if (!wrapper_->umem) {
@@ -463,7 +463,7 @@ int AFXDPSocket::bind(const std::string& ifName, int queueId, int flags) {
     return 0;
 }
 
-int AFXDPSocket::sendBatch(const std::vector<int>& offsets, const std::vector<int>& lengths, int batchSize) {
+int XdpSocket::sendBatch(const std::vector<int>& offsets, const std::vector<int>& lengths, int batchSize) {
     checkOpen();
 
     if (offsets.size() < static_cast<size_t>(batchSize) || lengths.size() < static_cast<size_t>(batchSize)) {
@@ -517,7 +517,7 @@ int AFXDPSocket::sendBatch(const std::vector<int>& offsets, const std::vector<in
     return batchSize;
 }
 
-void AFXDPSocket::pollTxCompletions() {
+void XdpSocket::pollTxCompletions() {
     if (!outstanding_tx_) return;
 
     uint32_t idx = 0;
@@ -530,7 +530,7 @@ void AFXDPSocket::pollTxCompletions() {
     DEBUG_PRINT("Released %u TX completions, %u still outstanding\n", completed, outstanding_tx_);
 }
 
-void AFXDPSocket::requestDriverPoll() {
+void XdpSocket::requestDriverPoll() {
     // No checkOpen(): called from replicatePacket after the fan-out loop,
     // inside processPacketsForQueue's running_ guard.
 
@@ -554,20 +554,20 @@ void AFXDPSocket::requestDriverPoll() {
     DEBUG_PRINT("Driver wakeup sendto error: %s (errno=%d)\n", strerror(errno), errno);
 }
 
-int AFXDPSocket::reserveTxRing(int count, uint32_t* tx_idx) {
+int XdpSocket::reserveTxRing(int count, uint32_t* tx_idx) {
     // No checkOpen(): called only from sendSinglePacketDirect which is guarded
     // by sendToDestinationWithQueue's queueId/socket validity check.
     return xsk_ring_prod__reserve(&wrapper_->tx, count, tx_idx);
 }
 
-void AFXDPSocket::setTxDescriptor(uint32_t idx, uint64_t addr, uint32_t len) {
+void XdpSocket::setTxDescriptor(uint32_t idx, uint64_t addr, uint32_t len) {
     // No checkOpen(): same caller-chain guarantee as reserveTxRing.
     struct xdp_desc* tx_desc = xsk_ring_prod__tx_desc(&wrapper_->tx, idx);
     tx_desc->addr = addr;
     tx_desc->len = len;
 }
 
-void AFXDPSocket::submitTxRing(int count) {
+void XdpSocket::submitTxRing(int count) {
     // No checkOpen(): same caller-chain guarantee as reserveTxRing.
     // Submit TX ring and track outstanding packets (ena-xdp pattern)
     xsk_ring_prod__submit(&wrapper_->tx, count);
@@ -575,7 +575,7 @@ void AFXDPSocket::submitTxRing(int count) {
     DEBUG_PRINT("Submitted %d TX packets, outstanding_tx=%u\n", count, outstanding_tx_);
 }
 
-int AFXDPSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
+int XdpSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
     checkOpen();
 
     // Get array length (max number of packets we can receive)
@@ -631,7 +631,7 @@ int AFXDPSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
     return valid_packets;
 }
 
-void AFXDPSocket::recycleFrames() {
+void XdpSocket::recycleFrames() {
     checkOpen();
     
     if (!pending_recycle_addrs_.empty()) {
@@ -673,7 +673,7 @@ void AFXDPSocket::recycleFrames() {
     }
 }
 
-int AFXDPSocket::getFd() {
+int XdpSocket::getFd() {
     checkOpen();
     
     int fd = xsk_socket__fd(wrapper_->xsk);
@@ -683,7 +683,7 @@ int AFXDPSocket::getFd() {
     return fd;
 }
 
-int AFXDPSocket::registerXskMap(int queueId) {
+int XdpSocket::registerXskMap(int queueId) {
     checkOpen();
     
     if (!xdp_prog) {
@@ -735,18 +735,18 @@ int AFXDPSocket::registerXskMap(int queueId) {
     return 0;
 }
 
-bool AFXDPSocket::isClosed() const {
+bool XdpSocket::isClosed() const {
     return closed_.load();
 }
 
-void AFXDPSocket::checkOpen() const {
+void XdpSocket::checkOpen() const {
     if (closed_.load()) {
         throw std::runtime_error("Socket is closed");
     }
 }
 
-void AFXDPSocket::close() {
-    if (closed_.exchange(true) == false) {
+void XdpSocket::close() {
+    if (closed_.source(true) == false) {
         // Complete any pending TX (use class-level outstanding_tx_, not wrapper_->outstanding_tx
         // which is never updated and always reads 0)
         if (wrapper_ && wrapper_->xsk && outstanding_tx_ > 0) {

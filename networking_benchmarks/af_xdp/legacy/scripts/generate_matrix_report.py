@@ -118,7 +118,7 @@ def load_fleet_metadata(results_dir: Path) -> dict:
 
 
 def parse_result_json(filepath: Path) -> Optional[dict]:
-    """Parse a latency_client JSON result file."""
+    """Parse a rtt JSON result file."""
     try:
         raw = json.loads(filepath.read_text())
         svc = raw.get("service_rtt_us", {})
@@ -144,7 +144,7 @@ def parse_result_json(filepath: Path) -> Optional[dict]:
 
 
 def parse_result_txt(filepath: Path) -> Optional[dict]:
-    """Fallback: parse latency_client text output if JSON is missing."""
+    """Fallback: parse rtt text output if JSON is missing."""
     try:
         text = filepath.read_text()
     except FileNotFoundError:

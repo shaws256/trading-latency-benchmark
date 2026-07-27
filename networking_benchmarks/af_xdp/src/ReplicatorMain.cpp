@@ -15,7 +15,7 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#include "PacketReplicator.hpp"
+#include "Replicator.hpp"
 #include <iostream>
 #include <string>
 #include <thread>
@@ -23,8 +23,8 @@
 #include <signal.h>
 #include <unistd.h>
 
-static std::unique_ptr<PacketReplicator> g_replicator;
-static volatile bool g_running = true;
+static std::unique_ptr<Replicator> g_replicator;
+volatile bool g_running = true;
 
 void signalHandler(int signum) {
     std::cout << "\nReceived signal " << signum << ", shutting down..." << std::endl;
@@ -34,24 +34,32 @@ void signalHandler(int signum) {
     }
 }
 
+// Forward declaration for kernel-mode echo server
+extern int run_kernel_mode(const std::string& listen_ip, uint16_t listen_port);
+
 void printUsage(const char* progName) {
     std::cout << "Usage: " << progName
-              << " <interface> <listen_ip> <listen_port> [zero_copy] [--gre]"
+              << " [--kernel-mode] <interface> <listen_ip> <listen_port> [zero_copy] [--gre]"
               << " [--ctrl <group>:<port>] [--producer <ip>:<port>]" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  --kernel-mode Use standard UDP sockets instead of AF_XDP." << std::endl;
+    std::cout << "                No root required. Works in containers and on macOS." << std::endl;
+    std::cout << "                Usage: " << progName << " --kernel-mode <listen_ip> <listen_port>" << std::endl;
+    std::cout << std::endl;
     std::cout << "  interface:    Network interface to bind to (e.g., eth0)" << std::endl;
     std::cout << "  listen_ip:    Unicast IP to listen on (unicast mode), or inner multicast" << std::endl;
     std::cout << "                group address (GRE mode, required)." << std::endl;
     std::cout << "  listen_port:  UDP data port." << std::endl;
     std::cout << "  zero_copy:    'true' to enable zero-copy mode (default: true)" << std::endl;
     std::cout << "  --gre:        GRE tunnel mode — outer unicast GRE carries inner multicast." << std::endl;
-    std::cout << "                Loads gre_filter.o; listen_ip is the inner multicast group." << std::endl;
-    std::cout << "                Subscribers register via CTRL_MCAST_JOIN (control_client mcast)." << std::endl;
-    std::cout << "  --ctrl <g:p>  Multicast group:port where subscribers send control messages." << std::endl;
+    std::cout << "                Loads mcast_filter.o; listen_ip is the inner multicast group." << std::endl;
+    std::cout << "                Destinations register via CTRL_MCAST_JOIN (ctl mcast)." << std::endl;
+    std::cout << "  --ctrl <g:p>  Multicast group:port where destinations send control messages." << std::endl;
     std::cout << "                Feeder joins this group and listens for control datagrams." << std::endl;
     std::cout << "                Requires --producer." << std::endl;
     std::cout << "  --producer <ip:port>" << std::endl;
     std::cout << "                Unicast endpoint of the upstream producer." << std::endl;
-    std::cout << "                Control messages received from subscribers are forwarded here." << std::endl;
+    std::cout << "                Control messages received from destinations are forwarded here." << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
     std::cout << "  # Unicast mode:" << std::endl;
@@ -80,6 +88,24 @@ void printStatisticsLoop() {
 }
 
 int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        printUsage(argv[0]);
+        return 1;
+    }
+
+    // Kernel mode: simple UDP echo, no AF_XDP, no root required
+    if (std::string(argv[1]) == "--kernel-mode") {
+        if (argc < 4) {
+            std::cerr << "Usage: " << argv[0] << " --kernel-mode <listen_ip> <listen_port>" << std::endl;
+            return 1;
+        }
+        signal(SIGINT, signalHandler);
+        signal(SIGTERM, signalHandler);
+        std::string ip = argv[2];
+        uint16_t port = static_cast<uint16_t>(std::stoi(argv[3]));
+        return run_kernel_mode(ip, port);
+    }
+
     if (argc < 4) {
         printUsage(argv[0]);
         return 1;
@@ -89,6 +115,7 @@ int main(int argc, char* argv[]) {
     if (getuid() != 0) {
         std::cerr << "Error: This program must be run as root for AF_XDP access" << std::endl;
         std::cerr << "Please run with: sudo " << argv[0] << " ..." << std::endl;
+        std::cerr << "Or use --kernel-mode for testing without root." << std::endl;
         return 1;
     }
 
@@ -153,7 +180,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Ctrl group:   " << ctrl_group << ":" << ctrl_port << std::endl;
         std::cout << "Producer:     " << producer_ip << ":" << producer_port << std::endl;
     }
-    std::cout << "Control Port: " << PacketReplicator::CONTROL_PORT << std::endl;
+    std::cout << "Control Port: " << Replicator::CONTROL_PORT << std::endl;
     std::cout << "=================================" << std::endl;
 
     // Setup signal handlers
@@ -162,7 +189,7 @@ int main(int argc, char* argv[]) {
 
     try {
         // Create and initialize the replicator
-        g_replicator = std::make_unique<PacketReplicator>(interface, listen_ip, listen_port, num_queues);
+        g_replicator = std::make_unique<Replicator>(interface, listen_ip, listen_port, num_queues);
 
         if (use_gre) {
             g_replicator->setGREMode(true);
@@ -182,14 +209,14 @@ int main(int argc, char* argv[]) {
         std::thread stats_thread(printStatisticsLoop);
         
         std::cout << "Packet replicator is running!" << std::endl;
-        std::cout << "Control protocol available on port " << PacketReplicator::CONTROL_PORT << std::endl;
+        std::cout << "Control protocol available on port " << Replicator::CONTROL_PORT << std::endl;
         std::cout << "Press Ctrl+C to stop..." << std::endl;
         std::cout << std::endl;
         
         // Print initial help
         std::cout << "To add destinations, use the control client:" << std::endl;
-        std::cout << "  ./control_client add <dest_ip> <dest_port>" << std::endl;
-        std::cout << "  ./control_client list" << std::endl;
+        std::cout << "  ./ctl add <dest_ip> <dest_port>" << std::endl;
+        std::cout << "  ./ctl list" << std::endl;
         std::cout << std::endl;
         
         // Main loop - just wait for signal

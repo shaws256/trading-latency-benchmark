@@ -16,15 +16,15 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef NETWORK_INTERFACE_CONFIGURATOR_HPP
-#define NETWORK_INTERFACE_CONFIGURATOR_HPP
+#ifndef NIC_CONFIG_HPP
+#define NIC_CONFIG_HPP
 
 #include <string>
 
 /**
  * Helper class to configure network interfaces for XDP
  */
-class NetworkInterfaceConfigurator {
+class NicConfig {
 public:
     /**
      * Check if the current process has root privileges
@@ -84,4 +84,4 @@ private:
     static std::string executeCommandWithOutput(const std::string& command);
 };
 
-#endif // NETWORK_INTERFACE_CONFIGURATOR_HPP
+#endif // NIC_CONFIG_HPP

@@ -1,4 +1,4 @@
-// gre_filter.c — XDP program for GRE-encapsulated multicast UDP interception
+// mcast.c — XDP program for GRE-encapsulated multicast UDP interception
 /*
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -13,7 +13,7 @@
  *   Ethernet / outer IPv4 (proto=47) / GRE / inner IPv4 (proto=17) / UDP / payload
  *
  * Optional GRE fields (checksum, key, sequence) are handled via the flags word.
- * Same config_map / xsks_map layout as unicast_filter.c —
+ * Same config_map / xsks_map layout as ucast_filter.c —
  * no userspace config changes needed: target_ip is the inner multicast group,
  * target_port is the inner UDP destination port.
  */
@@ -89,7 +89,7 @@ static inline void increment_counter(int index)
 }
 
 SEC("xdp")
-int gre_filter(struct xdp_md *ctx)
+int mcast(struct xdp_md *ctx)
 {
     void *data_end = (void *)(long)ctx->data_end;
     void *data     = (void *)(long)ctx->data;

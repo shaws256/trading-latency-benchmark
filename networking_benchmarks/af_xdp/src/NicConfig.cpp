@@ -16,7 +16,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "NetworkInterfaceConfigurator.hpp"
+#include "NicConfig.hpp"
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
@@ -25,11 +25,11 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
-bool NetworkInterfaceConfigurator::hasRootPrivileges() {
+bool NicConfig::hasRootPrivileges() {
     return getuid() == 0;
 }
 
-int NetworkInterfaceConfigurator::configureForXdp(const std::string& interfaceName) {
+int NicConfig::configureForXdp(const std::string& interfaceName) {
     if (!hasRootPrivileges()) {
         std::cerr << "Warning: Not running as root, network interface configuration may fail" << std::endl;
     }
@@ -62,7 +62,7 @@ int NetworkInterfaceConfigurator::configureForXdp(const std::string& interfaceNa
     return headroom;
 }
 
-std::string NetworkInterfaceConfigurator::getDriverName(const std::string& interfaceName) {
+std::string NicConfig::getDriverName(const std::string& interfaceName) {
     std::string command = "ethtool -i " + interfaceName + " 2>/dev/null | grep '^driver:' | cut -d: -f2 | tr -d ' '";
     std::string output = executeCommandWithOutput(command);
     
@@ -79,7 +79,7 @@ std::string NetworkInterfaceConfigurator::getDriverName(const std::string& inter
     return output;
 }
 
-int NetworkInterfaceConfigurator::determineHeadroom(const std::string& driverName) {
+int NicConfig::determineHeadroom(const std::string& driverName) {
     // Common driver-specific headroom values
     if (driverName == "i40e" || driverName == "ixgbe" || driverName == "ixgbevf") {
         return 256; // Intel drivers typically use 256B headroom
@@ -96,7 +96,7 @@ int NetworkInterfaceConfigurator::determineHeadroom(const std::string& driverNam
     }
 }
 
-void NetworkInterfaceConfigurator::optimizeForXdp(const std::string& interfaceName) {
+void NicConfig::optimizeForXdp(const std::string& interfaceName) {
     if (!hasRootPrivileges()) {
         std::cerr << "Warning: Not running as root, network optimization may fail" << std::endl;
         return;
@@ -124,7 +124,7 @@ void NetworkInterfaceConfigurator::optimizeForXdp(const std::string& interfaceNa
     std::cout << "Applied basic XDP optimizations to " << interfaceName << std::endl;
 }
 
-int NetworkInterfaceConfigurator::executeCommand(const std::string& command) {
+int NicConfig::executeCommand(const std::string& command) {
     int result = std::system(command.c_str());
     if (result == -1) {
         return -1;
@@ -132,7 +132,7 @@ int NetworkInterfaceConfigurator::executeCommand(const std::string& command) {
     return WEXITSTATUS(result);
 }
 
-std::string NetworkInterfaceConfigurator::executeCommandWithOutput(const std::string& command) {
+std::string NicConfig::executeCommandWithOutput(const std::string& command) {
     FILE* pipe = popen(command.c_str(), "r");
     if (!pipe) {
         return "";

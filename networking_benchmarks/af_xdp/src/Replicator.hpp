@@ -19,7 +19,7 @@
 #ifndef PACKET_REPLICATOR_HPP
 #define PACKET_REPLICATOR_HPP
 
-#include "AFXDPSocket.hpp"
+#include "XdpSocket.hpp"
 #include <string>
 #include <vector>
 #include <atomic>
@@ -44,15 +44,15 @@
  * 3. Replicates received packets to multiple destination EC2 instances
  * 4. Provides control protocol for managing destination instances
  */
-class PacketReplicator {
+class Replicator {
 public:
     // Control protocol constants
     static constexpr int CONTROL_PORT = 12345;
     static constexpr uint8_t CTRL_ADD_DESTINATION    = 1;
     static constexpr uint8_t CTRL_REMOVE_DESTINATION = 2;
     static constexpr uint8_t CTRL_LIST_DESTINATIONS  = 3;
-    // Per-group subscription: subscriber specifies which group + port to receive on.
-    // Feeder infers subscriber IP from the UDP source address of the control message.
+    // Per-group subscription: destination specifies which group + port to receive on.
+    // Replicator infers destination IP from the UDP source address of the control message.
     static constexpr uint8_t CTRL_MCAST_JOIN  = 4;  // [4][4B group]
     static constexpr uint8_t CTRL_MCAST_LEAVE = 5;  // [5][4B group]
 
@@ -85,27 +85,27 @@ private:
     // Per-group BPF state.  All maps keyed by group IP in network byte order,
     // protected by group_mutex_.  Used by GRE mode only.
     std::unordered_map<uint32_t, uint32_t> group_slots_;        // group NBO → config_map slot index
-    std::unordered_map<uint32_t, int>      group_ref_counts_;   // group NBO → subscriber join count
+    std::unordered_map<uint32_t, int>      group_ref_counts_;   // group NBO → destination join count
     std::vector<uint32_t>                  free_slots_;         // available config_map slot indices
     std::mutex                             group_mutex_;
 
-    // Per-group subscriber destinations.  Protected by destinations_mutex_.
-    // Maps group NBO → (subscriber IP string → Destination with port + ARP-resolved MAC).
+    // Per-group destination destinations.  Protected by destinations_mutex_.
+    // Maps group NBO → (destination IP string → Destination with port + ARP-resolved MAC).
     // Populated by CTRL_MCAST_JOIN (GRE mode).
     std::unordered_map<uint32_t, std::unordered_map<std::string, Destination>> group_destinations_;
 
     // listen_ip_ parsed to NBO once at initialize(); used as cache key in unicast mode.
     uint32_t listen_ip_nbo_{0};
 
-    // Upstream control: subscriber multicast → feeder → producer forwarding
-    std::string ctrl_multicast_group_;  // Multicast group subscribers send control messages to
+    // Upstream control: destination multicast → replicator → producer forwarding
+    std::string ctrl_multicast_group_;  // Multicast group destinations send control messages to
     uint16_t    ctrl_multicast_port_{0};
     std::string producer_ip_;           // Unicast IP of upstream producer to forward control to
     uint16_t    producer_port_{0};
     int ctrl_multicast_socket_{-1};     // Receives control multicast; holds IGMP membership
     int ctrl_forward_socket_{-1};       // Sends forwarded control messages to producer
     
-    std::vector<std::unique_ptr<AFXDPSocket>> xdp_sockets_;
+    std::vector<std::unique_ptr<XdpSocket>> xdp_sockets_;
     int control_socket_;
     int output_socket_;  // Fallback regular socket
     
@@ -115,13 +115,13 @@ private:
     std::unique_ptr<std::thread> ctrl_upstream_thread_;
     
     mutable std::mutex destinations_mutex_;
-    // Canonical subscriber registry: IP string → Destination (with ARP-resolved MAC).
+    // Canonical destination registry: IP string → Destination (with ARP-resolved MAC).
     // Protected by destinations_mutex_.
     std::unordered_map<std::string, Destination> all_destinations_;
     
     // HFT OPTIMIZATIONS: Thread-local destination cache (per group / unicast)
     struct alignas(64) ThreadLocalDestCache {
-        // Maps multicast group NBO → subscribers interested in that group.
+        // Maps multicast group NBO → destinations interested in that group.
         std::unordered_map<uint32_t, std::vector<Destination>> group_dests;
         std::chrono::steady_clock::time_point last_update;
         bool valid{false};
@@ -144,27 +144,27 @@ private:
 
 public:
     /**
-     * Creates a new PacketReplicator
+     * Creates a new Replicator
      * 
      * @param interface Network interface to bind to (e.g., "eth0")
      * @param listenIp  IP address to listen on
      * @param listenPort Port to listen on
      * @throws std::runtime_error If initialization fails
      */
-    PacketReplicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort, int numQueues = 4);
+    Replicator(const std::string& interface, const std::string& listenIp, uint16_t listenPort, int numQueues = 4);
 
     /**
      * Destructor
      */
-    ~PacketReplicator();
+    ~Replicator();
 
     // Copy constructor and assignment operator are deleted
-    PacketReplicator(const PacketReplicator&) = delete;
-    PacketReplicator& operator=(const PacketReplicator&) = delete;
+    Replicator(const Replicator&) = delete;
+    Replicator& operator=(const Replicator&) = delete;
 
     // Move constructor and assignment operator
-    PacketReplicator(PacketReplicator&& other) noexcept;
-    PacketReplicator& operator=(PacketReplicator&& other) noexcept;
+    Replicator(Replicator&& other) noexcept;
+    Replicator& operator=(Replicator&& other) noexcept;
 
     /**
      * Initialize AF_XDP socket and XDP program
@@ -177,8 +177,8 @@ public:
     /**
      * Enable GRE tunnel mode.
      * Must be called before initialize().
-     * In GRE mode: gre_filter.o is loaded; the outer unicast GRE frame arrives on
-     * eth0 (preserving XDP_ZEROCOPY on ENA) and PacketReplicator strips the GRE
+     * In GRE mode: mcast_filter.o is loaded; the outer unicast GRE frame arrives on
+     * eth0 (preserving XDP_ZEROCOPY on ENA) and Replicator strips the GRE
      * headers in userspace.  listen_ip_ still holds the inner multicast group
      * address used for config_map; no IGMP join is performed.
      */
@@ -186,8 +186,8 @@ public:
 
     /**
      * Configure upstream control forwarding.
-     * Subscribers send control messages to ctrlGroup:ctrlPort (multicast).
-     * The feeder receives them and forwards to producerIp:producerPort (unicast).
+     * Destinations send control messages to ctrlGroup:ctrlPort (multicast).
+     * The replicator receives them and forwards to producerIp:producerPort (unicast).
      * Must be called before initialize().
      */
     void setUpstreamControl(const std::string& ctrlGroup, uint16_t ctrlPort,
@@ -276,7 +276,7 @@ private:
     void removeGroupDynamic(uint32_t group_nbo);
 
     /**
-     * Join the control multicast group so the feeder receives subscriber control messages.
+     * Join the control multicast group so the replicator receives destination control messages.
      */
     void joinControlMulticastGroup();
 
@@ -311,7 +311,7 @@ private:
     /**
      * Extract UDP payload from a packet (dispatches to GRE or plain path).
      * Also returns the multicast group NBO address via group_nbo (used for per-group fan-out).
-     * Non-GRE: group_nbo = outer IP daddr (the multicast group the exchange sent to).
+     * Non-GRE: group_nbo = outer IP daddr (the multicast group the source sent to).
      * GRE:     group_nbo = inner IP daddr (the multicast group encapsulated in the GRE frame).
      */
     bool extractUdpPayload(const uint8_t* packetData, size_t packetLen,
@@ -370,7 +370,7 @@ private:
      * Create GRE-encapsulated packet for zero-copy transmission (GRE mode).
      * Layout: Eth + outer IPv4(proto=GRE) + GRE(4B) + inner_ip datagram verbatim.
      *
-     * @param destination  Target subscriber (outer unicast destination)
+     * @param destination  Target destination (outer unicast destination)
      * @param inner_ip     Inner IP datagram to encapsulate (IPv4+UDP+payload)
      * @param inner_ip_len Length of inner IP datagram
      * @param buffer       Output buffer
@@ -456,7 +456,7 @@ private:
     /**
      * Get cached destinations for a group (lock-free after first call per 100ms).
      * GRE mode: keyed by inner multicast group NBO.
-     * Unicast mode: keyed by listen_ip_nbo_ (feeder's unicast address).
+     * Unicast mode: keyed by listen_ip_nbo_ (replicator's unicast address).
      * Returns a const ref to the thread-local vector — no copy on hot path.
      */
     const std::vector<Destination>& getCachedGroupDestinations(uint32_t group_nbo);

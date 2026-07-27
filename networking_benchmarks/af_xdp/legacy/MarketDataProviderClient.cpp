@@ -183,11 +183,11 @@ public:
     }
     
     bool addSelfAsSubscriber() {
-        // Use control_client to add ourselves as a subscriber.
+        // Use ctl to add ourselves as a subscriber.
         // In GRE mode multiplexer_ip_ is the multicast group; feeder_ctrl_ip_ is the
         // feeder's unicast IP where the control protocol (port 12345) is listening.
         std::stringstream cmd;
-        cmd << "./control_client " << feeder_ctrl_ip_ << " add " << local_ip_ << " " << local_port_;
+        cmd << "./ctl " << feeder_ctrl_ip_ << " add " << local_ip_ << " " << local_port_;
         
         std::cout << "Adding self as subscriber: " << cmd.str() << std::endl;
         

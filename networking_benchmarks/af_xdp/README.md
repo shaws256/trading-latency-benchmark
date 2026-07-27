@@ -1,292 +1,203 @@
-# AF_XDP Zero-Copy Performance Benchmark
+# AF_XDP Network Latency Benchmark
 
-High-performance, low-latency UDP packet replicator using AF_XDP kernel bypass technology for market data distribution.
+High-performance network latency measurement suite using AF_XDP kernel bypass.
+Measures round-trip and one-way latency between EC2 instances at microsecond precision.
 
-## Architecture
+## Use Cases
+
+### 1. Unicast RTT Matrix (primary)
+
+Measure NxN pairwise latency across a fleet of instances.
 
 ```
-Exchange / Mock Exchange
-    │  UDP multicast  224.0.31.50:5000
-    │  (wrapped in GRE unicast on AWS VPC — see GRE mode below)
-    ▼
-PacketReplicator  (feeder host, eth0)
-    │  AF_XDP zero-copy RX  →  eBPF XDP program intercepts matching frames
-    │  Extracts UDP payload in userspace
-    │  Fan-out: AF_XDP zero-copy TX to each subscriber
-    ▼
-Trading strategy instances  (unicast UDP, any port)
+┌──────────┐   UDP   ┌─────────────┐  echo   ┌──────────┐
+│   rtt    │ ──────► │  replicator │ ──────► │   rtt    │
+│ (node A) │ ◄────── │  (node B)   │ ◄────── │ (node A) │
+└──────────┘         └─────────────┘         └──────────┘
+       RTT = RX_timestamp - TX_timestamp
 ```
 
-Three ingress modes are supported, selected automatically at startup:
+Each node runs its own `replicator` (echo server). `rtt` on node A sends to B's
+replicator, which echoes back. Kernel SO_TIMESTAMP captures RX time; TSC captures TX time.
 
-| Mode | BPF program | When used |
-|------|------------|-----------|
-| Unicast | `unicast_filter.o` | `listen_ip` is a regular unicast address |
-| GRE tunnel | `gre_filter.o` | `--gre` flag; AWS VPC without native multicast routing; mock exchange wraps inner multicast UDP in GRE unicast |
-
-Egress is always AF_XDP zero-copy unicast UDP to each registered subscriber, with automatic fallback to a kernel socket.
-
-> **config_map:** One static `target_ip:target_port` entry is written at slot 0 using the
-> `listen_ip:listen_port` argument.  In GRE mode this is the inner multicast group; in unicast
-> mode it is the feeder's unicast address.  The map supports up to 16 slots for future expansion.
-
-## Quick Start
-
-### Build
 ```bash
-# Install dependencies (Amazon Linux 2023)
-sudo dnf install -y gcc-c++ gcc make clang llvm elfutils-libelf-devel \
-    kernel-headers libbpf libbpf-devel glibc-devel zlib-devel git ethtool
+# On every node: start replicator
+sudo ./replicator eth0 <private_ip> 9000 true --queues 4
 
-# Build xdp-tools from source (AL2023 does not package libxdp).
-# Note: AL2023 gcc requires a stdbool.h patch for xdp-tools - see deployment README.
-git clone --depth 1 https://github.com/xdp-project/xdp-tools.git
-cd xdp-tools && ./configure && make && sudo make install && sudo ldconfig
-
-# If xdp-dispatcher.o is not found at runtime:
-export LIBXDP_OBJECT_PATH=/usr/local/lib/bpf
-
-# Build all binaries and eBPF programs
-make all
+# Measure A→B:
+./rtt <B_private_ip> 9000 <A_private_ip> 9001 100000 10000 10000 1 2
+#      target        port  local_ip       port msgs   rate  warmup TX_cpu RX_cpu
 ```
 
-Produced binaries (make all): `packet_replicator`, `control_client`, `test_client`, `market_data_provider_client`, `latency_client`.
-Produced binaries (make mcast): `mcast_sender`, `mcast_receiver`.
-Produced XDP objects: `xdp/unicast_filter.o` (core), `xdp/gre_filter.o` (mcast).
+**Measured results** (c7i.xlarge, CPG, us-east-1): p50=32µs, p99=37µs, p50-p99 spread=5µs.
+
+### 2. Multicast Fan-Out (GRE tunnel)
+
+Measure one-way latency from source through replicator to N destinations — the path
+real market data takes in a trading architecture. Uses GRE encapsulation because
+AWS VPC doesn't support IP multicast natively.
+
+```
+┌──────────┐  GRE(mcast)   ┌─────────────┐  unicast UDP   ┌────────────┐
+│ source │ ────────────► │   replicator    │ ─────────────► │ destination │
+│ (mcast_  │               │ (replicator │                │ (mcast_    │
+│  sender) │               │   --gre)    │                │  receiver) │
+└──────────┘               └─────────────┘                └────────────┘
+```
+
+```bash
+# Replicator: GRE mode, intercepts encapsulated multicast
+sudo ./replicator eth0 224.0.31.50 5000 true --gre
+
+# Source: AF_XDP zero-copy GRE sender with TX timestamps
+sudo ./mcast_send -I eth0 -D <replicator_ip> -g 224.0.31.50 -p 5000 -c 100000
+
+# Destination: AF_XDP receiver with RX timestamps
+sudo ./mcast_receive -i eth0 -B ./src/xdp/mcast.o -c 100000
+```
+
+### 3. Kernel Mode (containers / local testing)
+
+Run the replicator as a standard UDP echo server — no AF_XDP, no root, no BPF.
+Works in Docker containers, on macOS (arm64), and any Linux without XDP support.
+
+```bash
+# Start kernel-mode replicator (no sudo needed)
+./replicator --kernel-mode 127.0.0.1 9000
+
+# In another terminal: run RTT measurement against it
+./rtt 127.0.0.1 9000 127.0.0.1 9001 10000 1000 1000 0 1
+```
+
+Latency will be ~200-500µs (kernel path) vs ~30-40µs on AF_XDP, but the entire
+subscription + measurement + JSON output pipeline is validated end-to-end.
+
+### 4. Connectivity Verification
+
+Quick check that packets reach the replicator (no measurement, no root required):
+
+```bash
+./udp_ping <target_ip> 9000              # 1 packet/sec, default payload
+./udp_ping 224.0.31.50 5000 100 "test" --iface eth0  # multicast, 100ms interval
+```
 
 ---
 
-## Usage
+## Build
 
-### Mode 1 — Unicast (original benchmark mode)
-
-**Feeder host**
 ```bash
-sudo ./packet_replicator eth0 10.0.1.20 5000
+# Dependencies (Amazon Linux 2023)
+sudo dnf install -y gcc-c++ clang llvm libbpf-devel elfutils-libelf-devel \
+    kernel-headers make ethtool git
+
+# Build xdp-tools from source (AL2023 has no libxdp package)
+git clone --depth 1 https://github.com/xdp-project/xdp-tools.git
+cd xdp-tools && ./configure && make && sudo make install && sudo ldconfig
+# If xdp-dispatcher.o not found: export LIBXDP_OBJECT_PATH=/usr/local/lib/bpf
+
+# Build binaries
+make all       # replicator, rtt, replicator_ctl, udp_ping + ucast XDP program
+make mcast     # mcast_send, mcast_receive + mcast XDP program
+make full      # all of the above
 ```
 
-**Subscriber / benchmark client**
-```bash
-# Self-registers via control protocol, then runs RTT benchmark
-./market_data_provider_client 10.0.1.20 5000 10.0.1.30 9001 1000000 10000
-```
+### Binaries
 
-### Mode 2 — GRE tunnel (AWS VPC POC: simulated multicast)
-
-AWS VPC does not support IP multicast routing between subnets. GRE mode works around this:
-the mock exchange encapsulates inner multicast UDP inside a GRE unicast packet sent to the feeder.
-The feeder's `gre_filter.o` intercepts the GRE frame before the kernel `ip_gre` module, strips
-the headers in userspace, and fans out the inner UDP payload to subscribers.
-
-**Mock exchange host — configure kernel GRE tunnel once**
-```bash
-# Create GRE tunnel pointing at feeder unicast IP
-sudo ip tunnel add gre_feed mode gre remote <feeder_ip> local <exchange_ip> ttl 64
-sudo ip link set gre_feed up
-# Route multicast group into the tunnel
-sudo ip route add 224.0.0.0/4 dev gre_feed
-# Allow GRE (IP protocol 47) in security group: exchange → feeder
-```
-
-**Feeder host**
-```bash
-# GRE mode + upstream control forwarding (subscribers → feeder → producer)
-sudo ./packet_replicator eth0 224.0.31.50 5000 true --gre \
-    --ctrl 224.0.31.51:5001 --producer 10.0.1.10:6000
-
-# GRE only (no control forwarding)
-sudo ./packet_replicator eth0 224.0.31.50 5000 true --gre
-```
-
-`--ctrl <group>:<port>` and `--producer <ip>:<port>` must be used together. The feeder joins the
-control multicast group, receives subscriber control messages, and forwards them verbatim to the
-producer's unicast endpoint.
-
-**Mock exchange — send test traffic**
-```bash
-# test_client auto-detects multicast target and sets IP_MULTICAST_TTL=8
-./test_client 224.0.31.50 5000 1 "trade" --iface eth0
-
-# Or run the full RTT benchmark (--feeder-ip separates data dst from control dst)
-./market_data_provider_client 224.0.31.50 5000 10.0.1.10 9001 1000000 10000 \
-    --feeder-ip 10.0.1.20
-```
-
-**Subscribers — register with feeder**
-```bash
-./control_client 10.0.1.20 add 10.0.1.30 9001
-./control_client 10.0.1.20 list
-```
+| Binary | Category | Purpose |
+|--------|----------|---------|
+| `replicator` | Engine | AF_XDP zero-copy echo/fan-out server |
+| `rtt` | Measurement | Precision RTT (SO_TIMESTAMP + TSC, busy-poll, lock-free, CPU-pinned) |
+| `mcast_send` | Measurement | One-way TX with nanosecond timestamps (AF_XDP zero-copy GRE) |
+| `mcast_receive` | Measurement | One-way RX via AF_XDP with per-hop breakdown |
+| `replicator_ctl` | Admin | Register/deregister destinations, mcast join/leave |
+| `udp_ping` | Debug | Fire-and-forget UDP sender (connectivity smoke test) |
 
 ---
 
 ## Control Protocol (port 12345)
 
+The replicator's destination table is managed via `replicator_ctl`:
+
 ```bash
-# Register subscriber IP:port so the feeder resolves ARP and prepares egress headers
-sudo ./control_client <feeder_ip> add    <dest_ip> <dest_port>
-
-# Subscribe to a multicast group — feeder fans out that group to this host
-./control_client <feeder_ip> mcast <group>
-
-# Unsubscribe from a group
-./control_client <feeder_ip> mcast-leave <group>
-
-# Remove subscriber entirely
-sudo ./control_client <feeder_ip> remove <dest_ip> <dest_port>
-
-# Inspect active subscribers
-./control_client <feeder_ip> list
+./replicator_ctl <replicator_ip> add <dest_ip> <dest_port>    # register destination
+./replicator_ctl <replicator_ip> remove <dest_ip> <dest_port> # deregister
+./replicator_ctl <replicator_ip> list                         # show all destinations
+./replicator_ctl <replicator_ip> mcast <group>                # join multicast group (GRE mode)
+./replicator_ctl <replicator_ip> mcast-leave <group>          # leave group
 ```
 
-Typical subscriber setup (run both on the subscriber machine):
-```bash
-sudo ./control_client 10.0.1.20 add    10.0.1.30 9001          # register IP+port (unicast)
-./control_client 10.0.1.20 mcast 224.0.31.50                   # subscribe to group A (GRE)
-./control_client 10.0.1.20 mcast 224.0.31.51                   # subscribe to group B (GRE)
-```
-
-`mcast <group>` sends a `CTRL_MCAST_JOIN` control message to the feeder over the existing UDP
-control socket (port 12345).  The feeder infers the subscriber IP from the UDP source address,
-resolves ARP, and registers the subscriber for that group.  No raw socket or root privileges
-required.  Subscribers always receive traffic on the exchange data port (the `listen_port`
-argument to `packet_replicator`) — the inner UDP dst is preserved verbatim in the GRE frame.
-
-A subscriber can join multiple groups; each registration is independent.
-
-The control client has a 5-second receive timeout — it will fail fast if the feeder is unreachable
-rather than blocking indefinitely.
+> **Note:** `rtt` auto-subscribes before measurement — no manual `ctl add` needed for unicast RTT.
 
 ---
 
-## Verification
-
-**Confirm AF_XDP zero-copy is active (on feeder after traffic starts)**
-```bash
-ethtool -S eth0 | grep -E 'xsk|xdp_redirect'
-# queue_1_tx_xsk_cnt:      10000   # AF_XDP zero-copy TX frames
-# queue_1_rx_xdp_redirect: 10000   # XDP program redirected to AF_XDP
-```
-
-**GRE mode — confirm encapsulated frames arrive**
-```bash
-sudo tcpdump -i eth0 proto gre -c 5
-```
-
-**ARP resolution (required for AF_XDP TX on ENA/VPC)**
-```bash
-cat /proc/net/arp | grep <subscriber_ip>
-# If ARP is not resolved, addDestination will throw an error.
-# Ensure the subscriber is reachable before registering.
-```
-
----
-
-## Repository Layout
+## Directory Layout
 
 ```
 networking_benchmarks/af_xdp/
-  Makefile                    # Build system: make all | make mcast | make full
-  README.md
-
-  replicator/                 # AF_XDP packet forwarding engine
-    PacketReplicator.cpp/hpp  # Multi-queue fan-out with cached MAC, generation-gated cache
-    AFXDPSocket.cpp/hpp       # XSK socket lifecycle, UMEM, frame management
-    PacketReplicatorMain.cpp  # CLI entry point (--gre, --queues, --ctrl, --producer)
-    NetworkInterfaceConfigurator.cpp/hpp
-
-  xdp/                        # BPF/XDP filter programs (clang -target bpf)
-    unicast_filter.c          # Match target unicast IP:port -> redirect to AF_XDP
-    gre_filter.c              # Match GRE (proto 47) with inner UDP -> redirect to AF_XDP
-
-  clients/                    # Measurement and control binaries
-    latency_client.cpp        # RTT: lock-free, kernel timestamps, busy-poll, CPU pinning
-    market_data_provider_client.cpp  # RTT: legacy (mutex-based, poll() wakeup)
-    mcast_sender.cpp          # One-way: AF_XDP TX zero-copy GRE (exchange -> feeder)
-    mcast_receiver.cpp        # One-way: AF_XDP RX with per-hop latency breakdown
-    control_client.cpp        # CLI: add/remove/list subscribers, mcast join/leave
-    test_client.cpp           # Simple UDP packet sender (unicast or multicast)
-
-  scripts/                    # Non-compiled utilities
-    run_comparison.sh         # Multi-rate orchestrator (interleaved old + new client)
-    generate_comparison_report.py  # Produces HTML + JSON comparison reports
-    cleanup.sh                # Remove XDP programs from NIC between runs
-```
-
-### Related: Deployment Orchestration
-
-```
-deployment/af_xdp/            # Instance provisioning and orchestration (no source code)
-  deploy.sh                   # CDK deploy + Ansible provision in one command
-  configure.yaml              # Installs xdp-tools, syncs repo, builds, PTP, coalescing
-  ptp.sh                      # Configures chrony refclock PHC (cross-host time sync)
-  tune_feeder.yaml            # Feeder-specific OS tuning
-  cdk/                        # CDK stacks (single-region CPG, cross-region peering)
+├── Makefile
+├── README.md
+├── src/                          # Replicator engine
+│   ├── Replicator.cpp/hpp        # Multi-queue fan-out, cached MAC, generation-gated cache
+│   ├── ReplicatorMain.cpp        # CLI (--gre, --queues, --ctrl, --producer)
+│   ├── XdpSocket.cpp/hpp         # XSK socket lifecycle, UMEM, frame management
+│   ├── NicConfig.cpp/hpp         # NIC prep for XDP (queues, headroom, driver detect)
+│   └── xdp/                      # eBPF XDP filter programs
+│       ├── ucast.c               # Unicast UDP → AF_XDP redirect
+│       └── mcast.c               # GRE + inner multicast → AF_XDP redirect
+├── tools/                        # Binaries
+│   ├── rtt.cpp                   # RTT measurement (lock-free, kernel timestamps, busy-poll)
+│   ├── mcast_send.cpp          # AF_XDP TX zero-copy GRE
+│   ├── mcast_receive.cpp        # AF_XDP RX with timestamps
+│   ├── replicator_ctl.cpp        # Destination management CLI
+│   └── udp_ping.cpp              # Simple UDP sender
+├── legacy/                       # Deprecated
+│   ├── MarketDataProviderClient.cpp
+│   └── scripts/                  # Old test harness (superseded by deploy/)
+└── deploy/                       # Infrastructure (CDK + Ansible + scripts + reports)
+    ├── cdk/                      # Standalone CDK project (fleet mode, CPG, cross-region)
+    ├── ansible/                  # configure.yaml, tune_replicator.yaml, inventory
+    ├── scripts/                  # test.sh, run_matrix.sh, deploy.sh, ptp.sh
+    └── reports/                  # generate_matrix_report.py, topology_map_sample.html
 ```
 
 ---
 
-## Performance Features
+## Performance Characteristics
 
-- **Low-latency** packet forwarding via AF_XDP zero-copy (measured p50=44us RTT through replicator in CPG)
-- **Zero hot-path syscalls** — interface IP/MAC cached at init, destination MACs cached at `add` time
-- **Multi-queue** processing with one dedicated thread per NIC queue
-- **Lock-free** thread-local destination cache refreshed every 100 ms
-- **CPU affinity** binding for cache-resident hot paths
-- **Fail-loud MAC resolution** — `addDestination` retries ARP 3 times and rejects if unresolved (no silent broadcast fallback that would corrupt measurements)
-- **Single driver kick per TX batch** — `requestDriverPoll()` is called once after fanning out to all K subscribers, not K times; eliminates redundant `sendto` syscalls under load
-- **TX ring overflow recovery** — on full TX ring, kicks driver, drains completions, and retries once before falling back to the kernel socket; no silent drops
-- **Mode-adaptive RX batch size** — 256 frames in GRE mode (handles multi-hundred-frame exchange bursts), 64 in unicast mode
+| Metric | Value | Conditions |
+|--------|-------|-----------|
+| RTT p50 | 32 µs | c7i.xlarge, CPG, us-east-1, 10K msg/s |
+| RTT p99 | 37 µs | same |
+| p50–p99 spread | 5 µs | same |
+| Max throughput | 1M+ pps | AF_XDP zero-copy TX, single queue |
+| Stamp-to-wire gap | ~1-2 µs | mcast_send (vs ~3-10µs kernel path) |
 
-## HFT Optimizations
+### Key Optimizations
 
-- Branch prediction hints (`__builtin_expect`) on cold paths
-- Cache-aligned data structures (64-byte alignment on all hot-path structs)
-- Busy polling with `_mm_pause` / `XDP_USE_NEED_WAKEUP` instead of blocking sleep
-- RFC 6864 compliant IP ID=0 on DF-set atomic datagrams
-- ARP polling (1 ms interval, 50 ms cap) instead of fixed sleep in `addDestination()`
+- AF_XDP zero-copy (bypasses kernel network stack entirely)
+- SO_TIMESTAMP kernel RX timestamps (captured at NIC interrupt, not userspace)
+- TSC-calibrated TX timestamps (rdtsc, ~0.4ns/tick)
+- Busy-poll RX (SO_BUSY_POLL=50µs, no poll()/select() wakeup jitter)
+- Lock-free slot array indexed by sequence ID (no mutex in hot path)
+- CPU core pinning for send and receive threads
+- Single driver kick per TX batch (not per-destination)
+- Coordinated omission tracking (intended vs actual send time)
 
 ---
 
 ## Troubleshooting
 
-**Permission errors**: Run `packet_replicator` with `sudo` (AF_XDP requires CAP_NET_ADMIN).
-
-**Device busy / XDP program conflict**:
-```bash
-sudo ./cleanup.sh <interface>
-# or manually: sudo ip link set <interface> xdp off
-```
-
-**Zero-copy fails**: Driver falls back to copy mode automatically. Check driver support:
-```bash
-ethtool -i eth0   # ENA (AWS), i40e, ixgbe, mlx5_core all support XDP_ZEROCOPY
-```
-
-**GRE packets not arriving at feeder**:
-- Check security group: IP protocol 47 (GRE) must be allowed from exchange to feeder.
-- Verify tunnel: `ip tunnel show` on exchange host.
-- Confirm route: `ip route get 224.0.31.50` on exchange host — should show `dev gre_feed`.
-
-**Subscribers not receiving data**:
-```bash
-./control_client <feeder_ip> list   # confirm subscriber is registered
-cat /proc/net/arp | grep <subscriber_ip>   # confirm ARP resolved
-```
-
-**market_data_provider_client hangs at startup**: The feeder must be running before the client
-starts — `addSelfAsSubscriber()` calls `control_client` which blocks up to 5 seconds for a
-response from port 12345.
-
----
+| Problem | Solution |
+|---------|----------|
+| Permission denied | Run `replicator` with `sudo` (AF_XDP needs CAP_NET_ADMIN) |
+| XDP program conflict | `sudo ip link set eth0 xdp off` or `legacy/scripts/cleanup.sh` |
+| Zero-copy fails | Automatic fallback to copy mode; check `ethtool -i eth0` for XDP support |
+| Subscription failed | Replicator not running or XDP program didn't load — check `/tmp/replicator.log` |
+| GRE packets not arriving | Security group: allow IP protocol 47 from source to replicator |
 
 ## Requirements
 
-- Linux kernel 6.1+ recommended (Amazon Linux 2023); minimum 5.10 for AF_XDP zero-copy
-- AF_XDP compatible NIC driver (ENA on AWS, i40e, ixgbe, mlx5_core)
-- Root privileges for AF_XDP and XDP program loading
-- `clang` with BPF target support for eBPF compilation
-
-## License
-
-MIT-0 License
+- Linux kernel 6.1+ (Amazon Linux 2023); minimum 5.10 for AF_XDP zero-copy
+- AF_XDP compatible NIC (ENA on AWS, i40e, ixgbe, mlx5_core)
+- Root privileges for AF_XDP / XDP program loading
+- clang with BPF target for eBPF compilation

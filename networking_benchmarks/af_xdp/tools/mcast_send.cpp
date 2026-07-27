@@ -1,5 +1,5 @@
 /*
- * latency_sender.cpp — AF_XDP TX zero-copy GRE sender.
+ * AF_XDP TX zero-copy multicast GRE sender.
  *
  * All packet headers are built once into every UMEM frame at startup.
  * Per packet the hot path writes only 16 bytes (seq + ts_ns) in-place,
@@ -13,10 +13,10 @@
  * reducing the stamp-to-wire gap from ~3-10 µs to ~1-2 µs.
  *
  * Packet layout:
- *   Eth | outer IPv4 (src=local, dst=feeder) | GRE (4B) |
+ *   Eth | outer IPv4 (src=local, dst=replicator) | GRE (4B) |
  *   inner IPv4 (src=local, dst=mcast_group)  | UDP | payload
  *
- * Required flag: -D <feeder-ip>  (outer GRE destination)
+ * Required flag: -D <replicator-ip>  (outer GRE destination)
  * Interface (-I) must be the real NIC (e.g. eth0), NOT gre_feed.
  *
  * Requires root (CAP_NET_ADMIN for AF_XDP).
@@ -58,7 +58,7 @@ static constexpr int         DEF_PORT        = 5000;
 static constexpr int         DEF_COUNT       = 10000;
 static constexpr int         DEF_INTERVAL_US = 1000;
 static constexpr int         DEF_SIZE        = 64;
-static constexpr int         HDR_SIZE        = 24;   /* seq(8) + ts_ns(8) + feeder_ns(8) */
+static constexpr int         HDR_SIZE        = 24;   /* seq(8) + ts_ns(8) + replicator_ns(8) */
 
 /*
  * Fixed offsets within the ethernet frame for the fields updated per packet.
@@ -67,19 +67,19 @@ static constexpr int         HDR_SIZE        = 24;   /* seq(8) + ts_ns(8) + feed
  *   Eth(14) + outer IPv4(20) + GRE(4) + inner IPv4(20) + UDP(8) = 66 B
  *   payload[0..7]   = seq
  *   payload[8..15]  = ts_ns     (sender stamp, written by sender hot path)
- *   payload[16..23] = feeder_ns (feeder RX stamp, written by PacketReplicator;
+ *   payload[16..23] = replicator_ns (replicator RX stamp, written by Replicator;
  *                                zeroed in template — receiver skips hop
  *                                breakdown if still 0)
  */
 static constexpr int PAYLOAD_OFF    = 14 + 20 + 4 + 20 + 8;
 static constexpr int SEQ_OFF        = PAYLOAD_OFF;
 static constexpr int TS_OFF         = PAYLOAD_OFF + 8;
-static constexpr int FEEDER_TS_OFF  = PAYLOAD_OFF + 16;  /* written by feeder, not sender */
+static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + 16;  /* written by replicator, not sender */
 
 struct __attribute__((packed)) pkt_hdr {
 	uint64_t seq;
 	uint64_t ts_ns;
-	uint64_t feeder_ns;  /* 0 until PacketReplicator overwrites in transit */
+	uint64_t replicator_ns;  /* 0 until Replicator overwrites in transit */
 };
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
@@ -200,7 +200,7 @@ static bool resolve_mac(const char *dst_ip, const char *iface, uint8_t mac[6])
 static int build_gre_pkt(uint8_t *buf, int max_buf,
                           const iface_info &src,
                           const uint8_t dst_mac[6],
-                          uint32_t feeder_ip_nbo,
+                          uint32_t replicator_ip_nbo,
                           uint32_t mcast_ip_nbo,
                           uint16_t udp_dst_port,
                           int      payload_size)
@@ -235,7 +235,7 @@ static int build_gre_pkt(uint8_t *buf, int max_buf,
 	outer->ttl      = 64;
 	outer->protocol = 47;  /* GRE */
 	outer->saddr    = htonl(src.ip);
-	outer->daddr    = feeder_ip_nbo;
+	outer->daddr    = replicator_ip_nbo;
 	outer->check    = ip_csum(outer, sizeof(struct iphdr));
 	p += sizeof(struct iphdr);
 
@@ -275,7 +275,7 @@ static void usage(const char *prog)
 {
 	printf("Usage: %s [options]\n"
 	       "  -I <iface>       real NIC interface        (default: %s)\n"
-	       "  -D <feeder-ip>   outer GRE dst (feeder)    (REQUIRED)\n"
+	       "  -D <replicator-ip>   outer GRE dst (replicator)    (REQUIRED)\n"
 	       "  -g <group>       inner multicast group     (default: %s)\n"
 	       "  -p <port>        inner UDP dst port        (default: %d)\n"
 	       "  -c <count>       number of packets         (default: %d)\n"
@@ -289,7 +289,7 @@ static void usage(const char *prog)
 int main(int argc, char *argv[])
 {
 	const char *iface       = DEF_IFACE;
-	const char *feeder_ip_s = nullptr;
+	const char *replicator_ip_s = nullptr;
 	const char *group       = DEF_GROUP;
 	int port        = DEF_PORT;
 	int count       = DEF_COUNT;
@@ -300,7 +300,7 @@ int main(int argc, char *argv[])
 	while ((opt = getopt(argc, argv, "I:D:g:p:c:i:s:h")) != -1) {
 		switch (opt) {
 		case 'I': iface       = optarg;          break;
-		case 'D': feeder_ip_s = optarg;          break;
+		case 'D': replicator_ip_s = optarg;          break;
 		case 'g': group       = optarg;          break;
 		case 'p': port        = atoi(optarg);    break;
 		case 'c': count       = atoi(optarg);    break;
@@ -311,8 +311,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (!feeder_ip_s) {
-		fprintf(stderr, "error: -D <feeder-ip> is required\n");
+	if (!replicator_ip_s) {
+		fprintf(stderr, "error: -D <replicator-ip> is required\n");
 		usage(argv[0]);
 		return 1;
 	}
@@ -322,21 +322,21 @@ int main(int argc, char *argv[])
 	iface_info src;
 	if (!get_iface_info(iface, src)) return 1;
 
-	/* ── resolve feeder MAC ───────────────────────────────────────────── */
+	/* ── resolve replicator MAC ───────────────────────────────────────────── */
 	uint8_t dst_mac[6];
-	printf("Resolving MAC for %s ...\n", feeder_ip_s);
-	if (!resolve_mac(feeder_ip_s, iface, dst_mac)) {
-		fprintf(stderr, "error: ARP resolution failed for %s\n", feeder_ip_s);
-		fprintf(stderr, "       ensure feeder is reachable and try again\n");
+	printf("Resolving MAC for %s ...\n", replicator_ip_s);
+	if (!resolve_mac(replicator_ip_s, iface, dst_mac)) {
+		fprintf(stderr, "error: ARP resolution failed for %s\n", replicator_ip_s);
+		fprintf(stderr, "       ensure replicator is reachable and try again\n");
 		return 1;
 	}
-	printf("  feeder MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+	printf("  replicator MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
 	       dst_mac[0], dst_mac[1], dst_mac[2],
 	       dst_mac[3], dst_mac[4], dst_mac[5]);
 
 	/* ── network-order IPs ────────────────────────────────────────────── */
-	uint32_t feeder_ip_nbo, mcast_ip_nbo;
-	inet_pton(AF_INET, feeder_ip_s, &feeder_ip_nbo);
+	uint32_t replicator_ip_nbo, mcast_ip_nbo;
+	inet_pton(AF_INET, replicator_ip_s, &replicator_ip_nbo);
 	inet_pton(AF_INET, group,       &mcast_ip_nbo);
 	uint16_t dst_port_nbo = htons((uint16_t)port);
 
@@ -361,7 +361,7 @@ int main(int argc, char *argv[])
 	 */
 	int pkt_len = build_gre_pkt(
 		(uint8_t *)umem_buf, UMEM_FRAME_SIZE,
-		src, dst_mac, feeder_ip_nbo, mcast_ip_nbo,
+		src, dst_mac, replicator_ip_nbo, mcast_ip_nbo,
 		dst_port_nbo, pkt_size);
 	if (pkt_len < 0) {
 		fprintf(stderr, "error: packet size exceeds UMEM frame (%u bytes)\n",
@@ -406,9 +406,9 @@ int main(int argc, char *argv[])
 	if (err) { fprintf(stderr, "xsk_socket__create: %s\n", strerror(-err)); return 1; }
 	int xsk_fd = xsk_socket__fd(xsk);
 
-	printf("Sending %d packets to feeder %s (inner %s:%d) via %s  "
+	printf("Sending %d packets to replicator %s (inner %s:%d) via %s  "
 	       "payload=%dB  interval=%dus\n\n",
-	       count, feeder_ip_s, group, port, iface, pkt_size, interval_us);
+	       count, replicator_ip_s, group, port, iface, pkt_size, interval_us);
 
 	uint64_t interval_ns = (uint64_t)interval_us * 1000ULL;
 	uint32_t outstanding = 0;
