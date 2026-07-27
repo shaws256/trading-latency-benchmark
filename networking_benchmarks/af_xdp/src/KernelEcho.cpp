@@ -3,7 +3,7 @@
  *
  * Provides the same external interface as the AF_XDP replicator (control
  * protocol on port 12345 + data echo) but uses standard kernel sockets.
- * No root, no XDP, no BPF — runs anywhere including containers and macOS.
+ * No root, no XDP, no BPF — runs anywhere.
  *
  * Used with: ./replicator --kernel-mode <listen_ip> <port>
  *
