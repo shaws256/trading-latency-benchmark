@@ -21,8 +21,8 @@ Three ingress modes are supported, selected automatically at startup:
 
 | Mode | BPF program | When used |
 |------|------------|-----------|
-| Unicast | `unicast_filter.o` | `listen_ip` is a regular unicast address |
-| GRE tunnel | `gre_filter.o` | `--gre` flag; AWS VPC without native multicast routing; mock exchange wraps inner multicast UDP in GRE unicast |
+| Unicast | `ucast_filter.o` | `listen_ip` is a regular unicast address |
+| GRE tunnel | `mcast_filter.o` | `--gre` flag; AWS VPC without native multicast routing; mock exchange wraps inner multicast UDP in GRE unicast |
 
 Egress is always AF_XDP zero-copy unicast UDP to each registered subscriber, with automatic fallback to a kernel socket.
 
@@ -50,9 +50,9 @@ export LIBXDP_OBJECT_PATH=/usr/local/lib/bpf
 make all
 ```
 
-Produced binaries (make all): `packet_replicator`, `control_client`, `test_client`, `market_data_provider_client`, `latency_client`.
+Produced binaries (make all): `packet_replicator`, `probe`, `ctl`, `ping`.
 Produced binaries (make mcast): `mcast_sender`, `mcast_receiver`.
-Produced XDP objects: `xdp/unicast_filter.o` (core), `xdp/gre_filter.o` (mcast).
+Produced XDP objects: `xdp/ucast_filter.o` (core), `xdp/mcast_filter.o` (mcast).
 
 ---
 
@@ -68,14 +68,14 @@ sudo ./packet_replicator eth0 10.0.1.20 5000
 **Subscriber / benchmark client**
 ```bash
 # Self-registers via control protocol, then runs RTT benchmark
-./market_data_provider_client 10.0.1.20 5000 10.0.1.30 9001 1000000 10000
+./mdp_client 10.0.1.20 5000 10.0.1.30 9001 1000000 10000
 ```
 
 ### Mode 2 — GRE tunnel (AWS VPC POC: simulated multicast)
 
 AWS VPC does not support IP multicast routing between subnets. GRE mode works around this:
 the mock exchange encapsulates inner multicast UDP inside a GRE unicast packet sent to the feeder.
-The feeder's `gre_filter.o` intercepts the GRE frame before the kernel `ip_gre` module, strips
+The feeder's `mcast_filter.o` intercepts the GRE frame before the kernel `ip_gre` module, strips
 the headers in userspace, and fans out the inner UDP payload to subscribers.
 
 **Mock exchange host — configure kernel GRE tunnel once**
@@ -104,18 +104,18 @@ producer's unicast endpoint.
 
 **Mock exchange — send test traffic**
 ```bash
-# test_client auto-detects multicast target and sets IP_MULTICAST_TTL=8
-./test_client 224.0.31.50 5000 1 "trade" --iface eth0
+# ping auto-detects multicast target and sets IP_MULTICAST_TTL=8
+./ping 224.0.31.50 5000 1 "trade" --iface eth0
 
 # Or run the full RTT benchmark (--feeder-ip separates data dst from control dst)
-./market_data_provider_client 224.0.31.50 5000 10.0.1.10 9001 1000000 10000 \
+./mdp_client 224.0.31.50 5000 10.0.1.10 9001 1000000 10000 \
     --feeder-ip 10.0.1.20
 ```
 
 **Subscribers — register with feeder**
 ```bash
-./control_client 10.0.1.20 add 10.0.1.30 9001
-./control_client 10.0.1.20 list
+./ctl 10.0.1.20 add 10.0.1.30 9001
+./ctl 10.0.1.20 list
 ```
 
 ---
@@ -124,26 +124,26 @@ producer's unicast endpoint.
 
 ```bash
 # Register subscriber IP:port so the feeder resolves ARP and prepares egress headers
-sudo ./control_client <feeder_ip> add    <dest_ip> <dest_port>
+sudo ./ctl <feeder_ip> add    <dest_ip> <dest_port>
 
 # Subscribe to a multicast group — feeder fans out that group to this host
-./control_client <feeder_ip> mcast <group>
+./ctl <feeder_ip> mcast <group>
 
 # Unsubscribe from a group
-./control_client <feeder_ip> mcast-leave <group>
+./ctl <feeder_ip> mcast-leave <group>
 
 # Remove subscriber entirely
-sudo ./control_client <feeder_ip> remove <dest_ip> <dest_port>
+sudo ./ctl <feeder_ip> remove <dest_ip> <dest_port>
 
 # Inspect active subscribers
-./control_client <feeder_ip> list
+./ctl <feeder_ip> list
 ```
 
 Typical subscriber setup (run both on the subscriber machine):
 ```bash
-sudo ./control_client 10.0.1.20 add    10.0.1.30 9001          # register IP+port (unicast)
-./control_client 10.0.1.20 mcast 224.0.31.50                   # subscribe to group A (GRE)
-./control_client 10.0.1.20 mcast 224.0.31.51                   # subscribe to group B (GRE)
+sudo ./ctl 10.0.1.20 add    10.0.1.30 9001          # register IP+port (unicast)
+./ctl 10.0.1.20 mcast 224.0.31.50                   # subscribe to group A (GRE)
+./ctl 10.0.1.20 mcast 224.0.31.51                   # subscribe to group B (GRE)
 ```
 
 `mcast <group>` sends a `CTRL_MCAST_JOIN` control message to the feeder over the existing UDP
@@ -196,16 +196,18 @@ networking_benchmarks/af_xdp/
     NetworkInterfaceConfigurator.cpp/hpp
 
   xdp/                        # BPF/XDP filter programs (clang -target bpf)
-    unicast_filter.c          # Match target unicast IP:port -> redirect to AF_XDP
-    gre_filter.c              # Match GRE (proto 47) with inner UDP -> redirect to AF_XDP
+    ucast_filter.c          # Match target unicast IP:port -> redirect to AF_XDP
+    mcast_filter.c              # Match GRE (proto 47) with inner UDP -> redirect to AF_XDP
 
-  clients/                    # Measurement and control binaries
-    latency_client.cpp        # RTT: lock-free, kernel timestamps, busy-poll, CPU pinning
-    market_data_provider_client.cpp  # RTT: legacy (mutex-based, poll() wakeup)
-    mcast_sender.cpp          # One-way: AF_XDP TX zero-copy GRE (exchange -> feeder)
-    mcast_receiver.cpp        # One-way: AF_XDP RX with per-hop latency breakdown
-    control_client.cpp        # CLI: add/remove/list subscribers, mcast join/leave
-    test_client.cpp           # Simple UDP packet sender (unicast or multicast)
+  tools/                    # Measurement instruments (hot path)
+    probe.cpp              # RTT: lock-free, kernel timestamps, busy-poll, CPU pinning
+    mcast_sender.cpp       # One-way: AF_XDP TX zero-copy GRE (exchange -> feeder)
+    mcast_receiver.cpp     # One-way: AF_XDP RX with per-hop latency breakdown
+  cli/                      # Admin utilities (control plane)
+    ctl.cpp                # add/remove/list subscribers, mcast join/leave
+    ping.cpp               # Simple UDP packet sender (connectivity test)
+  legacy/                   # Deprecated (not built by default)
+    mdp_client.cpp         # RTT: legacy (mutex-based, poll() wakeup)
 
   scripts/                    # Non-compiled utilities
     run_comparison.sh         # Multi-rate orchestrator (interleaved old + new client)
@@ -270,12 +272,12 @@ ethtool -i eth0   # ENA (AWS), i40e, ixgbe, mlx5_core all support XDP_ZEROCOPY
 
 **Subscribers not receiving data**:
 ```bash
-./control_client <feeder_ip> list   # confirm subscriber is registered
+./ctl <feeder_ip> list   # confirm subscriber is registered
 cat /proc/net/arp | grep <subscriber_ip>   # confirm ARP resolved
 ```
 
-**market_data_provider_client hangs at startup**: The feeder must be running before the client
-starts — `addSelfAsSubscriber()` calls `control_client` which blocks up to 5 seconds for a
+**mdp_client hangs at startup**: The feeder must be running before the client
+starts — `addSelfAsSubscriber()` calls `ctl` which blocks up to 5 seconds for a
 response from port 12345.
 
 ---

@@ -177,7 +177,7 @@ public:
     /**
      * Enable GRE tunnel mode.
      * Must be called before initialize().
-     * In GRE mode: gre_filter.o is loaded; the outer unicast GRE frame arrives on
+     * In GRE mode: mcast_filter.o is loaded; the outer unicast GRE frame arrives on
      * eth0 (preserving XDP_ZEROCOPY on ENA) and PacketReplicator strips the GRE
      * headers in userspace.  listen_ip_ still holds the inner multicast group
      * address used for config_map; no IGMP join is performed.

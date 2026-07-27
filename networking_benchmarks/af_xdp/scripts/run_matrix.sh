@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_matrix.sh - Full-mesh latency measurement across all nodes in a CPG fleet.
 #
-# Runs latency_client from every node to every other node (NxN - diagonal),
+# Runs probe from every node to every other node (NxN - diagonal),
 # collecting results into a matrix directory for generate_matrix_report.py.
 #
 # Usage:
@@ -13,7 +13,7 @@
 # Falls back to EC2 describe-instances by Role=matrix-node tag.
 #
 # Prerequisites:
-#   - latency_client binary built on all nodes (via af_xdp_configure.yaml)
+#   - probe binary built on all nodes (via af_xdp_configure.yaml)
 #   - packet_replicator running on each target node (auto-started by this script)
 #   - jq, aws CLI, ssh
 
@@ -192,16 +192,16 @@ for src in $(seq 0 $((FLEET_SIZE - 1))); do
     LABEL="${NODE_NAMES[$src]}_to_${NODE_NAMES[$dst]}"
     echo "[${PAIR_COUNT}/${TOTAL_PAIRS}] ${LABEL}"
 
-    # Run latency_client on src, targeting dst's private IP
+    # Run probe on src, targeting dst's private IP
     # Client listens on PORT+1 to avoid conflict with local replicator
     CLIENT_PORT=$((PORT + 1 + dst))
     ssh_cmd "${PUBLIC_IPS[$src]}" "cd ${REMOTE_BIN}/clients && \
-      ./latency_client ${PRIVATE_IPS[$dst]} ${PORT} ${PRIVATE_IPS[$src]} ${CLIENT_PORT} \
+      ./probe ${PRIVATE_IPS[$dst]} ${PORT} ${PRIVATE_IPS[$src]} ${CLIENT_PORT} \
       ${MESSAGES} ${RATE} ${WARMUP} ${SEND_CPU} ${RECV_CPU}" \
       > "${RESULTS_DIR}/${LABEL}.txt" 2>&1 || true
 
     # Fetch JSON results
-    ssh_cmd "${PUBLIC_IPS[$src]}" "cat /tmp/latency_client_results.json 2>/dev/null" \
+    ssh_cmd "${PUBLIC_IPS[$src]}" "cat /tmp/probe_results.json 2>/dev/null" \
       > "${RESULTS_DIR}/${LABEL}.json" 2>/dev/null || true
 
     sleep "$COOLDOWN"

@@ -219,9 +219,9 @@ void PacketReplicator::initialize(bool useZeroCopy) {
     xdp_sockets_.resize(num_queues_);
     
     // Select XDP program:
-    //   gre_mode_  → gre_filter.o     (outer unicast GRE carries inner multicast)
-    //   otherwise  → unicast_filter.o (direct unicast feed)
-    std::string xdp_program_path = gre_mode_ ? "./gre_filter.o" : "./unicast_filter.o";
+    //   gre_mode_  → mcast_filter.o     (outer unicast GRE carries inner multicast)
+    //   otherwise  → ucast_filter.o (direct unicast feed)
+    std::string xdp_program_path = gre_mode_ ? "./xdp/mcast_filter.o" : "./xdp/ucast_filter.o";
     std::cout << "Loading XDP program: " << xdp_program_path
               << (gre_mode_ ? " (GRE tunnel mode)" : "") << std::endl;
     AFXDPSocket::loadXdpProgram(listen_interface_, xdp_program_path, useZeroCopy);
@@ -902,8 +902,8 @@ bool PacketReplicator::extractUdpPayloadGre(const uint8_t* packetData, size_t pa
     if (inner_ip->protocol != IPPROTO_UDP)
         return false;
 
-    // Mirror gre_filter.c line 148: only accept multicast inner destinations (224.0.0.0/4).
-    // gre_filter.c enforces this before redirecting to AF_XDP, so non-multicast frames
+    // Mirror mcast_filter.c line 148: only accept multicast inner destinations (224.0.0.0/4).
+    // mcast_filter.c enforces this before redirecting to AF_XDP, so non-multicast frames
     // should never arrive here; the check is a defence-in-depth guard.
     if ((ntohl(inner_ip->daddr) & 0xF0000000U) != 0xE0000000U)
         return false;
@@ -1377,7 +1377,7 @@ std::vector<uint8_t> PacketReplicator::processControlMessage(const uint8_t* mess
                     // Remove from all_destinations_ only if this subscriber is no
                     // longer in any group.  A subscriber registered for N groups
                     // sends N MCAST_LEAVE messages; premature removal here would
-                    // make control_client list show them as gone while they are
+                    // make ctl list show them as gone while they are
                     // still receiving traffic for the remaining groups.
                     bool still_in_group = false;
                     for (const auto& [g, subs] : group_destinations_) {

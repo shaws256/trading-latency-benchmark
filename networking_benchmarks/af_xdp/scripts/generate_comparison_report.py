@@ -19,7 +19,7 @@ from pathlib import Path
 
 
 def parse_old_client_txt(filepath):
-    """Parse market_data_provider_client output for RTT percentiles."""
+    """Parse mdp_client output for RTT percentiles."""
     data = {"client": "market_data_provider", "file": filepath.name}
     text = filepath.read_text()
 
@@ -52,14 +52,14 @@ def parse_old_client_txt(filepath):
 
 
 def parse_new_client_json(filepath):
-    """Parse latency_client JSON output."""
+    """Parse probe JSON output."""
     try:
         raw = json.loads(filepath.read_text())
     except (json.JSONDecodeError, FileNotFoundError):
         return None
 
     data = {
-        "client": "latency_client",
+        "client": "probe",
         "file": filepath.name,
         "rate_mps": raw.get("rate_mps", 0),
         "messages_sent": raw.get("messages", 0),
@@ -148,8 +148,8 @@ td:first-child, td:nth-child(2) {{ text-align: left; }}
 <th>p90</th><th>p99</th><th>p99.9</th><th>Max</th><th>p99 bar</th></tr>
 {rows_html}
 </table>
-<p><span style="color:#4CAF50">Green</span> = latency_client (new),
-<span style="color:#2196F3">Blue</span> = market_data_provider_client (original)</p>
+<p><span style="color:#4CAF50">Green</span> = probe (new),
+<span style="color:#2196F3">Blue</span> = mdp_client (original)</p>
 </body></html>"""
 
     output_path.write_text(html)
@@ -175,7 +175,7 @@ def main():
             results.append(data)
 
     # Parse new client JSON outputs
-    for jf in results_dir.glob("latency_client_*.json"):
+    for jf in results_dir.glob("probe_*.json"):
         data = parse_new_client_json(jf)
         if data and data.get("p50_us"):
             results.append(data)

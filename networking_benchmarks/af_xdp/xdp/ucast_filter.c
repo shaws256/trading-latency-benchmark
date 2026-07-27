@@ -1,4 +1,4 @@
-// unicast_filter.c - XDP program for unicast UDP packet filtering and forwarding
+// ucast_filter.c - XDP program for unicast UDP packet filtering and forwarding
 /*
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -87,7 +87,7 @@ static inline void increment_counter(int index)
 }
 
 SEC("xdp")
-int unicast_filter(struct xdp_md *ctx)
+int ucast_filter(struct xdp_md *ctx)
 {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;

@@ -44,8 +44,8 @@ void printUsage(const char* progName) {
     std::cout << "  listen_port:  UDP data port." << std::endl;
     std::cout << "  zero_copy:    'true' to enable zero-copy mode (default: true)" << std::endl;
     std::cout << "  --gre:        GRE tunnel mode — outer unicast GRE carries inner multicast." << std::endl;
-    std::cout << "                Loads gre_filter.o; listen_ip is the inner multicast group." << std::endl;
-    std::cout << "                Subscribers register via CTRL_MCAST_JOIN (control_client mcast)." << std::endl;
+    std::cout << "                Loads mcast_filter.o; listen_ip is the inner multicast group." << std::endl;
+    std::cout << "                Subscribers register via CTRL_MCAST_JOIN (ctl mcast)." << std::endl;
     std::cout << "  --ctrl <g:p>  Multicast group:port where subscribers send control messages." << std::endl;
     std::cout << "                Feeder joins this group and listens for control datagrams." << std::endl;
     std::cout << "                Requires --producer." << std::endl;
@@ -188,8 +188,8 @@ int main(int argc, char* argv[]) {
         
         // Print initial help
         std::cout << "To add destinations, use the control client:" << std::endl;
-        std::cout << "  ./control_client add <dest_ip> <dest_port>" << std::endl;
-        std::cout << "  ./control_client list" << std::endl;
+        std::cout << "  ./ctl add <dest_ip> <dest_port>" << std::endl;
+        std::cout << "  ./ctl list" << std::endl;
         std::cout << std::endl;
         
         // Main loop - just wait for signal

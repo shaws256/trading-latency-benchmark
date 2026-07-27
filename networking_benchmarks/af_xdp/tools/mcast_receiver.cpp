@@ -1,7 +1,7 @@
 /*
  * latency_receiver.cpp — AF_XDP GRE latency receiver.
  *
- * Attaches gre_filter.o to the NIC via XDP, opens an AF_XDP
+ * Attaches mcast_filter.o to the NIC via XDP, opens an AF_XDP
  * socket on the chosen queue, and polls the RX ring directly — no
  * kernel IP stack involvement after the XDP redirect.
  *
@@ -112,8 +112,8 @@ static void usage(const char *prog)
 	       "  -c <count>   packets to receive        (default: %d)\n"
 	       "  -t <timeout> seconds before giving up  (default: %d)\n"
 	       "  -q <queue>   XDP/AF_XDP queue index    (default: %d)\n"
-	       "  -B <path>    path to gre_filter.o\n"
-	       "               (default: ./gre_filter.o)\n"
+	       "  -B <path>    path to mcast_filter.o\n"
+	       "               (default: ./mcast_filter.o)\n"
 	       "  -r           print raw latencies (ns)\n"
 	       "  -h           this help\n"
 	       "\nRequires root (XDP attach + AF_XDP).\n",
@@ -123,7 +123,7 @@ static void usage(const char *prog)
 int main(int argc, char *argv[])
 {
 	const char *iface    = nullptr;
-	const char *bpf_path = "./gre_filter.o";
+	const char *bpf_path = "./mcast_filter.o";
 	int  port    = DEF_PORT;
 	int  count   = DEF_COUNT;
 	int  timeout = DEF_TIMEOUT;
@@ -169,9 +169,9 @@ int main(int argc, char *argv[])
 	}
 
 	struct bpf_program *bpf_prog =
-	    bpf_object__find_program_by_name(g_bpf_obj, "gre_filter");
+	    bpf_object__find_program_by_name(g_bpf_obj, "mcast_filter");
 	if (!bpf_prog) {
-		fprintf(stderr, "error: XDP program 'gre_filter' not found in %s\n", bpf_path);
+		fprintf(stderr, "error: XDP program 'mcast_filter' not found in %s\n", bpf_path);
 		return 1;
 	}
 	g_xdp_prog_fd = bpf_program__fd(bpf_prog);

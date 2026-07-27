@@ -12,10 +12,10 @@ REPLICATOR_SRCS = replicator/AFXDPSocket.cpp replicator/NetworkInterfaceConfigur
 REPLICATOR_OBJS = $(REPLICATOR_SRCS:.cpp=.o)
 
 # ── Targets ──────────────────────────────────────────────────────────────────
-CORE_TARGETS = packet_replicator control_client test_client market_data_provider_client latency_client
+CORE_TARGETS = packet_replicator probe ctl ping
 MCAST_TARGETS = mcast_sender mcast_receiver
-XDP_PROGRAMS = xdp/unicast_filter.o
-MCAST_XDP = xdp/gre_filter.o
+XDP_PROGRAMS = xdp/ucast_filter.o
+MCAST_XDP = xdp/mcast_filter.o
 
 # ── Build modes ──────────────────────────────────────────────────────────────
 all: $(CORE_TARGETS) $(XDP_PROGRAMS)
@@ -26,51 +26,46 @@ mcast: $(MCAST_TARGETS) $(MCAST_XDP)
 replicator/%.o: replicator/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
-clients/%.o: clients/%.cpp
+tools/%.o: tools/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+cli/%.o: cli/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+legacy/%.o: legacy/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 xdp/%.o: xdp/%.c
 	clang -O2 -g -Wall -target bpf -c $< -o $@
 
-# ── Core binaries ────────────────────────────────────────────────────────────
+# ── Core: replicator ─────────────────────────────────────────────────────────
 packet_replicator: replicator/PacketReplicatorMain.o $(REPLICATOR_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-control_client: clients/ControlClient.o
+# ── Tools: measurement instruments ───────────────────────────────────────────
+probe: tools/probe.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-test_client: clients/TestClient.o
+mcast_sender: tools/mcast_sender.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-market_data_provider_client: clients/MarketDataProviderClient.o
+mcast_receiver: tools/mcast_receiver.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-latency_client: clients/latency_client.o
+# ── CLI: admin utilities ──────────────────────────────────────────────────────
+ctl: cli/ctl.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-# ── Mcast one-way measurement tools ─────────────────────────────────────────
-mcast_sender: clients/mcast_sender.o
+ping: cli/ping.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-mcast_receiver: clients/mcast_receiver.o
+# ── Legacy (not built by default, use: make mdp_client) ───────────────────────
+mdp_client: legacy/mdp_client.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 # ── Housekeeping ─────────────────────────────────────────────────────────────
 clean:
 	find . -name '*.o' -o -name '*.d' | xargs rm -f
-	rm -f $(CORE_TARGETS) $(MCAST_TARGETS)
+	rm -f $(CORE_TARGETS) $(MCAST_TARGETS) mdp_client
 
-help:
-	@echo "Targets:"
-	@echo "  all    - Build core binaries + unicast XDP (default)"
-	@echo "  mcast  - Build multicast one-way tools + GRE XDP"
-	@echo "  full   - Build everything (all + mcast)"
-	@echo "  clean  - Remove all build artifacts"
-	@echo ""
-	@echo "Core:  $(CORE_TARGETS)"
-	@echo "Mcast: $(MCAST_TARGETS)"
-	@echo "XDP:   $(XDP_PROGRAMS) $(MCAST_XDP)"
-
-.PHONY: all full mcast clean help
-
--include $(wildcard replicator/*.d clients/*.d)
+.PHONY: all full mcast clean
