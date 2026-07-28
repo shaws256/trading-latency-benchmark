@@ -48,6 +48,43 @@
       until: health_check.rc == 0
       run_once: true
 
+# ── Play 1.5: Prewarm (serial — resolve ARP + warm replicator dest-cache) ─────
+# On a cold fleet the responder must ARP-resolve the client's MAC before it can
+# reply on the AF_XDP fast path; until then (~0.5s) replies use a broadcast MAC
+# (dropped by ENA/VPC) or the kernel fallback, so the first fraction of a run is
+# lost. A short throwaway pass per directed pair resolves ARP and promotes the
+# replicator's dest-cache to the fast-path MAC, so the measured run starts warm.
+# Results are discarded. Uses the same listen_port as the measured run so the
+# exact destination entry is pre-resolved.
+- name: Prewarm data path
+  hosts: replicator
+  serial: 1
+  become: yes
+  gather_facts: no
+
+  vars:
+    prewarm_count: "5000"
+    prewarm_rate: "5000"      # 5000 msgs @ 5000/s ≈ 1s — spans the ARP-resolution window
+    data_port: "5000"
+    listen_port: "19020"
+    send_cpu: "3"
+    recv_cpu: "2"
+
+  tasks:
+
+    - name: Prewarm RTT to each peer (discard results)
+      ansible.builtin.shell: |
+        /opt/af-xdp/rtt_kernel \
+          {{ hostvars[item].private_ip_address }} {{ data_port }} \
+          {{ private_ip_address }} {{ listen_port }} \
+          {{ prewarm_count }} {{ prewarm_rate }} 0 {{ send_cpu }} {{ recv_cpu }} \
+          > /dev/null 2>&1 || true
+        rm -f /tmp/rtt_results.json
+      loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
+      loop_control:
+        label: "prewarm {{ private_ip_address }} → {{ hostvars[item].private_ip_address }}"
+      changed_when: false
+
 # ── Play 2: Measure (serial — one host at a time, no contention) ──────────────
 - name: Measure RTT
   hosts: replicator
