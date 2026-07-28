@@ -434,7 +434,7 @@ Cargo.lock
 
 # AF_XDP Build artifacts
 replicator
-rtt
+rtt_kernel
 mcast_send
 mcast_receive
 replicator_ctl

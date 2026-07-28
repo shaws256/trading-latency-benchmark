@@ -60,9 +60,9 @@ After provisioning, binaries are installed to `/opt/af-xdp/` and the `replicator
 | `configure_mcast.yaml` | Multicast runtime config | After provisioning — GRE, replicator mode, registration |
 | `run_ucast.yaml` | Run unicast NxN RTT benchmark | After provisioning — measures every pair |
 | `run_mcast.yaml` | Run multicast fan-out benchmark | After configure_mcast — source→replicator→destinations |
-| `report.yaml` | Generate HTML report from collected results | After any test run — heatmap, topology map, summary |
+| `run_ucast.yaml` | Run NxN unicast RTT benchmark + generate report | Serial measurement, then local HTML/JSON report |
 | `inventory.aws_ec2.yml` | Dynamic EC2 inventory by Role tag | With CDK-deployed or manually-tagged instances |
-| `report/` | Python report generator + templates | Called by report.yaml |
+| `report/` | Python report generator + templates | Called by run_ucast.yaml (Play 4) |
 | **`byoi/`** | | |
 | `byoi/provision.yaml` | Full install from scratch | Stock AL2023 — self-hosted or CDK without baked AMI |
 
@@ -89,7 +89,7 @@ export AWS_DEFAULT_REGION=us-east-1
 Instances boot with `replicator.service` in unicast-mode. Run RTT tests directly:
 
 ```bash
-ssh ec2-user@<nodeA> '/opt/af-xdp/rtt <nodeB_ip> 5000 <nodeA_ip> 19020 1000 1000 100 0 1'
+ssh ec2-user@<nodeA> '/opt/af-xdp/rtt_kernel <nodeB_ip> 5000 <nodeA_ip> 19020 1000 1000 100 0 1'
 ```
 
 ### Multicast
@@ -161,6 +161,7 @@ systemctl is-active replicator' --ssh-extra-args="-o StrictHostKeyChecking=no"
 
 # Dev playbook
 ansible-playbook -i inventory.aws_ec2.yml byoi/dev.yaml
+ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml
 ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml
 
 # For host restart - SSH host key check 

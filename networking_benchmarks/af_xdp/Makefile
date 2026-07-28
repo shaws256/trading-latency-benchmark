@@ -8,7 +8,7 @@ LDFLAGS = -L/usr/local/lib -Wl,-rpath,/usr/local/lib -Wl,--no-as-needed -Wl,-O1
 LDLIBS = -lxdp -lbpf -lelf -lpthread
 
 # ── Targets ──────────────────────────────────────────────────────────────────
-CORE_TARGETS = replicator rtt replicator_ctl udp_ping
+CORE_TARGETS = replicator rtt_kernel replicator_ctl udp_ping
 MCAST_TARGETS = mcast_send mcast_receive
 XDP_PROGRAMS = src/xdp/ucast.o
 MCAST_XDP = src/xdp/mcast.o
@@ -29,7 +29,7 @@ mcast: $(MCAST_TARGETS) $(MCAST_XDP)
 # Builds replicator (kernel-mode only) + tools without any libxdp/libbpf dependency.
 kernel-mode:
 	$(MAKE) clean
-	$(MAKE) replicator rtt replicator_ctl udp_ping \
+	$(MAKE) replicator rtt_kernel replicator_ctl udp_ping \
 		CXXFLAGS="$(CXXFLAGS) -DKERNEL_MODE_ONLY" \
 		LDLIBS="-lpthread" \
 		REPLICATOR_OBJS="src/NicConfig.o src/KernelEcho.o"
@@ -52,7 +52,7 @@ replicator: src/ReplicatorMain.o $(REPLICATOR_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 # ── Tools: measurement instruments ───────────────────────────────────────────
-rtt: tools/rtt.o
+rtt_kernel: tools/rtt_kernel.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 mcast_send: tools/mcast_send.o

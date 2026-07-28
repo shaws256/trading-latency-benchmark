@@ -17,7 +17,7 @@ Prerequisites:
 
 Usage:
   cd networking_benchmarks/af_xdp
-  make all  # or at least: replicator rtt replicator_ctl udp_ping
+  make all  # or at least: replicator rtt_kernel replicator_ctl udp_ping
   cd tests
   pytest -v
 """
@@ -37,7 +37,7 @@ import pytest
 # ── Paths ─────────────────────────────────────────────────────────────────────
 AF_XDP_DIR = Path(__file__).parent.parent
 REPLICATOR = AF_XDP_DIR / "replicator"
-RTT = AF_XDP_DIR / "rtt"
+RTT = AF_XDP_DIR / "rtt_kernel"
 REPLICATOR_CTL = AF_XDP_DIR / "replicator_ctl"
 UDP_PING = AF_XDP_DIR / "udp_ping"
 
@@ -199,18 +199,18 @@ class TestDataEcho:
 
 # ── Test: RTT binary ──────────────────────────────────────────────────────────
 class TestRTTMeasurement:
-    """Test the rtt binary against kernel-mode replicator."""
+    """Test the rtt_kernel binary against kernel-mode replicator."""
 
     def test_rtt_produces_json(self, replicator_process):
-        """rtt should complete and produce valid JSON output."""
+        """rtt_kernel should complete and produce valid JSON output."""
         if not RTT.exists():
-            pytest.skip("rtt binary not found")
+            pytest.skip("rtt_kernel binary not found")
 
         json_path = "/tmp/rtt_results.json"
         if os.path.exists(json_path):
             os.remove(json_path)
 
-        # Run rtt: 1000 messages at 1000/s, 100 warmup, CPUs 0+1
+        # Run rtt_kernel: 1000 messages at 1000/s, 100 warmup, CPUs 0+1
         result = subprocess.run(
             [
                 str(RTT),
@@ -221,7 +221,7 @@ class TestRTTMeasurement:
             capture_output=True, text=True, timeout=30,
         )
 
-        assert result.returncode == 0, f"rtt failed: {result.stderr}\n{result.stdout}"
+        assert result.returncode == 0, f"rtt_kernel failed: {result.stderr}\n{result.stdout}"
         assert os.path.exists(json_path), "JSON output not created"
 
         with open(json_path) as f:
@@ -240,7 +240,7 @@ class TestRTTMeasurement:
     def test_rtt_respects_warmup(self, replicator_process):
         """Messages sent during warmup should not appear in results."""
         if not RTT.exists():
-            pytest.skip("rtt binary not found")
+            pytest.skip("rtt_kernel binary not found")
 
         json_path = "/tmp/rtt_results.json"
         if os.path.exists(json_path):
@@ -267,7 +267,7 @@ class TestRTTMeasurement:
     def test_rtt_kernel_mode_latency_sanity(self, replicator_process):
         """Kernel-mode RTT should be < 5ms (sanity check — not a performance test)."""
         if not RTT.exists():
-            pytest.skip("rtt binary not found")
+            pytest.skip("rtt_kernel binary not found")
 
         json_path = "/tmp/rtt_results.json"
         if os.path.exists(json_path):

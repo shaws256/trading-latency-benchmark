@@ -2,7 +2,7 @@
 """
 generate_matrix_report.py - Parse NxN latency matrix results and produce reports.
 
-Reads all *_to_*.json files in the results directory (from run_matrix.sh),
+Reads all <src_ip>-<dst_ip>.json files in the results directory,
 builds an NxN latency matrix, and generates:
   - A terminal-formatted matrix table (p50, p99)
   - An HTML heatmap report (matrix_report.html)
@@ -1195,7 +1195,7 @@ def main() -> None:
     json_export = {
         "fleet": fleet,
         "node_names": node_names,
-        "matrix": {f"{src}_to_{dst}": data for (src, dst), data in matrix.items()},
+        "matrix": {f"{src}-{dst}": data for (src, dst), data in matrix.items()},
         "asymmetries": asymmetries,
         "type_stats": type_stats,
         "summary": {

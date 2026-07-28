@@ -45,6 +45,7 @@
 #include <time.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <linux/net_tstamp.h>
@@ -250,6 +251,41 @@ static void pin_to_cpu(int cpu) {
 }
 
 // ---------------------------------------------------------------------------
+// Real-time scheduling + memory locking
+// ---------------------------------------------------------------------------
+static void enable_realtime() {
+    // Set SCHED_FIFO priority 80 (not 99 -- leave room for kernel threads)
+    struct sched_param param = {};
+    param.sched_priority = 80;
+    if (sched_setscheduler(0, SCHED_FIFO, &param) == 0) {
+        std::cout << "  SCHED_FIFO priority 80 enabled" << std::endl;
+    } else {
+        std::cerr << "  Warning: SCHED_FIFO failed (need root/CAP_SYS_NICE), continuing with SCHED_OTHER" << std::endl;
+    }
+
+    // Lock all current and future pages to prevent page faults during measurement
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0) {
+        std::cout << "  mlockall enabled (no page faults during measurement)" << std::endl;
+    } else {
+        std::cerr << "  Warning: mlockall failed (need root/CAP_IPC_LOCK)" << std::endl;
+    }
+}
+
+// Safety alarm: auto-kill if stuck in RT spin loop (prevents system lockup)
+static void alarm_handler(int) {
+    // Force exit -- RT thread may be spinning and blocking normal shutdown
+    _exit(2);
+}
+
+static void set_safety_alarm(uint64_t total_msgs, uint64_t rate_per_sec) {
+    // Expected runtime + generous 30s headroom
+    unsigned int timeout_sec = static_cast<unsigned int>(total_msgs / rate_per_sec) + 30;
+    signal(SIGALRM, alarm_handler);
+    alarm(timeout_sec);
+    std::cout << "  safety alarm: " << timeout_sec << "s" << std::endl;
+}
+
+// ---------------------------------------------------------------------------
 // Global state
 // ---------------------------------------------------------------------------
 static volatile bool g_running = true;
@@ -302,9 +338,14 @@ int main(int argc, char* argv[]) {
     int recv_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (recv_fd < 0) { perror("socket"); return 1; }
 
-    // Enable busy poll (reduces wakeup jitter by ~10-30us)
-    int busy_poll_us = 50;  // poll NIC for 50us before sleeping
+    // Enable busy poll (kernel spins polling NIC queue instead of sleeping for IRQ)
+    // With SCHED_FIFO, we can afford aggressive spinning -- eliminates IRQ wakeup latency
+    int busy_poll_us = 100;
     setsockopt(recv_fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll_us, sizeof(busy_poll_us));
+    int prefer_busy_poll = 1;
+    setsockopt(recv_fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &prefer_busy_poll, sizeof(prefer_busy_poll));
+    int busy_budget = 256;  // packets to process per busy-poll cycle
+    setsockopt(recv_fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &busy_budget, sizeof(busy_budget));
 
     // Increase receive buffer
     int rcvbuf = 4 * 1024 * 1024;
@@ -340,8 +381,12 @@ int main(int argc, char* argv[]) {
     std::atomic<uint64_t> total_received{0};
     std::atomic<bool> recv_started{false};
 
+    // Set safety alarm BEFORE enabling RT (alarm fires even if RT thread is spinning)
+    set_safety_alarm(total_msgs + warmup, rate_per_sec);
+
     std::thread receiver([&]() {
         pin_to_cpu(recv_cpu);
+        enable_realtime();  // RT scheduling on receiver thread (latency-critical)
         recv_started.store(true);
 
         char buf[2048];
@@ -396,6 +441,7 @@ int main(int argc, char* argv[]) {
     std::cout << "  send_cpu=" << send_cpu << " recv_cpu=" << recv_cpu << std::endl;
 
     pin_to_cpu(send_cpu);
+    enable_realtime();  // RT scheduling on sender thread
 
     char msg_buf[512];
     uint64_t interval_ns = 1000000000ULL / rate_per_sec;

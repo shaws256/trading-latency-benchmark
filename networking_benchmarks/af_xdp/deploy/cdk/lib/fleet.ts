@@ -18,7 +18,12 @@ import {
 } from 'aws-cdk-lib/aws-ec2';
 import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 
-const DEFAULT_INSTANCE_TYPE = 'c7i.xlarge';
+// c7i.2xlarge = 8 vCPU / 4 physical cores. Non-competing busy-polling needs a
+// dedicated physical core each for: replicator poll thread, rtt_kernel sender,
+// rtt_kernel receiver, plus one core for OS + NIC IRQs. c7i.xlarge (2 physical
+// cores) forces these threads to share physical cores/HT siblings, injecting
+// jitter. See bake-ami.sh CPU-isolation section (isolcpus=1-3, nosmt).
+const DEFAULT_INSTANCE_TYPE = 'c7i.2xlarge';
 /** SSM parameter path where the AMI builder stores the latest AMI ID per region */
 const SSM_AMI_PREFIX = '/af-xdp/ami';
 const DEFAULT_ROLE = 'replicator';
@@ -27,7 +32,7 @@ export type PlacementStrategy = 'cluster' | 'spread' | 'partition';
 
 /** A single node in the fleet specification. */
 export interface FleetEntry {
-  /** EC2 instance type. Default: c7i.xlarge */
+  /** EC2 instance type. Default: c7i.2xlarge */
   type?: string;
   /** Number of instances. Default: 1 */
   count?: number;

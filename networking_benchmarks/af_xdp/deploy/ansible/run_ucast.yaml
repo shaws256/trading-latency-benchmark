@@ -56,20 +56,24 @@
   gather_facts: no
 
   vars:
-    count: "1000"
-    rate: "1000"
-    warmup: "500"
+    count: "10000"
+    rate: "10000"
+    warmup: "1000"
     data_port: "5000"
     listen_port: "19020"
+    # Pin onto isolated cores (see bake-ami.sh): core 1 = replicator poll,
+    # core 2 = rtt receiver, core 3 = rtt sender, core 0 = OS/IRQ.
+    send_cpu: "3"
+    recv_cpu: "2"
 
   tasks:
 
     - name: Run RTT to each peer
       ansible.builtin.shell: |
-        /opt/af-xdp/rtt \
+        /opt/af-xdp/rtt_kernel \
           {{ hostvars[item].private_ip_address }} {{ data_port }} \
           {{ private_ip_address }} {{ listen_port }} \
-          {{ count }} {{ rate }} {{ warmup }} 0 1 ; \
+          {{ count }} {{ rate }} {{ warmup }} {{ send_cpu }} {{ recv_cpu }} ; \
         mv /tmp/rtt_results.json /tmp/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json 2>/dev/null || true
       loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
       loop_control:
@@ -118,3 +122,39 @@
       ansible.builtin.debug:
         msg: "Results saved to {{ hostvars[groups['replicator'][0]].results_dir }}/"
       run_once: true
+
+# ── Play 4: Generate report (local) ──────────────────────────────────────────
+- name: Generate report
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  tasks:
+
+    - name: Find most recent results dir
+      ansible.builtin.shell: |
+        find {{ playbook_dir }}/results -mindepth 2 -maxdepth 2 -type d | sort | tail -1
+      register: latest_dir
+      changed_when: false
+
+    - name: Run report generator
+      ansible.builtin.shell: |
+        python3 {{ playbook_dir }}/report/generate_matrix_report.py {{ latest_dir.stdout | trim }}
+      register: report_output
+      ignore_errors: yes
+
+    - name: Display report
+      ansible.builtin.debug:
+        msg: "{{ report_output.stdout_lines | default(['No output']) }}"
+
+    - name: Show errors (if any)
+      ansible.builtin.debug:
+        msg: "{{ report_output.stderr_lines }}"
+      when: report_output.rc != 0
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          Reports: {{ latest_dir.stdout | trim }}/
+          [matrix_report.html, topology_map.html, matrix_summary.json]
+      when: report_output.rc == 0

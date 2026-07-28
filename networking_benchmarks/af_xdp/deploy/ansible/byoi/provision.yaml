@@ -73,26 +73,36 @@
       when: not libxdp_stat.stat.exists and not (rebuild | default(false) | bool)
 
     # ── Sync + build benchmark ─────────────────────────────────────────────
-    - name: Sync trading-latency-benchmark from local repo
+    - name: Sync af_xdp source to instance
       become: false
       ansible.builtin.synchronize:
-        src: "{{ playbook_dir }}/../../"
-        dest: /home/ec2-user/trading-latency-benchmark/
+        src: "{{ playbook_dir }}/../../../"
+        dest: /home/ec2-user/af_xdp/
         rsync_opts:
           - "--exclude=.git"
           - "--exclude=node_modules"
+          # Do not ship host build artifacts (see dev.yaml): a stale .o compiled
+          # with -DKERNEL_MODE_ONLY would be relinked into a kernel-only binary.
+          - "--exclude=*.o"
+          - "--exclude=*.d"
+          - "--exclude=/replicator"
+          - "--exclude=/rtt_kernel"
+          - "--exclude=/mcast_send"
+          - "--exclude=/mcast_receive"
+          - "--exclude=/replicator_ctl"
+          - "--exclude=/udp_ping"
           - "--checksum"
 
     - name: Build benchmark binaries
       ansible.builtin.shell: |
         set -e
-        cd /home/ec2-user/trading-latency-benchmark/networking_benchmarks/af_xdp
+        cd /home/ec2-user/af_xdp
         make full
         # Install to /opt/af-xdp for consistent path with baked AMI
         mkdir -p /opt/af-xdp/xdp
-        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/
+        cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/
         cp -f src/xdp/*.o /opt/af-xdp/xdp/
-        chown -R ec2-user:ec2-user /home/ec2-user/trading-latency-benchmark
+        chown -R ec2-user:ec2-user /home/ec2-user/af_xdp
 
     # ── System configs (same as bake-ami.sh) ───────────────────────────────
     - name: Write ENA PHC modprobe config
@@ -150,6 +160,10 @@
           net.ipv4.conf.all.rp_filter = 0
           net.ipv4.conf.default.rp_filter = 0
           net.core.netdev_max_backlog = 10000
+          # rtt_kernel requests SO_RCVBUF=4MB; kernel clamps to rmem_max (AL2023
+          # default 208KB) -> ~0.6% UDP RcvbufErrors. Raise the ceiling.
+          net.core.rmem_max = 16777216
+          net.core.wmem_max = 16777216
       when: not (rebuild | default(false) | bool)
 
     - name: Apply sysctl
@@ -167,12 +181,33 @@
     - name: Disable interrupt coalescing
       ansible.builtin.shell: |
         IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -C "${IFACE:-eth0}" adaptive-rx off || true
         ethtool -C "${IFACE:-eth0}" rx-usecs 0 tx-usecs 0 || true
 
     - name: Set RSS indirection to queue 0 (all traffic to AF_XDP socket)
       ansible.builtin.shell: |
         IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
         ethtool -X "${IFACE:-eth0}" equal 1
+
+    - name: Enable CPU isolation for non-competing busy-polling (grub cmdline)
+      ansible.builtin.replace:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT="(?!.*isolcpus)(.*)"$'
+        replace: 'GRUB_CMDLINE_LINUX_DEFAULT="isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 nosmt \1"'
+      register: grub_isol
+      when: not (rebuild | default(false) | bool)
+
+    - name: Regenerate grub config
+      ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+      when: not (rebuild | default(false) | bool) and grub_isol.changed
+
+    - name: Disable irqbalance (keep IRQs off isolated cores)
+      ansible.builtin.systemd:
+        name: irqbalance
+        enabled: false
+        state: stopped
+      failed_when: false
+      when: not (rebuild | default(false) | bool)
 
     - name: Reboot to activate PHC
       ansible.builtin.reboot:

@@ -15,14 +15,10 @@
 
   vars:
     src_root: "{{ playbook_dir }}/../../.."
-    remote_path: /home/ec2-user/trading-latency-benchmark
-    af_xdp_path: "{{ remote_path }}/networking_benchmarks/af_xdp"
+    remote_path: /home/ec2-user/af_xdp
+    af_xdp_path: "{{ remote_path }}"
 
   tasks:
-
-    - name: Clean old build artifacts
-      ansible.builtin.shell: |
-        cd {{ af_xdp_path }} 2>/dev/null && make clean || true
 
     - name: Sync source from local repo
       become: false
@@ -33,18 +29,46 @@
           - "--exclude=.git"
           - "--exclude=node_modules"
           - "--exclude=cdk.out"
+          # Never ship host build artifacts: a stale .o/.d (e.g. one compiled
+          # with -DKERNEL_MODE_ONLY) would be seen as up-to-date by make and
+          # relinked into the binary, silently producing a kernel-mode-only
+          # build that rejects ucast/AF_XDP mode.
+          - "--exclude=*.o"
+          - "--exclude=*.d"
+          - "--exclude=/replicator"
+          - "--exclude=/rtt_kernel"
+          - "--exclude=/mcast_send"
+          - "--exclude=/mcast_receive"
+          - "--exclude=/replicator_ctl"
+          - "--exclude=/udp_ping"
           - "--checksum"
 
-    - name: Build binaries
+    # Clean AFTER sync (a pre-sync clean is useless once rsync brings artifacts
+    # back). Fail loudly on build errors — do not pipe to tail, which masks the
+    # non-zero make exit code.
+    - name: Build binaries (clean rebuild)
+      ansible.builtin.shell: |
+        set -o pipefail
+        cd {{ af_xdp_path }}
+        make clean
+        make full 2>&1 | tail -40
+      args:
+        executable: /bin/bash
+      register: build_result
+
+    - name: Verify replicator binary supports AF_XDP (not kernel-mode-only)
       ansible.builtin.shell: |
         cd {{ af_xdp_path }}
-        make full 2>&1 | tail -5
-      register: build_result
+        if strings replicator | grep -q "kernel-mode-only configuration"; then
+          echo "ERROR: built replicator is KERNEL_MODE_ONLY; ucast/mcast will fail" >&2
+          exit 1
+        fi
+      changed_when: false
 
     - name: Install binaries to /opt/af-xdp
       ansible.builtin.shell: |
         cd {{ af_xdp_path }}
-        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/
+        cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/
         cp -f src/xdp/*.o /opt/af-xdp/xdp/
 
     - name: Detach stale XDP programs
@@ -76,7 +100,7 @@
 
     - name: Wait for startup
       ansible.builtin.pause:
-        seconds: 3
+        seconds: 6
 
     - name: Verify replicator is active
       ansible.builtin.command: systemctl is-active replicator.service

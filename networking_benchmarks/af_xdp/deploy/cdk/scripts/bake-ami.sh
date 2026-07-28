@@ -71,7 +71,7 @@ else
   cd /tmp/build-src/networking_benchmarks/af_xdp
   make full
   mkdir -p /opt/af-xdp/xdp
-  cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/ 2>/dev/null || true
+  cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/ 2>/dev/null || true
   cp -f src/xdp/*.o /opt/af-xdp/xdp/ 2>/dev/null || true
 fi
 
@@ -125,6 +125,12 @@ net.ipv4.igmp_qrv = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 net.core.netdev_max_backlog = 10000
+# Socket buffer ceilings. rtt_kernel requests SO_RCVBUF=4MB; the kernel silently
+# clamps it to rmem_max (AL2023 default 208KB), which caused ~0.6% UDP
+# RcvbufErrors (client-side reply drops) under coalesced micro-bursts. Raise the
+# ceiling so the 4MB request sticks.
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
 EOF
 
 # LIBXDP_OBJECT_PATH for xdp-dispatcher.o lookup
@@ -132,6 +138,25 @@ cat > /etc/profile.d/af-xdp.sh <<'EOF'
 export LIBXDP_OBJECT_PATH=/usr/lib64/bpf
 export PATH=/opt/af-xdp:$PATH
 EOF
+
+# ── 4b. CPU isolation for non-competing busy-polling ──────────────────────────
+# Core layout (c7i.2xlarge = 4 physical cores, SMT disabled):
+#   core 0 : OS + NIC IRQs (housekeeping)
+#   core 1 : replicator AF_XDP busy-poll thread (queue 0 → core 1)
+#   core 2 : receiver (SCHED_FIFO)
+#   core 3 : sender   (SCHED_FIFO)
+# isolcpus removes 1-3 from the scheduler's load balancer; nohz_full stops the
+# scheduler tick on them; rcu_nocbs offloads RCU callbacks; nosmt disables HT
+# siblings so each isolated core is a full physical core (deterministic).
+ISOL="isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 nosmt"
+if ! grep -q "isolcpus=" /etc/default/grub 2>/dev/null; then
+  sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"|GRUB_CMDLINE_LINUX_DEFAULT=\"${ISOL} |" /etc/default/grub
+  grub2-mkconfig -o /boot/grub2/grub.cfg || true
+fi
+
+echo "=== CPU isolation cmdline applied (active after reboot) ==="
+
+# ── LIBXDP_OBJECT_PATH end ────────────────────────────────────────────────────
 
 # ── 5. Systemd units ──────────────────────────────────────────────────────────
 
@@ -145,7 +170,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); ethtool -C "${IFACE:-eth0}" rx-usecs 0 tx-usecs 0 || true'
+ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); ethtool -C "${IFACE:-eth0}" adaptive-rx off || true; ethtool -C "${IFACE:-eth0}" rx-usecs 0 tx-usecs 0 || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -184,6 +209,22 @@ ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"
 WantedBy=multi-user.target
 EOF
 
+# Pin ENA NIC IRQs to CPU0 so isolated cores 1-3 stay free of interrupt work.
+cat > /etc/systemd/system/ena-irq-affinity.service <<'EOF'
+[Unit]
+Description=Pin ENA NIC IRQs to CPU0 (keep isolated cores quiet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); for irq in $(grep "$IFACE" /proc/interrupts | awk -F: "{print \$1}"); do echo 0 > /proc/irq/$irq/smp_affinity_list 2>/dev/null || true; done'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # Replicator start script (mode/port/group from /etc/default/replicator)
 cat > /usr/local/bin/start-replicator.sh <<'EOF'
 #!/bin/bash
@@ -197,14 +238,15 @@ CONF=/etc/default/replicator
 MODE="${REPLICATOR_MODE:-ucast}"
 PORT="${REPLICATOR_PORT:-5000}"
 MCAST_GROUP="${REPLICATOR_MCAST_GROUP:-224.0.31.50}"
+ZC="${REPLICATOR_ZEROCOPY:-true}"   # AF_XDP zero-copy (ENA supports ZC); 'true'|'false'
 
 IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
 IP=$(ip -4 addr show "$IFACE" | awk '/inet /{print $2}' | cut -d/ -f1)
 
 case "$MODE" in
   kernel)  exec /opt/af-xdp/replicator --kernel-mode "$IP" "$PORT" ;;
-  ucast)   exec /opt/af-xdp/replicator "$IFACE" "$IP" "$PORT" ;;
-  mcast)   exec /opt/af-xdp/replicator "$IFACE" "$MCAST_GROUP" "$PORT" --gre ;;
+  ucast)   exec /opt/af-xdp/replicator "$IFACE" "$IP" "$PORT" "$ZC" ;;
+  mcast)   exec /opt/af-xdp/replicator "$IFACE" "$MCAST_GROUP" "$PORT" "$ZC" --gre ;;
   *) echo "Unknown REPLICATOR_MODE=$MODE" >&2; exit 1 ;;
 esac
 EOF
@@ -217,6 +259,7 @@ cat > /etc/default/replicator <<'EOF'
 REPLICATOR_MODE=ucast       # kernel | ucast | mcast
 REPLICATOR_PORT=5000
 REPLICATOR_MCAST_GROUP=224.0.31.50
+REPLICATOR_ZEROCOPY=true    # AF_XDP zero-copy (ENA-supported); set false to force copy/DRV mode
 EOF
 
 # Replicator systemd service
@@ -241,7 +284,9 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service replicator.service
+# Disable irqbalance so it can't migrate NIC IRQs onto the isolated cores.
+systemctl disable --now irqbalance 2>/dev/null || true
+systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service replicator.service
 
 # ── 6. Cleanup ────────────────────────────────────────────────────────────────
 rm -rf /tmp/build-src /opt/xdp-tools

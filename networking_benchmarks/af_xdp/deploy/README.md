@@ -31,7 +31,7 @@ deploy/
    ansible-playbook configure_mcast.yaml -e replicator_private_ip=10.61.0.5
 
 4. Run benchmarks
-   ssh ec2-user@<node> '/opt/af-xdp/rtt <target_ip> 5000 ...'
+   ssh ec2-user@<node> '/opt/af-xdp/rtt_kernel <target_ip> 5000 ...'
 ```
 
 ### Development (stock AL2023)
@@ -62,7 +62,7 @@ Use ansible directly on your own instances. Tag them with `Role: source/replicat
    ansible-playbook -i inventory.aws_ec2.yml provision.yaml
 
 3. Run benchmarks (unicast — no further config needed)
-   ssh ec2-user@<node> '/opt/af-xdp/rtt <target> 5000 ...'
+   ssh ec2-user@<node> '/opt/af-xdp/rtt_kernel <target> 5000 ...'
 ```
 
 See [ansible/README.md](ansible/README.md) for static inventory examples and full BYOI documentation.

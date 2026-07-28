@@ -8,7 +8,7 @@ Measures round-trip and one-way latency between EC2 instances at microsecond pre
 ```
 af_xdp/
 ├── src/            Core replicator engine (AF_XDP + kernel-mode)
-├── tools/          Measurement instruments (rtt, mcast_send/receive, ctl, ping)
+├── tools/          Measurement instruments (rtt_kernel, mcast_send/receive, ctl, ping)
 ├── tests/          Integration test suite (14 pytest tests)
 ├── deploy/         Infrastructure (CDK stacks + Ansible playbooks)
 │   ├── cdk/        Fleet deployment + AMI builder
