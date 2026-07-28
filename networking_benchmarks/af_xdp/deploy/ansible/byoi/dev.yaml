@@ -1,0 +1,99 @@
+---
+# Dev iteration playbook: rsync code to EC2s, rebuild, reset NIC, restart replicator.
+#
+# Use after local code changes to deploy + test on running fleet instances.
+# Handles the full lifecycle: rsync → build → XDP cleanup → service restart.
+#
+# Usage:
+#   ansible-playbook -i inventory.aws_ec2.yml byoi/dev.yaml
+#   ansible-playbook -i inventory.aws_ec2.yml byoi/dev.yaml --limit replicator
+
+- name: Dev — rsync, build, restart
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    src_root: "{{ playbook_dir }}/../../.."
+    remote_path: /home/ec2-user/trading-latency-benchmark
+    af_xdp_path: "{{ remote_path }}/networking_benchmarks/af_xdp"
+
+  tasks:
+
+    - name: Clean old build artifacts
+      ansible.builtin.shell: |
+        cd {{ af_xdp_path }} 2>/dev/null && make clean || true
+
+    - name: Sync source from local repo
+      become: false
+      ansible.builtin.synchronize:
+        src: "{{ src_root }}/"
+        dest: "{{ remote_path }}/"
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=node_modules"
+          - "--exclude=cdk.out"
+          - "--checksum"
+
+    - name: Build binaries
+      ansible.builtin.shell: |
+        cd {{ af_xdp_path }}
+        make full 2>&1 | tail -5
+      register: build_result
+
+    - name: Install binaries to /opt/af-xdp
+      ansible.builtin.shell: |
+        cd {{ af_xdp_path }}
+        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/
+        cp -f src/xdp/*.o /opt/af-xdp/xdp/
+
+    - name: Detach stale XDP programs
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set $IFACE xdp off 2>/dev/null || true
+        ip link set $IFACE xdpgeneric off 2>/dev/null || true
+        ip link set $IFACE xdpdrv off 2>/dev/null || true
+        xdp-loader unload $IFACE --all 2>/dev/null || true
+
+    - name: Reset interface
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set $IFACE down
+        sleep 1
+        ip link set $IFACE up
+        sleep 2
+
+    - name: Set RSS indirection to queue 0
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -X "${IFACE:-eth0}" equal 1
+
+    - name: Restart replicator service
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: restarted
+        daemon_reload: yes
+
+    - name: Wait for startup
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Verify replicator is active
+      ansible.builtin.command: systemctl is-active replicator.service
+      register: svc_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Show status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ svc_status.stdout | default('unknown') }}"
+
+    - name: Show journal on failure
+      ansible.builtin.shell: journalctl -u replicator -n 5 --no-pager
+      register: journal
+      when: svc_status.stdout != 'active'
+
+    - name: Report failure
+      ansible.builtin.debug:
+        msg: "{{ journal.stdout_lines }}"
+      when: svc_status.stdout != 'active'

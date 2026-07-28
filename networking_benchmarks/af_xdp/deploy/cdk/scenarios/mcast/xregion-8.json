@@ -1,0 +1,7 @@
+[
+  {"count": 1, "role": "source", "az": "a"},
+  {"count": 1, "role": "replicator", "az": "a"},
+  {"count": 2, "az": "a", "pgType": "cluster", "pgName": "eu-cpg-a", "region": "eu-west-2"},
+  {"count": 2, "az": "b", "pgType": "cluster", "pgName": "eu-cpg-b", "region": "eu-west-2"},
+  {"count": 2, "pgType": "spread", "pgName": "eu-spg-a", "region": "eu-west-2"}
+]

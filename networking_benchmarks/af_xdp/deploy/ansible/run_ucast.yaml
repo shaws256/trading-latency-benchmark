@@ -1,0 +1,120 @@
+---
+# Run unicast NxN RTT benchmark across all replicator nodes.
+#
+# Each node measures RTT to every other node (serial — one host at a time).
+# One JSON result file per pair, all in a single timestamped directory.
+#
+# Usage:
+#   ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml
+#   ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml -e count=10000 -e rate=10000
+#
+# Results saved to: ./results/<date>/<time>/
+#   <src_ip>-<dst_ip>.json    — per-pair RTT data
+#   <ip>_metadata.json        — node info (IP, AZ, PG, region)
+
+# ── Play 1: Setup (parallel — create dir, verify peers) ──────────────────────
+- name: Setup
+  hosts: replicator
+  gather_facts: yes
+  become: yes
+  tasks:
+
+    - name: Compute results path (date/time nested)
+      ansible.builtin.set_fact:
+        results_dir: "{{ playbook_dir }}/results/{{ ansible_date_time.date }}/{{ ansible_date_time.hour }}-{{ ansible_date_time.minute }}-{{ ansible_date_time.second }}"
+      run_once: true
+
+    - name: Create results directory
+      ansible.builtin.file:
+        path: "{{ results_dir }}"
+        state: directory
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Ensure replicator is running
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: started
+
+    - name: Verify all peers respond to control protocol
+      ansible.builtin.shell: |
+        for ip in {{ groups['replicator'] | map('extract', hostvars, 'private_ip_address') | join(' ') }}; do
+          /opt/af-xdp/replicator_ctl "$ip" list > /dev/null 2>&1 || exit 1
+        done
+      register: health_check
+      retries: 3
+      delay: 5
+      until: health_check.rc == 0
+      run_once: true
+
+# ── Play 2: Measure (serial — one host at a time, no contention) ──────────────
+- name: Measure RTT
+  hosts: replicator
+  serial: 1
+  become: yes
+  gather_facts: no
+
+  vars:
+    count: "1000"
+    rate: "1000"
+    warmup: "500"
+    data_port: "5000"
+    listen_port: "19020"
+
+  tasks:
+
+    - name: Run RTT to each peer
+      ansible.builtin.shell: |
+        /opt/af-xdp/rtt \
+          {{ hostvars[item].private_ip_address }} {{ data_port }} \
+          {{ private_ip_address }} {{ listen_port }} \
+          {{ count }} {{ rate }} {{ warmup }} 0 1 ; \
+        mv /tmp/rtt_results.json /tmp/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json 2>/dev/null || true
+      loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
+      loop_control:
+        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}"
+      ignore_errors: yes
+
+    - name: Fetch per-pair results
+      ansible.builtin.fetch:
+        src: "/tmp/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json"
+        dest: "{{ hostvars[groups['replicator'][0]].results_dir }}/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json"
+        flat: yes
+        fail_on_missing: no
+      loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
+      loop_control:
+        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}"
+
+# ── Play 3: Metadata ──────────────────────────────────────────────────────────
+- name: Collect metadata
+  hosts: replicator
+  become: yes
+  gather_facts: no
+
+  tasks:
+
+    - name: Write node metadata
+      ansible.builtin.copy:
+        content: |
+          {{ {
+            "hostname": inventory_hostname,
+            "private_ip": private_ip_address | default(ansible_host),
+            "instance_type": tags.InstanceType | default('unknown'),
+            "az": placement.availability_zone | default('unknown'),
+            "region": placement.region | default('unknown'),
+            "pg_type": tags.PlacementStrategy | default(None),
+            "pg_name": tags.PlacementGroup | default(None)
+          } | to_nice_json }}
+        dest: "/tmp/node_metadata.json"
+
+    - name: Fetch metadata
+      ansible.builtin.fetch:
+        src: /tmp/node_metadata.json
+        dest: "{{ hostvars[groups['replicator'][0]].results_dir }}/{{ private_ip_address }}_metadata.json"
+        flat: yes
+
+    - name: Display results location
+      ansible.builtin.debug:
+        msg: "Results saved to {{ hostvars[groups['replicator'][0]].results_dir }}/"
+      run_once: true

@@ -112,8 +112,6 @@ static void usage(const char *prog)
 	       "  -c <count>   packets to receive        (default: %d)\n"
 	       "  -t <timeout> seconds before giving up  (default: %d)\n"
 	       "  -q <queue>   XDP/AF_XDP queue index    (default: %d)\n"
-	       "  -B <path>    path to mcast.o\n"
-	       "               (default: ./src/xdp/mcast.o)\n"
 	       "  -r           print raw latencies (ns)\n"
 	       "  -h           this help\n"
 	       "\nRequires root (XDP attach + AF_XDP).\n",
@@ -123,7 +121,6 @@ static void usage(const char *prog)
 int main(int argc, char *argv[])
 {
 	const char *iface    = nullptr;
-	const char *bpf_path = "./src/xdp/mcast.o";
 	int  port    = DEF_PORT;
 	int  count   = DEF_COUNT;
 	int  timeout = DEF_TIMEOUT;
@@ -131,20 +128,35 @@ int main(int argc, char *argv[])
 	bool raw     = false;
 
 	int opt;
-	while ((opt = getopt(argc, argv, "i:p:c:t:q:B:rh")) != -1) {
+	while ((opt = getopt(argc, argv, "i:p:c:t:q:rh")) != -1) {
 		switch (opt) {
 		case 'i': iface    = optarg;           break;
 		case 'p': port     = atoi(optarg);     break;
 		case 'c': count    = atoi(optarg);     break;
 		case 't': timeout  = atoi(optarg);     break;
 		case 'q': queue    = atoi(optarg);     break;
-		case 'B': bpf_path = optarg;           break;
 		case 'r': raw      = true;             break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
 		}
 	}
 	if (!iface) { fprintf(stderr, "error: -i <iface> is required\n"); usage(argv[0]); return 1; }
+
+	/* ── resolve BPF object path (search order) ────────────────────────── */
+	static const char *bpf_search_paths[] = {
+		"./src/xdp/mcast.o",           // dev: running from af_xdp/ source tree
+		"./xdp/mcast.o",               // installed: running from /opt/af-xdp/
+		"/opt/af-xdp/xdp/mcast.o",    // absolute: baked AMI
+		nullptr
+	};
+	const char *bpf_path = nullptr;
+	for (const char **p = bpf_search_paths; *p; ++p) {
+		if (access(*p, R_OK) == 0) { bpf_path = *p; break; }
+	}
+	if (!bpf_path) {
+		fprintf(stderr, "error: mcast.o not found in search paths\n");
+		return 1;
+	}
 
 	signal(SIGINT,  sig_handler);
 	signal(SIGTERM, sig_handler);

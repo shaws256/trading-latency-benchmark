@@ -53,7 +53,7 @@ struct
     __type(value, __u32);
 } xsks_map SEC(".maps");
 
-// Maximum number of listen addresses a single packet_replicator instance can intercept.
+// Maximum number of listen addresses a single replicator instance can intercept.
 // config_map slots may be sparse (dynamic add/remove); target_ip == 0 marks an unused
 // slot — the scan always checks all MAX_GROUPS entries via continue, not break.
 #define MAX_GROUPS 16

@@ -1,0 +1,5 @@
+[
+  {"role": "source", "pgType": "spread"},
+  {"role": "replicator", "pgType": "spread"},
+  {"role": "destination", "pgType": "spread"}
+]

@@ -1,0 +1,5 @@
+[
+  {"role": "source", "pgType": "cluster"},
+  {"role": "replicator", "pgType": "cluster"},
+  {"role": "destination", "pgType": "cluster"}
+]
