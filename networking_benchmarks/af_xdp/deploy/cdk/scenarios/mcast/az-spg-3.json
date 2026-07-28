@@ -1,5 +1,5 @@
 [
-  {"role": "source", "pgType": "spread"},
-  {"role": "replicator", "pgType": "spread"},
-  {"role": "destination", "pgType": "spread"}
+  {"role": "source", "pgName":"spg-a", "pgType": "spread"},
+  {"role": "replicator", "pgName":"spg-a", "pgType": "spread"},
+  {"role": "destination", "pgName":"spg-a", "pgType": "spread"}
 ]

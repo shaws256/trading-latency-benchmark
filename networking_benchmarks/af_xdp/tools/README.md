@@ -8,7 +8,7 @@ Measurement instruments and control utilities.
 |------|--------|-------------|
 | `rtt_kernel.cpp` | `rtt_kernel` | High-precision RTT measurement client. Subscribes to replicator, sends UDP packets, measures round-trip via SO_TIMESTAMP (kernel RX) + TSC (TX). Outputs JSON with p50/p90/p95/p99/p999/max. |
 | `mcast_send.cpp` | `mcast_send` | Multicast sender — timestamps packets, sends to GRE tunnel or multicast group. Used as the "exchange" in multicast scenarios. |
-| `mcast_receive.cpp` | `mcast_receive` | Multicast receiver — captures packets with kernel RX timestamps, computes one-way latency from sender timestamp. Requires PHC clock sync between hosts. |
+| `mcast_receive.cpp` | `mcast_receive` | Multicast receiver — attaches `mcast.o`, seeds its `config_map` with the target group+port (`-g`/`-p`) so the XDP filter redirects to the AF_XDP socket, captures packets, computes one-way + per-hop latency from sender/replicator timestamps. Requires PHC clock sync between hosts. |
 | `replicator_ctl.cpp` | `replicator_ctl` | Control protocol client. Sends ADD/REMOVE/LIST commands to replicator's control port (12345). |
 | `udp_send.cpp` | `udp_send` | Simple UDP connectivity probe. Sends packets to a target and reports reachability. Supports multicast groups. |
 
@@ -85,6 +85,23 @@ require `phc2sys` to align the PHC epoch with system clock.
 ./replicator_ctl <replicator_ip> mcast <multicast_group>
 ./replicator_ctl <replicator_ip> mcast-leave <multicast_group>
 ```
+
+## Multicast (mcast_send / mcast_receive) usage
+
+```bash
+# Receiver (destination): attach mcast.o, listen for group:port fan-out
+sudo ./mcast_receive -I <iface> -g <group> -p <port> -c <count> -t <timeout_s> [-q <queue>]
+
+# Sender (source): GRE-encapsulate to the replicator, inner dst = group
+sudo ./mcast_send -I <iface> -D <replicator_ip> -g <group> -p <port> -c <count> -i <interval_us>
+```
+
+Interface flag is `-I` in both tools (`mcast_send` uses `-i` for interval). `mcast_receive`
+seeds `config_map[0] = {group, port}` so `mcast.o` redirects matching packets; without a
+matching entry the filter `XDP_PASS`es everything and the AF_XDP socket sees nothing.
+
+For the multi-group / multi-destination capability and the orchestration roadmap, see
+[deploy/ansible/README.md → "Multicast: groups & destinations"](../deploy/ansible/README.md).
 
 ## Dependencies
 

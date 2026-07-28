@@ -7,12 +7,12 @@ Measures round-trip and one-way latency between EC2 instances at microsecond pre
 
 ```
 af_xdp/
-├── src/            Core replicator engine (AF_XDP + kernel-mode)
-├── tools/          Measurement instruments (rtt_kernel, mcast_send/receive, ctl, ping)
-├── tests/          Integration test suite (14 pytest tests)
-├── deploy/         Infrastructure (CDK stacks + Ansible playbooks)
+├── src/            Core replicator engine (AF_XDP + kernel-mode) + eBPF (ucast.o/mcast.o)
+├── tools/          Measurement instruments (rtt_kernel, mcast_send/receive, replicator_ctl, udp_send)
+├── deploy/         Infrastructure (CDK stacks + benchmark/runtime Ansible playbooks)
 │   ├── cdk/        Fleet deployment + AMI builder
-│   └── ansible/    Runtime config + dev provisioning
+│   └── ansible/    run_ucast / run_mcast / configure_mcast / prepare_mcast_nodes + inventory
+├── dev/            Dev tooling: pytest suite (dev/tests), Docker build harness, sync/provision playbooks
 ├── report/         Latency report generation (placeholder)
 └── Makefile        Build system (all, kernel-mode, full, mcast targets)
 ```
@@ -36,7 +36,7 @@ pip install pytest && pytest -v
 |-----------|--------|-------------|
 | [`src/`](src/README.md) | Architecture, control protocol, build modes | Core C++ replicator + eBPF XDP programs |
 | [`tools/`](tools/README.md) | Usage, CLI flags, timestamp modes | RTT client, multicast tools, control CLI |
-| [`tests/`](tests/README.md) | Running, test classes, container testing | 14 integration tests, kernel-mode compatible |
+| [`dev/tests/`](dev/tests/README.md) | Running, test classes, container testing | 33 integration tests, kernel-mode compatible |
 | [`deploy/`](deploy/README.md) | Deployment flows, instance roles | CDK + Ansible orchestration |
 | [`deploy/cdk/`](deploy/cdk/README.md) | Fleet spec, scenarios, parameters | Infrastructure as code |
 | [`deploy/ansible/`](deploy/ansible/README.md) | Playbooks, inventory, variables | Runtime provisioning |

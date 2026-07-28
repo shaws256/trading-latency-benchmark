@@ -64,7 +64,8 @@ After provisioning, binaries are installed to `/opt/af-xdp/` and the `replicator
 
 | File | Purpose | When to use |
 |------|---------|-------------|
-| `configure_mcast.yaml` | Multicast runtime config | After provisioning — GRE, replicator mode, registration |
+| `prepare_mcast_nodes.yaml` | Adapt ucast-baked nodes for mcast roles | Before configure_mcast — stops/disables replicator on source+destination to free the AF_XDP queue |
+| `configure_mcast.yaml` | Multicast runtime config | After prepare_mcast_nodes — GRE tunnel, replicator mcast mode, registration, ARP seed, datapath probe |
 | `run_ucast.yaml` | Run unicast NxN RTT benchmark | After provisioning — measures every pair |
 | `run_mcast.yaml` | Run multicast fan-out benchmark | After configure_mcast — source→replicator→destinations |
 | `run_ucast.yaml` | Run NxN unicast RTT benchmark + generate report | Serial measurement, then local HTML/JSON report |
@@ -101,9 +102,15 @@ ssh ec2-user@<nodeA> '/opt/af-xdp/rtt_kernel <nodeB_ip> 5000 <nodeA_ip> 19020 10
 
 ### Multicast
 
+Full run order (the baked AMI is ucast-tailored, so nodes are adapted first):
+
 ```bash
-ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml \
-  -e replicator_private_ip=10.0.1.20
+# 1. Free the AF_XDP queue on source/destination (stop the ucast replicator)
+ansible-playbook -i inventory.aws_ec2.yml prepare_mcast_nodes.yaml
+# 2. GRE tunnel + replicator mcast mode + destination registration + ARP seed
+ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml -e replicator_private_ip=10.0.1.20
+# 3. Fan-out latency benchmark (source → replicator → destinations)
+ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml -e replicator_private_ip=10.0.1.20
 ```
 
 ### Rebuild binaries (after code change)
@@ -118,7 +125,8 @@ ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e rebuild=true
 |------|-------|--------------|
 | 1 | `source` | Creates GRE tunnel to replicator + NM dispatcher persistence |
 | 2 | `replicator` | Writes `/etc/default/replicator` (mcast mode) + restarts service |
-| 3 | `destination` | Registers each destination with replicator via control protocol |
+| 3 | `destination` | Registers each destination (CTRL_MCAST_JOIN) + seeds ARP toward the replicator so fan-out frames get a real dst MAC |
+| 4 | `replicator` | Best-effort datapath probe: `udp_send` over GRE, checks the XDP redirect counter moved (non-fatal) |
 
 ### Variables
 
@@ -128,6 +136,48 @@ ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e rebuild=true
 | `mcast_group` | `224.0.31.50` | Base multicast group |
 | `base_mcast_group` | `224.0.31.50` | Per-destination group base (last octet incremented) |
 | `data_port` | `5000` | UDP data port |
+
+## Multicast: groups & destinations (capability + future dev)
+
+**Replicator core (supported today):** the replicator handles **up to 16 multicast
+groups** (`config_map` has `MAX_GROUPS = 16` slots; one slot per distinct group,
+ref-counted join/leave) and, per group, an arbitrary **set of destinations** —
+each matching packet is fanned out to *every* destination registered for that
+group (`group_destinations_[group]`). The `mcast.o` XDP filter loops the 16 slots
+matching inner `{group, port}` and redirects to the AF_XDP socket. So a single
+replicator supports **16 groups × N destinations each**.
+
+**Orchestration (current limitation):** the playbooks + `mcast_receive` currently
+only wire up the **single-group** case coherently. Three things must be aligned
+before the general multi-group/multi-destination case works end-to-end:
+
+1. **Group assignment.** `configure_mcast` assigns each destination a *different*
+   group (`base_mcast_group + destination_index` → .50, .51, …). That models
+   "one group per destination", not "one source stream fanned to many
+   destinations on a shared group".
+2. **Receiver group.** `mcast_receive -g <group>` seeds exactly one `config_map`
+   slot (slot 0). A single receiver cannot yet listen on multiple groups (would
+   need to populate multiple slots).
+3. **Source ↔ receiver group match.** `run_mcast` uses one `mcast_group` var for
+   both the source's `mcast_send -g` and every receiver's `-g`, which contradicts
+   the per-destination assignment above. With >1 destination the receiver ends up
+   on the wrong group → `mcast.o` `XDP_PASS`es → nothing received.
+
+**Two models to implement (future dev):**
+
+- **Shared group (simple fan-out):** all destinations join one group; the source
+  sends that group; all receivers use the same `-g`. Change `configure_mcast` to
+  register every destination on `mcast_group` (drop the per-destination index).
+- **Per-group (independent streams):** N groups; align each destination's `-g`
+  and `config_map` entry with the source group feeding it (needs per-destination
+  vars in `run_mcast`, and multi-slot `config_map` seeding in `mcast_receive` for
+  a receiver that listens on several groups).
+
+**Also note:** mcast latency is a **one-way** measurement (`rx_ns − tx_ns` across
+two hosts), so it requires PHC/chrony clock sync between source and destination
+(the AMI configures `refclock PHC /dev/ptp0`). `mcast_receive` reports a per-hop
+split (source→replicator, replicator→destination) using the replicator's embedded
+timestamp when present.
 
 ## provision.yaml — What it installs
 

@@ -1,5 +1,5 @@
 [
-  {"role": "source", "pgType": "cluster"},
-  {"role": "replicator", "pgType": "cluster"},
-  {"role": "destination", "pgType": "cluster"}
+  {"role": "source", "pgName":"cpg-a", "pgType": "cluster"},
+  {"role": "replicator", "pgName":"cpg-a", "pgType": "cluster"},
+  {"role": "destination", "pgName":"cpg-a", "pgType": "cluster"}
 ]

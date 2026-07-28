@@ -29,6 +29,7 @@
 #include <time.h>
 #include <signal.h>
 #include <poll.h>
+#include <sys/resource.h>
 
 #include <xdp/xsk.h>
 #include <bpf/libbpf.h>
@@ -108,6 +109,7 @@ static void usage(const char *prog)
 {
 	printf("Usage: %s [options]\n"
 	       "  -I <iface>   network interface (required)\n"
+	       "  -g <group>   inner multicast group to match (default: 224.0.31.50)\n"
 	       "  -p <port>    inner UDP dst port to match (default: %d)\n"
 	       "  -c <count>   packets to receive        (default: %d)\n"
 	       "  -t <timeout> seconds before giving up  (default: %d)\n"
@@ -121,6 +123,7 @@ static void usage(const char *prog)
 int main(int argc, char *argv[])
 {
 	const char *iface    = nullptr;
+	const char *group    = "224.0.31.50";
 	int  port    = DEF_PORT;
 	int  count   = DEF_COUNT;
 	int  timeout = DEF_TIMEOUT;
@@ -128,9 +131,10 @@ int main(int argc, char *argv[])
 	bool raw     = false;
 
 	int opt;
-	while ((opt = getopt(argc, argv, "I:p:c:t:q:rh")) != -1) {
+	while ((opt = getopt(argc, argv, "I:g:p:c:t:q:rh")) != -1) {
 		switch (opt) {
 		case 'I': iface    = optarg;           break;
+		case 'g': group    = optarg;           break;
 		case 'p': port     = atoi(optarg);     break;
 		case 'c': count    = atoi(optarg);     break;
 		case 't': timeout  = atoi(optarg);     break;
@@ -209,6 +213,13 @@ int main(int argc, char *argv[])
 	}
 
 	/* ── allocate UMEM ────────────────────────────────────────────────── */
+	{
+		/* Parity with mcast_send: raise memlock so UMEM registration is never
+		 * charged against a small default RLIMIT_MEMLOCK on older kernels. */
+		struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
+		if (setrlimit(RLIMIT_MEMLOCK, &rl) < 0)
+			perror("setrlimit RLIMIT_MEMLOCK (continuing)");
+	}
 	if (posix_memalign(&g_umem_buf, getpagesize(),
 	                   (size_t)NUM_FRAMES * FRAME_SIZE) != 0) {
 		perror("posix_memalign");
@@ -250,16 +261,51 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	/* ── configure the mcast.o filter ─────────────────────────────────── */
+	/* mcast.o only redirects GRE-inner-multicast packets whose {group,port}
+	 * match an entry in config_map; otherwise it XDP_PASSes them to the kernel
+	 * (and our AF_XDP socket never sees them). Seed slot 0 with our target. */
+	{
+		int cfg_fd = bpf_object__find_map_fd_by_name(g_bpf_obj, "config_map");
+		if (cfg_fd < 0) {
+			fprintf(stderr, "error: config_map not found in %s\n", bpf_path);
+			return 1;
+		}
+		struct { uint32_t target_ip; uint16_t target_port; uint16_t padding; } mc_cfg;
+		memset(&mc_cfg, 0, sizeof(mc_cfg));
+		if (inet_pton(AF_INET, group, &mc_cfg.target_ip) != 1) {
+			fprintf(stderr, "error: invalid multicast group '%s'\n", group);
+			return 1;
+		}
+		mc_cfg.target_port = htons((uint16_t)port);
+		uint32_t cfg_key = 0;
+		if (bpf_map_update_elem(cfg_fd, &cfg_key, &mc_cfg, BPF_ANY) < 0) {
+			perror("bpf_map_update_elem(config_map)");
+			return 1;
+		}
+		printf("config_map[0] = %s:%d (mcast.o will redirect matches)\n", group, port);
+	}
+
 	/* ── pre-populate fill ring ───────────────────────────────────────── */
+	/* Reserve as much of the fill ring as the driver actually grants. Some
+	 * libbpf/driver combos size the ring below the requested fill_size, so a
+	 * single all-or-nothing reserve of FILL_SIZE can return 0 ("fill ring
+	 * reserve failed"). Back off by halves and use whatever we get. */
 	uint32_t fill_idx = 0;
-	uint32_t fill_n   = NUM_FRAMES / 2;
-	if (xsk_ring_prod__reserve(&fq, fill_n, &fill_idx) != fill_n) {
-		fprintf(stderr, "error: fill ring reserve failed\n");
+	uint32_t fill_want = FILL_SIZE;
+	uint32_t fill_got  = 0;
+	while (fill_want >= 64) {
+		fill_got = xsk_ring_prod__reserve(&fq, fill_want, &fill_idx);
+		if (fill_got > 0) break;
+		fill_want /= 2;
+	}
+	if (fill_got == 0) {
+		fprintf(stderr, "error: fill ring reserve failed (requested up to %u)\n", FILL_SIZE);
 		return 1;
 	}
-	for (uint32_t i = 0; i < fill_n; i++)
+	for (uint32_t i = 0; i < fill_got; i++)
 		*xsk_ring_prod__fill_addr(&fq, fill_idx + i) = (uint64_t)i * FRAME_SIZE;
-	xsk_ring_prod__submit(&fq, fill_n);
+	xsk_ring_prod__submit(&fq, fill_got);
 
 	/* ── stats ────────────────────────────────────────────────────────── */
 	std::vector<uint64_t> latencies;       /* total: rx_ns - tx_ns */

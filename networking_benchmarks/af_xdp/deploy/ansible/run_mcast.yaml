@@ -2,7 +2,8 @@
 # Run multicast fan-out latency benchmark.
 #
 # Topology: source sends GRE-encapsulated mcast → replicator fans out → destinations measure.
-# Requires configure_mcast.yaml to have been run first (GRE tunnel + destination registration).
+# Requires prepare_mcast_nodes.yaml + configure_mcast.yaml to have been run first
+# (frees the AF_XDP queue on source/destination, sets up the GRE tunnel + registration).
 #
 # Usage:
 #   ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
@@ -49,6 +50,7 @@
         IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
         nohup /opt/af-xdp/mcast_receive \
           -I "$IFACE" \
+          -g {{ mcast_group }} \
           -p {{ data_port }} \
           -c {{ count }} \
           -t {{ timeout_sec }} \
