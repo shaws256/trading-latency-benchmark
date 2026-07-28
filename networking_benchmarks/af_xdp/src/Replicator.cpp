@@ -219,9 +219,23 @@ void Replicator::initialize(bool useZeroCopy) {
     xdp_sockets_.resize(num_queues_);
     
     // Select XDP program:
-    //   gre_mode_  → mcast_filter.o     (outer unicast GRE carries inner multicast)
-    //   otherwise  → ucast_filter.o (direct unicast feed)
-    std::string xdp_program_path = gre_mode_ ? "./src/xdp/mcast.o" : "./src/xdp/ucast.o";
+    //   gre_mode_  → mcast.o  (outer unicast GRE carries inner multicast)
+    //   otherwise  → ucast.o  (direct unicast feed)
+    const char* xdp_filename = gre_mode_ ? "mcast.o" : "ucast.o";
+    static const std::string search_paths[] = {
+        std::string("./src/xdp/") + xdp_filename,    // dev: running from af_xdp/ source tree
+        std::string("./xdp/") + xdp_filename,        // installed: running from /opt/af-xdp/
+        std::string("/opt/af-xdp/xdp/") + xdp_filename,  // absolute: baked AMI
+    };
+    std::string xdp_program_path;
+    for (const auto& p : search_paths) {
+        if (access(p.c_str(), R_OK) == 0) { xdp_program_path = p; break; }
+    }
+    if (xdp_program_path.empty()) {
+        throw std::runtime_error(
+            std::string("XDP program ") + xdp_filename +
+            " not found in search paths (./src/xdp/, ./xdp/, /opt/af-xdp/xdp/)");
+    }
     std::cout << "Loading XDP program: " << xdp_program_path
               << (gre_mode_ ? " (GRE tunnel mode)" : "") << std::endl;
     XdpSocket::loadXdpProgram(listen_interface_, xdp_program_path, useZeroCopy);

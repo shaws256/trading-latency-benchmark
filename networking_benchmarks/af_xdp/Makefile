@@ -7,28 +7,38 @@ INCLUDES = -I./src -I/usr/local/include
 LDFLAGS = -L/usr/local/lib -Wl,-rpath,/usr/local/lib -Wl,--no-as-needed -Wl,-O1
 LDLIBS = -lxdp -lbpf -lelf -lpthread
 
-# ── Replicator object files ──────────────────────────────────────────────────
-REPLICATOR_SRCS = src/XdpSocket.cpp src/NicConfig.cpp src/Replicator.cpp src/KernelEcho.cpp
-REPLICATOR_OBJS = $(REPLICATOR_SRCS:.cpp=.o)
-
 # ── Targets ──────────────────────────────────────────────────────────────────
 CORE_TARGETS = replicator rtt replicator_ctl udp_ping
 MCAST_TARGETS = mcast_send mcast_receive
 XDP_PROGRAMS = src/xdp/ucast.o
 MCAST_XDP = src/xdp/mcast.o
 
+# ── Replicator object files ──────────────────────────────────────────────────
+REPLICATOR_SRCS = src/XdpSocket.cpp src/NicConfig.cpp src/Replicator.cpp src/KernelEcho.cpp
+REPLICATOR_OBJS = $(REPLICATOR_SRCS:.cpp=.o)
+
 # ── Build modes ──────────────────────────────────────────────────────────────
+# make all         → full AF_XDP build (requires libxdp, libbpf, root to run)
+# make kernel-mode → no libxdp/libbpf dep (containers, CI, any Linux)
+# make full        → all + multicast targets
 all: $(CORE_TARGETS) $(XDP_PROGRAMS)
 full: all mcast
 mcast: $(MCAST_TARGETS) $(MCAST_XDP)
+
+# ── Kernel-mode build (recursive make with overridden variables) ──────────────
+# Builds replicator (kernel-mode only) + tools without any libxdp/libbpf dependency.
+kernel-mode:
+	$(MAKE) clean
+	$(MAKE) replicator rtt replicator_ctl udp_ping \
+		CXXFLAGS="$(CXXFLAGS) -DKERNEL_MODE_ONLY" \
+		LDLIBS="-lpthread" \
+		REPLICATOR_OBJS="src/NicConfig.o src/KernelEcho.o"
 
 # ── Pattern rules ────────────────────────────────────────────────────────────
 src/%.o: src/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 tools/%.o: tools/%.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
-
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 legacy/%.o: legacy/%.cpp
@@ -67,4 +77,4 @@ clean:
 	find . -name '*.o' -o -name '*.d' | xargs rm -f
 	rm -f $(CORE_TARGETS) $(MCAST_TARGETS) mdp_client
 
-.PHONY: all full mcast clean
+.PHONY: all full mcast kernel-mode clean

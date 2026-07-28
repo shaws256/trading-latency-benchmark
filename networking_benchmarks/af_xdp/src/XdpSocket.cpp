@@ -32,8 +32,9 @@
 #include <arpa/inet.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
-#include <xdp/xsk.h>
-#include <xdp/libxdp.h>
+#include <xdp/xsk.h>       // AF_XDP socket API (from xdp-tools)
+#include <bpf/libbpf.h>   // BPF object loading + XDP attach (from system libbpf)
+#include <bpf/bpf.h>      // bpf_xdp_attach/detach, bpf_map__fd
 #include <iostream>
 #include <algorithm>
 #include <errno.h>
@@ -54,10 +55,12 @@ static int g_debug_enabled = 0;
             fprintf(stderr, "DEBUG CPP: " fmt, ##__VA_ARGS__); \
     } while (0)
 
-static enum xdp_attach_mode opt_attach_mode = XDP_MODE_NATIVE;
+static uint32_t opt_xdp_flags = XDP_FLAGS_DRV_MODE;
 static bool opt_frags = true;
-// Global variable to hold the XDP program
-static struct xdp_program *xdp_prog = NULL;
+// Raw libbpf state (no libxdp dispatcher — direct attach/detach, no slot leaks)
+static struct bpf_object *g_bpf_obj = NULL;
+static int g_xdp_prog_fd = -1;
+static int g_attached_ifindex = 0;
 
 // Wrapper for AF_XDP socket and related resources (same as JNI)
 struct xsk_socket_wrapper
@@ -155,78 +158,89 @@ int XdpSocket::setResourceLimits() {
 
 void XdpSocket::loadXdpProgram(const std::string& ifName, const std::string& programPath, bool nativeMode) {
     if (!nativeMode) {
-        opt_attach_mode = XDP_MODE_SKB;
+        opt_xdp_flags = XDP_FLAGS_SKB_MODE;
     }
 
     DEBUG_PRINT("Loading the xdp program at path: %s\n", programPath.c_str());
     int ifindex = if_nametoindex(ifName.c_str());
     DEBUG_PRINT("ifindex: %i\n", ifindex);
-    char errmsg[1024];
     int err;
 
-    // Clean up any existing XDP programs
-    if (xdp_prog != NULL)
-    {
-        xdp_program__detach(xdp_prog, ifindex, opt_attach_mode, 0);
-        xdp_program__close(xdp_prog);
-        xdp_prog = NULL;
+    // Clean up any existing XDP program on this interface
+    if (g_bpf_obj != NULL) {
+        bpf_xdp_detach(g_attached_ifindex, opt_xdp_flags, NULL);
+        bpf_object__close(g_bpf_obj);
+        g_bpf_obj = NULL;
+        g_xdp_prog_fd = -1;
     }
 
-    // Load the XDP program
-    xdp_prog = xdp_program__open_file(programPath.c_str(), NULL, NULL);
-    err = libxdp_get_error(xdp_prog);
-    if (err)
-    {
-        libxdp_strerror(err, errmsg, sizeof(errmsg));
-        fprintf(stderr, "ERROR: program loading failed: %s\n", errmsg);
-        throw std::runtime_error("XDP program loading failed: " + std::string(errmsg));
+    // Load BPF object file
+    g_bpf_obj = bpf_object__open_file(programPath.c_str(), NULL);
+    if (!g_bpf_obj || libbpf_get_error(g_bpf_obj)) {
+        fprintf(stderr, "ERROR: program loading failed: %s\n", strerror(errno));
+        g_bpf_obj = NULL;
+        throw std::runtime_error("XDP program loading failed: " + programPath);
     }
-    err = xdp_program__set_xdp_frags_support(xdp_prog, opt_frags);
-    if (err)
-    {
-        libxdp_strerror(err, errmsg, sizeof(errmsg));
-        fprintf(stderr, "ERROR: Enable frags support failed: %s\n", errmsg);
-        throw std::runtime_error("Enable frags support failed: " + std::string(errmsg));
+
+    // Load all programs and maps into kernel
+    err = bpf_object__load(g_bpf_obj);
+    if (err) {
+        fprintf(stderr, "ERROR: bpf_object__load failed: %s\n", strerror(-err));
+        bpf_object__close(g_bpf_obj);
+        g_bpf_obj = NULL;
+        throw std::runtime_error("BPF object load failed");
     }
-    // Attach the XDP program to the interface
-    err = xdp_program__attach(xdp_prog, ifindex, opt_attach_mode, 0);
-    if (err)
-    {
-        libxdp_strerror(err, errmsg, sizeof(errmsg));
-        fprintf(stderr, "ERROR: attaching program failed: %s\n", errmsg);
-        xdp_program__close(xdp_prog);
-        xdp_prog = NULL;
-        throw std::runtime_error("XDP program attach failed: " + std::string(errmsg));
+
+    // Find the XDP program (first program in the object)
+    struct bpf_program *prog = bpf_object__next_program(g_bpf_obj, NULL);
+    if (!prog) {
+        fprintf(stderr, "ERROR: no XDP program found in %s\n", programPath.c_str());
+        bpf_object__close(g_bpf_obj);
+        g_bpf_obj = NULL;
+        throw std::runtime_error("No XDP program found in BPF object");
     }
-    else
-    {
-        DEBUG_PRINT("Successfully loaded the program: %s\n", programPath.c_str());
+    g_xdp_prog_fd = bpf_program__fd(prog);
+
+    // Attach XDP program directly (no dispatcher — clean detach guaranteed)
+    err = bpf_xdp_attach(ifindex, g_xdp_prog_fd, opt_xdp_flags, NULL);
+    if (err) {
+        fprintf(stderr, "ERROR: XDP attach failed (native mode): %s\n", strerror(-err));
+        // Fallback to SKB mode
+        opt_xdp_flags = XDP_FLAGS_SKB_MODE;
+        err = bpf_xdp_attach(ifindex, g_xdp_prog_fd, opt_xdp_flags, NULL);
+        if (err) {
+            fprintf(stderr, "ERROR: XDP attach failed (SKB fallback): %s\n", strerror(-err));
+            bpf_object__close(g_bpf_obj);
+            g_bpf_obj = NULL;
+            g_xdp_prog_fd = -1;
+            throw std::runtime_error("XDP program attach failed");
+        }
     }
+    g_attached_ifindex = ifindex;
+    DEBUG_PRINT("Successfully attached XDP program: %s (flags=%u)\n", programPath.c_str(), opt_xdp_flags);
 }
 
 int XdpSocket::getXdpMapFd(const std::string& mapName) {
-    if (!xdp_prog)
+    if (!g_bpf_obj)
         return -1;
-    struct bpf_object *bpf_obj = xdp_program__bpf_obj(xdp_prog);
-    if (!bpf_obj)
-        return -1;
-    struct bpf_map *map = bpf_object__find_map_by_name(bpf_obj, mapName.c_str());
+    struct bpf_map *map = bpf_object__find_map_by_name(g_bpf_obj, mapName.c_str());
     if (!map)
         return -1;
     return bpf_map__fd(map);
 }
 
 void XdpSocket::unloadXdpProgram(const std::string& ifName, bool nativeMode) {
-    if (!nativeMode) {
-        opt_attach_mode = XDP_MODE_SKB;
-    }
-    int ifindex = if_nametoindex(ifName.c_str());
+    (void)ifName; // ifindex cached in g_attached_ifindex
+    (void)nativeMode;
 
-    if (xdp_prog != NULL)
-    {
-        xdp_program__detach(xdp_prog, ifindex, opt_attach_mode, 0);
-        xdp_program__close(xdp_prog);
-        xdp_prog = NULL;
+    if (g_attached_ifindex > 0) {
+        bpf_xdp_detach(g_attached_ifindex, opt_xdp_flags, NULL);
+        g_attached_ifindex = 0;
+    }
+    if (g_bpf_obj != NULL) {
+        bpf_object__close(g_bpf_obj);
+        g_bpf_obj = NULL;
+        g_xdp_prog_fd = -1;
     }
 }
 
@@ -686,21 +700,13 @@ int XdpSocket::getFd() {
 int XdpSocket::registerXskMap(int queueId) {
     checkOpen();
     
-    if (!xdp_prog) {
+    if (!g_bpf_obj) {
         throw std::runtime_error("XDP program not loaded");
     }
 
     // Find the XSK map
     int xsks_map_fd = -1;
-    struct bpf_object *bpf_obj = xdp_program__bpf_obj(xdp_prog);
-
-    if (!bpf_obj) {
-        throw std::runtime_error("Failed to get BPF object from XDP program");
-    }
-    
-    // Try direct map lookup first
-    DEBUG_PRINT("Looking for maps in XDP program...\n");
-    struct bpf_map *map = bpf_object__find_map_by_name(bpf_obj, "xsks_map");
+    struct bpf_map *map = bpf_object__find_map_by_name(g_bpf_obj, "xsks_map");
     if (map) {
         xsks_map_fd = bpf_map__fd(map);
         DEBUG_PRINT("Found XSK map 'xsks_map' with fd: %d\n", xsks_map_fd);
