@@ -10,10 +10,18 @@ deploy/
 │   ├── scenarios/         Pre-built fleet topologies (ucast/ + mcast/)
 │   └── scripts/           AMI bake script (configs, binaries, systemd)
 │
-└── ansible/               Runtime configuration + dev provisioning
-    ├── provision.yaml     Full install for stock AL2023 (dev only)
+└── ansible/               Runtime/benchmark playbooks + shared inventory
+    ├── run_ucast.yaml     Unicast NxN RTT benchmark + report
+    ├── run_mcast.yaml     Multicast fan-out benchmark
     ├── configure_mcast.yaml  Multicast runtime setup (GRE, replicator, registration)
     └── inventory.aws_ec2.yml  Dynamic EC2 inventory by Role tag
+
+Dev/iteration tooling lives outside deploy/, under af_xdp/dev/:
+
+    dev/
+    ├── tests/             pytest integration suite (kernel-mode)
+    ├── docker/Dockerfile  local build + test harness (mirrors the AMI bake)
+    └── ansible/           provision.yaml, sync.yaml, run_tests.yaml (+ inventory symlink)
 ```
 
 ## Deployment Flow
@@ -41,13 +49,13 @@ deploy/
    cdk deploy --context scenario=ucast/az-cpg-3
 
 2. Provision instances (~8 min)
-   ansible-playbook byoi/provision.yaml
+   ansible-playbook provision.yaml
 
 3. (Multicast only) Configure topology
    ansible-playbook configure_mcast.yaml -e replicator_private_ip=10.61.0.5
 
 4. Iterate
-   ansible-playbook byoi/provision.yaml -e rebuild=true    # after code changes
+   ansible-playbook provision.yaml -e rebuild=true    # after code changes
 ```
 
 ### Self-hosted (BYOI — no CDK)

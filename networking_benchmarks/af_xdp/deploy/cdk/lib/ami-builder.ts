@@ -6,6 +6,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import { Tags, RemovalPolicy, Duration, CustomResource } from 'aws-cdk-lib';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as zlib from 'zlib';
 
 export interface AmiBuilderStackProps extends cdk.StackProps {
   keyPairName: string;
@@ -75,11 +76,14 @@ export class AmiBuilderStack extends cdk.Stack {
       'set -uo pipefail',
       `${envBlock}\nexport WAIT_HANDLE_URL="\$1"\nset -uo pipefail`
     );
-    const bakeScriptB64 = Buffer.from(fullScript).toString('base64');
+    // EC2 UserData is capped at 16 KB. The bake script (with configs, systemd
+    // units, CPU-isolation block) exceeds that once base64-encoded, so gzip it
+    // and gunzip on the builder — compresses ~16KB of shell to ~5KB.
+    const bakeScriptGz = zlib.gzipSync(Buffer.from(fullScript)).toString('base64');
 
     const userData = ec2.UserData.forLinux();
     userData.addCommands(
-      `echo '${bakeScriptB64}' | base64 -d > /tmp/bake-ami.sh`,
+      `echo '${bakeScriptGz}' | base64 -d | gunzip > /tmp/bake-ami.sh`,
       `chmod +x /tmp/bake-ami.sh`,
       `/tmp/bake-ami.sh "${waitHandle.ref}" || true`,
     );

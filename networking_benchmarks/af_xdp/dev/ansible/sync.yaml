@@ -4,9 +4,9 @@
 # Use after local code changes to deploy + test on running fleet instances.
 # Handles the full lifecycle: rsync → build → XDP cleanup → service restart.
 #
-# Usage:
-#   ansible-playbook -i inventory.aws_ec2.yml byoi/dev.yaml
-#   ansible-playbook -i inventory.aws_ec2.yml byoi/dev.yaml --limit replicator
+# Usage (run from af_xdp/dev/ansible/):
+#   ansible-playbook -i inventory.aws_ec2.yml sync.yaml
+#   ansible-playbook -i inventory.aws_ec2.yml sync.yaml --limit replicator
 
 - name: Dev — rsync, build, restart
   hosts: all
@@ -14,7 +14,8 @@
   gather_facts: yes
 
   vars:
-    src_root: "{{ playbook_dir }}/../../.."
+    # dev/ansible/ → af_xdp root is two levels up.
+    src_root: "{{ playbook_dir }}/../.."
     remote_path: /home/ec2-user/af_xdp
     af_xdp_path: "{{ remote_path }}"
 

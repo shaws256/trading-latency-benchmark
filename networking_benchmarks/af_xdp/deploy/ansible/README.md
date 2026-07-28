@@ -2,6 +2,13 @@
 
 Runtime configuration and provisioning playbooks for the AF_XDP benchmark.
 
+> **Note:** the dev/iteration playbooks (`provision.yaml`, `sync.yaml`,
+> `run_tests.yaml`) have moved to **`af_xdp/dev/ansible/`**. Run them from there
+> (`cd ../../dev/ansible`); the shared `inventory.aws_ec2.yml` is symlinked into
+> that folder so `-i inventory.aws_ec2.yml` still works. This directory keeps the
+> benchmark/runtime playbooks (`run_ucast.yaml`, `run_mcast.yaml`,
+> `configure_mcast.yaml`) and the shared inventory + report generator.
+
 ## Two usage modes
 
 ### 1. With CDK FleetStack (default)
@@ -9,7 +16,7 @@ Runtime configuration and provisioning playbooks for the AF_XDP benchmark.
 CDK deploys instances with `Role` tags. Ansible discovers them automatically via dynamic inventory:
 
 ```bash
-ansible-playbook -i inventory.aws_ec2.yml byoi/provision.yaml        # stock AL2023 only
+ansible-playbook -i inventory.aws_ec2.yml provision.yaml        # stock AL2023 only
 ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml  # mcast topology
 ```
 
@@ -32,7 +39,7 @@ Use these playbooks on **any** EC2 instances you manage yourself (existing fleet
 ```bash
 # Option A: Use the dynamic inventory (discovers by Role tag)
 export AWS_DEFAULT_REGION=us-east-1
-ansible-playbook -i inventory.aws_ec2.yml byoi/provision.yaml
+ansible-playbook -i inventory.aws_ec2.yml provision.yaml
 
 # Option B: Use a static inventory file
 ansible-playbook -i hosts.ini provision.yaml
@@ -63,8 +70,8 @@ After provisioning, binaries are installed to `/opt/af-xdp/` and the `replicator
 | `run_ucast.yaml` | Run NxN unicast RTT benchmark + generate report | Serial measurement, then local HTML/JSON report |
 | `inventory.aws_ec2.yml` | Dynamic EC2 inventory by Role tag | With CDK-deployed or manually-tagged instances |
 | `report/` | Python report generator + templates | Called by run_ucast.yaml (Play 4) |
-| **`byoi/`** | | |
-| `byoi/provision.yaml` | Full install from scratch | Stock AL2023 — self-hosted or CDK without baked AMI |
+| **`../../dev/ansible/`** (moved) | | |
+| `provision.yaml` | Full install from scratch | Stock AL2023 — self-hosted or CDK without baked AMI |
 
 ## Inventory
 
@@ -102,7 +109,7 @@ ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml \
 ### Rebuild binaries (after code change)
 
 ```bash
-ansible-playbook -i inventory.aws_ec2.yml byoi/provision.yaml -e rebuild=true
+ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e rebuild=true
 ```
 
 ## configure_mcast.yaml — Plays
@@ -160,7 +167,7 @@ ansible all -i inventory.aws_ec2.yml -b -m shell -a 'systemctl restart replicato
 systemctl is-active replicator' --ssh-extra-args="-o StrictHostKeyChecking=no"
 
 # Dev playbook
-ansible-playbook -i inventory.aws_ec2.yml byoi/dev.yaml
+ansible-playbook -i inventory.aws_ec2.yml sync.yaml
 ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml
 ansible-playbook -i inventory.aws_ec2.yml run_ucast.yaml
 

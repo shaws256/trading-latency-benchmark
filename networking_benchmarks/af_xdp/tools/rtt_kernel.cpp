@@ -54,6 +54,8 @@
 #include <net/if.h>
 #include <immintrin.h>  // _mm_pause for busy-poll spin
 
+#include "ControlPort.hpp"
+
 // ---------------------------------------------------------------------------
 // TSC calibration
 // ---------------------------------------------------------------------------
@@ -205,7 +207,7 @@ static bool subscribe_to_replicator(const char* replicator_ip, [[maybe_unused]] 
 
     struct sockaddr_in server = {};
     server.sin_family = AF_INET;
-    server.sin_port = htons(12345);  // control port
+    server.sin_port = htons(afxdp_control_port());  // control port
     inet_pton(AF_INET, replicator_ip, &server.sin_addr);
 
     // Wire format: [1=ADD][4B IP network order][2B port network order]

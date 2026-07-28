@@ -5,8 +5,9 @@
 # Requires: provision.yaml completed (or baked AMI with binaries).
 #
 # Usage:
-#   ansible-playbook -i inventory.aws_ec2.yml byoi/run_tests.yaml
-#   ansible-playbook -i inventory.aws_ec2.yml byoi/run_tests.yaml --limit replicator
+# Usage (run from af_xdp/dev/ansible/):
+#   ansible-playbook -i inventory.aws_ec2.yml run_tests.yaml
+#   ansible-playbook -i inventory.aws_ec2.yml run_tests.yaml --limit replicator
 
 - name: Run integration test suite
   hosts: all
@@ -37,7 +38,7 @@
             cd /home/ec2-user/af_xdp 2>/dev/null || \
             cd /opt/af-xdp/../trading-latency-benchmark/networking_benchmarks/af_xdp 2>/dev/null || \
             cd /home/ec2-user/trading-latency-benchmark/networking_benchmarks/af_xdp
-            pytest tests/ -v --tb=short 2>&1
+            pytest dev/tests/ -v --tb=short 2>&1
           register: test_result
           ignore_errors: yes
 

@@ -76,12 +76,12 @@
     - name: Sync af_xdp source to instance
       become: false
       ansible.builtin.synchronize:
-        src: "{{ playbook_dir }}/../../../"
+        src: "{{ playbook_dir }}/../../"
         dest: /home/ec2-user/af_xdp/
         rsync_opts:
           - "--exclude=.git"
           - "--exclude=node_modules"
-          # Do not ship host build artifacts (see dev.yaml): a stale .o compiled
+          # Do not ship host build artifacts (see sync.yaml): a stale .o compiled
           # with -DKERNEL_MODE_ONLY would be relinked into a kernel-only binary.
           - "--exclude=*.o"
           - "--exclude=*.d"

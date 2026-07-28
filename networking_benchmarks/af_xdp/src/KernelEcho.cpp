@@ -31,10 +31,11 @@
 #include <arpa/inet.h>
 #include <poll.h>
 
+#include "ControlPort.hpp"
+
 // Shared with ReplicatorMain.cpp signal handler
 extern volatile bool g_running;
 
-static constexpr uint16_t CONTROL_PORT = 12345;
 static constexpr int MAX_DESTINATIONS = 64;
 
 struct Destination {
@@ -110,16 +111,22 @@ static void handle_control(int ctrl_fd) {
             }
             break;
         }
-        case 3: { // LIST
-            std::cout << "[CTRL] Destinations:" << std::endl;
+        case 3: { // LIST — return production wire format: [1B count][per dest: 4B IP + 2B port]
+            std::vector<uint8_t> resp;
+            uint8_t count = 0;
+            for (int i = 0; i < g_dest_count; i++)
+                if (g_destinations[i].active) count++;
+            resp.push_back(count);
             for (int i = 0; i < g_dest_count; i++) {
                 if (!g_destinations[i].active) continue;
-                char ip_str[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &g_destinations[i].addr.sin_addr, ip_str, sizeof(ip_str));
-                std::cout << "  " << ip_str << ":" << ntohs(g_destinations[i].addr.sin_port) << std::endl;
+                uint32_t ip = g_destinations[i].addr.sin_addr.s_addr;   // network order
+                uint16_t port = g_destinations[i].addr.sin_port;         // network order
+                resp.insert(resp.end(), reinterpret_cast<uint8_t*>(&ip), reinterpret_cast<uint8_t*>(&ip) + 4);
+                resp.insert(resp.end(), reinterpret_cast<uint8_t*>(&port), reinterpret_cast<uint8_t*>(&port) + 2);
             }
-            ack = 1;
-            break;
+            sendto(ctrl_fd, resp.data(), resp.size(), 0,
+                   (struct sockaddr*)&client_addr, client_len);
+            return;  // full response already sent; skip the trailing 1-byte ack
         }
     }
 
@@ -147,6 +154,7 @@ static void handle_data(int data_fd) {
 
 // ── Main loop ────────────────────────────────────────────────────────────────
 int run_kernel_mode(const std::string& listen_ip, uint16_t listen_port) {
+    const uint16_t CONTROL_PORT = afxdp_control_port();
     std::cout << "=== Replicator (kernel mode) ===" << std::endl;
     std::cout << "Listen:   " << listen_ip << ":" << listen_port << std::endl;
     std::cout << "Control:  port " << CONTROL_PORT << std::endl;

@@ -25,9 +25,10 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include "ControlPort.hpp"
+
 class ReplicatorCtl {
 private:
-    static constexpr int CONTROL_PORT = 12345;
     static constexpr uint8_t CTRL_ADD_DESTINATION    = 1;
     static constexpr uint8_t CTRL_REMOVE_DESTINATION = 2;
     static constexpr uint8_t CTRL_LIST_DESTINATIONS  = 3;
@@ -191,7 +192,7 @@ private:
         struct sockaddr_in server_addr;
         memset(&server_addr, 0, sizeof(server_addr));
         server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(CONTROL_PORT);
+        server_addr.sin_port = htons(afxdp_control_port());
 
         if (inet_aton(server_address_.c_str(), &server_addr.sin_addr) == 0) {
             std::cerr << "Invalid server address: " << server_address_ << std::endl;
