@@ -48,7 +48,7 @@
       ansible.builtin.shell: |
         IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
         nohup /opt/af-xdp/mcast_receive \
-          -i "$IFACE" \
+          -I "$IFACE" \
           -p {{ data_port }} \
           -c {{ count }} \
           -t {{ timeout_sec }} \

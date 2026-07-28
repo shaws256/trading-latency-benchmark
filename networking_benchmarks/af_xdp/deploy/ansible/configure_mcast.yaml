@@ -130,3 +130,57 @@
     - name: Display registration result
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }} registered — group {{ mcast_group }}: {{ join_result.stdout }}"
+
+
+# ── Play 4: Verify multicast datapath (source → GRE → replicator XDP) ──────────
+# Inject a short probe burst from the source to the multicast group via udp_send
+# and confirm the replicator's XDP program redirected it — validates the GRE
+# tunnel, the 224/4 route, and the mcast.o filter end-to-end. Skipped when there
+# is no source group (e.g. a replicator-only fleet).
+- name: Verify multicast datapath
+  hosts: replicator
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    - name: Snapshot XDP redirect count (before probe)
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -S "$IFACE" | awk '/rx_xdp_redirect/{s+=$2} END{print s+0}'
+      register: xdp_before
+      changed_when: false
+      run_once: true
+      when: groups['source'] | default([]) | length > 0
+
+    - name: Inject multicast probe from source (udp_send over GRE, ~3s)
+      ansible.builtin.shell: >
+        timeout 3 /opt/af-xdp/udp_send
+        {{ mcast_group | default('224.0.31.50') }} {{ data_port | default(5000) }}
+        20 'mcast-verify' || true
+      delegate_to: "{{ groups['source'][0] }}"
+      changed_when: false
+      run_once: true
+      when: groups['source'] | default([]) | length > 0
+
+    - name: Snapshot XDP redirect count (after probe)
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ethtool -S "$IFACE" | awk '/rx_xdp_redirect/{s+=$2} END{print s+0}'
+      register: xdp_after
+      changed_when: false
+      run_once: true
+      when: groups['source'] | default([]) | length > 0
+
+    - name: Assert replicator received and redirected the probe
+      ansible.builtin.assert:
+        that:
+          - (xdp_after.stdout | int) > (xdp_before.stdout | int)
+        success_msg: >-
+          Datapath OK — XDP redirected
+          {{ (xdp_after.stdout | int) - (xdp_before.stdout | int) }} probe packet(s)
+        fail_msg: >-
+          No XDP redirects observed — check GRE tunnel, 224/4 route, mcast.o filter,
+          and that the replicator group matches {{ mcast_group | default('224.0.31.50') }}
+      run_once: true
+      when: groups['source'] | default([]) | length > 0

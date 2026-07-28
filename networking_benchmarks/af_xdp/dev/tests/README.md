@@ -38,8 +38,8 @@ Runs the `rtt_kernel` client against kernel-mode replicator:
 - Warmup messages are excluded from results
 - Kernel-mode latency sanity check (p50 < 5ms)
 
-### TestUdpPing (1 test)
-Verifies `udp_ping` CLI help output.
+### TestUdpSend (1 test)
+Verifies `udp_send` CLI help output.
 
 ## Fixtures
 

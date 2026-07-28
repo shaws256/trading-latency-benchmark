@@ -90,7 +90,7 @@
           - "--exclude=/mcast_send"
           - "--exclude=/mcast_receive"
           - "--exclude=/replicator_ctl"
-          - "--exclude=/udp_ping"
+          - "--exclude=/udp_send"
           - "--checksum"
 
     - name: Build benchmark binaries
@@ -100,7 +100,7 @@
         make full
         # Install to /opt/af-xdp for consistent path with baked AMI
         mkdir -p /opt/af-xdp/xdp
-        cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/
+        cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
         cp -f src/xdp/*.o /opt/af-xdp/xdp/
         chown -R ec2-user:ec2-user /home/ec2-user/af_xdp
 

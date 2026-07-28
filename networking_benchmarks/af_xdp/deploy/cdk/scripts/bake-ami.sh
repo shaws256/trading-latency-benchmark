@@ -71,7 +71,7 @@ else
   cd /tmp/build-src/networking_benchmarks/af_xdp
   make full
   mkdir -p /opt/af-xdp/xdp
-  cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/ 2>/dev/null || true
+  cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/ 2>/dev/null || true
   cp -f src/xdp/*.o /opt/af-xdp/xdp/ 2>/dev/null || true
 fi
 

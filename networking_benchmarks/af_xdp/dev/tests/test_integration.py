@@ -5,7 +5,7 @@ Kernel mode (``replicator --kernel-mode``) implements the same control protocol
 (ADD/REMOVE/LIST on the control port) and UDP echo as the AF_XDP replicator, but
 over standard kernel sockets — no root, no XDP/BPF. That makes these tests
 runnable in containers / CI / macOS. They exercise the *real* measurement client
-(``rtt_kernel``) and the ``replicator_ctl`` / ``udp_ping`` binaries end-to-end;
+(``rtt_kernel``) and the ``replicator_ctl`` / ``udp_send`` binaries end-to-end;
 the echo/control server is a lightweight stand-in (src/KernelEcho.cpp), so this
 is a functional/contract smoke test — the production AF_XDP datapath itself is
 validated separately on EC2 (run_ucast).
@@ -37,7 +37,9 @@ AF_XDP_DIR = Path(__file__).parent.parent.parent
 REPLICATOR = AF_XDP_DIR / "replicator"
 RTT = AF_XDP_DIR / "rtt_kernel"
 REPLICATOR_CTL = AF_XDP_DIR / "replicator_ctl"
-UDP_PING = AF_XDP_DIR / "udp_ping"
+UDP_SEND = AF_XDP_DIR / "udp_send"
+MCAST_SEND = AF_XDP_DIR / "mcast_send"
+MCAST_RECEIVE = AF_XDP_DIR / "mcast_receive"
 
 # ── Non-production ports (must match conftest.py) ─────────────────────────────
 LISTEN_IP = "127.0.0.1"
@@ -117,8 +119,8 @@ class TestBinaries:
     def test_replicator_ctl_exists(self):
         assert REPLICATOR_CTL.exists(), f"Missing: {REPLICATOR_CTL}"
 
-    def test_udp_ping_exists(self):
-        assert UDP_PING.exists(), f"Missing: {UDP_PING}"
+    def test_udp_send_exists(self):
+        assert UDP_SEND.exists(), f"Missing: {UDP_SEND}"
 
 
 # ── Test: Control protocol (happy path) ───────────────────────────────────────
@@ -348,11 +350,86 @@ class TestReplicatorCtl:
         assert "Usage" in (result.stdout + result.stderr)
 
 
-# ── Test: udp_ping ────────────────────────────────────────────────────────────
-class TestUdpPing:
-    def test_udp_ping_help(self):
-        if not UDP_PING.exists():
-            pytest.skip("udp_ping binary not found")
-        result = subprocess.run([str(UDP_PING)], capture_output=True, text=True, timeout=5)
+# ── Test: udp_send ────────────────────────────────────────────────────────────
+class TestUdpSend:
+    def test_udp_send_help(self):
+        if not UDP_SEND.exists():
+            pytest.skip("udp_send binary not found")
+        result = subprocess.run([str(UDP_SEND)], capture_output=True, text=True, timeout=5)
         assert result.returncode != 0
         assert "Usage" in result.stdout or "Usage" in result.stderr
+
+
+# ── Test: mcast_send / mcast_receive (CLI only) ───────────────────────────────
+# The mcast tools require root + XDP + a real NIC (GRE datapath), so only their
+# argument-parsing/usage layer is container-testable here. The GRE build,
+# AF_XDP TX/RX, and per-hop (source→replicator→destination) latency are
+# validated on EC2 via deploy/ansible/run_mcast.yaml.
+class TestMcastBinaries:
+    def test_mcast_send_exists(self):
+        assert MCAST_SEND.exists(), f"Missing: {MCAST_SEND}"
+
+    def test_mcast_receive_exists(self):
+        assert MCAST_RECEIVE.exists(), f"Missing: {MCAST_RECEIVE}"
+
+
+class TestMcastSendCli:
+    """mcast_send arg parsing (runs before any AF_XDP/root/NIC access)."""
+
+    def _run(self, *args, timeout=5):
+        return subprocess.run([str(MCAST_SEND), *args],
+                              capture_output=True, text=True, timeout=timeout)
+
+    def test_help_exits_zero(self):
+        if not MCAST_SEND.exists():
+            pytest.skip("mcast_send binary not found")
+        r = self._run("-h")
+        assert r.returncode == 0
+        assert "Usage" in (r.stdout + r.stderr)
+
+    def test_missing_required_dst_fails(self):
+        """-D <replicator-ip> is required; without it exit != 0 and usage shown."""
+        if not MCAST_SEND.exists():
+            pytest.skip("mcast_send binary not found")
+        r = self._run()  # no args at all
+        assert r.returncode != 0
+        out = r.stdout + r.stderr
+        assert "-D" in out or "required" in out.lower()
+
+    def test_unknown_option_fails(self):
+        if not MCAST_SEND.exists():
+            pytest.skip("mcast_send binary not found")
+        r = self._run("-Z")
+        assert r.returncode != 0
+        assert "Usage" in (r.stdout + r.stderr)
+
+
+class TestMcastReceiveCli:
+    """mcast_receive arg parsing (runs before XDP attach / AF_XDP)."""
+
+    def _run(self, *args, timeout=5):
+        return subprocess.run([str(MCAST_RECEIVE), *args],
+                              capture_output=True, text=True, timeout=timeout)
+
+    def test_help_exits_zero(self):
+        if not MCAST_RECEIVE.exists():
+            pytest.skip("mcast_receive binary not found")
+        r = self._run("-h")
+        assert r.returncode == 0
+        assert "Usage" in (r.stdout + r.stderr)
+
+    def test_missing_required_iface_fails(self):
+        """-I <iface> is required; without it exit != 0 and usage shown."""
+        if not MCAST_RECEIVE.exists():
+            pytest.skip("mcast_receive binary not found")
+        r = self._run()  # no args
+        assert r.returncode != 0
+        out = r.stdout + r.stderr
+        assert "-I" in out or "required" in out.lower()
+
+    def test_unknown_option_fails(self):
+        if not MCAST_RECEIVE.exists():
+            pytest.skip("mcast_receive binary not found")
+        r = self._run("-Z")
+        assert r.returncode != 0
+        assert "Usage" in (r.stdout + r.stderr)

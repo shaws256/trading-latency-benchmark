@@ -47,7 +47,7 @@ Runs on a temporary c7i.xlarge instance, takes ~9-10 minutes, produces a univers
 | `mcast_send` | Multicast sender |
 | `mcast_receive` | Multicast receiver |
 | `replicator_ctl` | Control protocol client (add/remove/list) |
-| `udp_ping` | UDP connectivity probe |
+| `udp_send` | UDP connectivity probe |
 | `xdp/ucast.o` | Unicast XDP filter (eBPF) |
 | `xdp/mcast.o` | Multicast XDP filter (eBPF) |
 

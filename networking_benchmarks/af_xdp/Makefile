@@ -8,7 +8,7 @@ LDFLAGS = -L/usr/local/lib -Wl,-rpath,/usr/local/lib -Wl,--no-as-needed -Wl,-O1
 LDLIBS = -lxdp -lbpf -lelf -lpthread
 
 # ── Targets ──────────────────────────────────────────────────────────────────
-CORE_TARGETS = replicator rtt_kernel replicator_ctl udp_ping
+CORE_TARGETS = replicator rtt_kernel replicator_ctl udp_send
 MCAST_TARGETS = mcast_send mcast_receive
 XDP_PROGRAMS = src/xdp/ucast.o
 MCAST_XDP = src/xdp/mcast.o
@@ -29,7 +29,7 @@ mcast: $(MCAST_TARGETS) $(MCAST_XDP)
 # Builds replicator (kernel-mode only) + tools without any libxdp/libbpf dependency.
 kernel-mode:
 	$(MAKE) clean
-	$(MAKE) replicator rtt_kernel replicator_ctl udp_ping \
+	$(MAKE) replicator rtt_kernel replicator_ctl udp_send \
 		CXXFLAGS="$(CXXFLAGS) -DKERNEL_MODE_ONLY" \
 		LDLIBS="-lpthread" \
 		REPLICATOR_OBJS="src/NicConfig.o src/KernelEcho.o"
@@ -39,9 +39,6 @@ src/%.o: src/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 tools/%.o: tools/%.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
-
-legacy/%.o: legacy/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 src/xdp/%.o: src/xdp/%.c
@@ -65,16 +62,12 @@ mcast_receive: tools/mcast_receive.o
 replicator_ctl: tools/replicator_ctl.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-udp_ping: tools/udp_ping.o
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
-
-# ── Legacy (not built by default, use: make mdp_client) ───────────────────────
-mdp_client: legacy/MarketDataProviderClient.o
+udp_send: tools/udp_send.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 # ── Housekeeping ─────────────────────────────────────────────────────────────
 clean:
 	find . -name '*.o' -o -name '*.d' | xargs rm -f
-	rm -f $(CORE_TARGETS) $(MCAST_TARGETS) mdp_client
+	rm -f $(CORE_TARGETS) $(MCAST_TARGETS)
 
 .PHONY: all full mcast kernel-mode clean

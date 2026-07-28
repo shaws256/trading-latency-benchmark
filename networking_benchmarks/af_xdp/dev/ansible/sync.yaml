@@ -41,7 +41,7 @@
           - "--exclude=/mcast_send"
           - "--exclude=/mcast_receive"
           - "--exclude=/replicator_ctl"
-          - "--exclude=/udp_ping"
+          - "--exclude=/udp_send"
           - "--checksum"
 
     # Clean AFTER sync (a pre-sync clean is useless once rsync brings artifacts
@@ -69,7 +69,7 @@
     - name: Install binaries to /opt/af-xdp
       ansible.builtin.shell: |
         cd {{ af_xdp_path }}
-        cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_ping /opt/af-xdp/
+        cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
         cp -f src/xdp/*.o /opt/af-xdp/xdp/
 
     - name: Detach stale XDP programs

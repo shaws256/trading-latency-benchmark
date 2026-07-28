@@ -107,7 +107,7 @@ static uint64_t pct(std::vector<uint64_t> &sorted, int p)
 static void usage(const char *prog)
 {
 	printf("Usage: %s [options]\n"
-	       "  -i <iface>   network interface (required)\n"
+	       "  -I <iface>   network interface (required)\n"
 	       "  -p <port>    inner UDP dst port to match (default: %d)\n"
 	       "  -c <count>   packets to receive        (default: %d)\n"
 	       "  -t <timeout> seconds before giving up  (default: %d)\n"
@@ -128,9 +128,9 @@ int main(int argc, char *argv[])
 	bool raw     = false;
 
 	int opt;
-	while ((opt = getopt(argc, argv, "i:p:c:t:q:rh")) != -1) {
+	while ((opt = getopt(argc, argv, "I:p:c:t:q:rh")) != -1) {
 		switch (opt) {
-		case 'i': iface    = optarg;           break;
+		case 'I': iface    = optarg;           break;
 		case 'p': port     = atoi(optarg);     break;
 		case 'c': count    = atoi(optarg);     break;
 		case 't': timeout  = atoi(optarg);     break;
@@ -140,7 +140,7 @@ int main(int argc, char *argv[])
 		default:  usage(argv[0]); return 1;
 		}
 	}
-	if (!iface) { fprintf(stderr, "error: -i <iface> is required\n"); usage(argv[0]); return 1; }
+	if (!iface) { fprintf(stderr, "error: -I <iface> is required\n"); usage(argv[0]); return 1; }
 
 	/* ── resolve BPF object path (search order) ────────────────────────── */
 	static const char *bpf_search_paths[] = {

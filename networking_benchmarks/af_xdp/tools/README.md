@@ -10,7 +10,7 @@ Measurement instruments and control utilities.
 | `mcast_send.cpp` | `mcast_send` | Multicast sender — timestamps packets, sends to GRE tunnel or multicast group. Used as the "exchange" in multicast scenarios. |
 | `mcast_receive.cpp` | `mcast_receive` | Multicast receiver — captures packets with kernel RX timestamps, computes one-way latency from sender timestamp. Requires PHC clock sync between hosts. |
 | `replicator_ctl.cpp` | `replicator_ctl` | Control protocol client. Sends ADD/REMOVE/LIST commands to replicator's control port (12345). |
-| `udp_ping.cpp` | `udp_ping` | Simple UDP connectivity probe. Sends packets to a target and reports reachability. Supports multicast groups. |
+| `udp_send.cpp` | `udp_send` | Simple UDP connectivity probe. Sends packets to a target and reports reachability. Supports multicast groups. |
 
 ## rtt_kernel usage
 

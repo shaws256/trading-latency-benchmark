@@ -13,7 +13,6 @@ af_xdp/
 ├── deploy/         Infrastructure (CDK stacks + Ansible playbooks)
 │   ├── cdk/        Fleet deployment + AMI builder
 │   └── ansible/    Runtime config + dev provisioning
-├── legacy/         Previous client implementations (MarketDataProviderClient)
 ├── report/         Latency report generation (placeholder)
 └── Makefile        Build system (all, kernel-mode, full, mcast targets)
 ```
