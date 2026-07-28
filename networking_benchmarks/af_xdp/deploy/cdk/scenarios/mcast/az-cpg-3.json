@@ -1,0 +1,17 @@
+[
+  {
+    "count": 1,
+    "role": "source",
+    "placement": "cluster"
+  },
+  {
+    "count": 1,
+    "role": "replicator",
+    "placement": "cluster"
+  },
+  {
+    "count": 1,
+    "role": "destination",
+    "placement": "cluster"
+  }
+]

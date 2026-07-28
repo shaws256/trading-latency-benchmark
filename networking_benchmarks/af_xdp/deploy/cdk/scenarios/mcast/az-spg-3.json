@@ -1,0 +1,17 @@
+[
+  {
+    "count": 1,
+    "role": "source",
+    "placement": "spread"
+  },
+  {
+    "count": 1,
+    "role": "replicator",
+    "placement": "spread"
+  },
+  {
+    "count": 1,
+    "role": "destination",
+    "placement": "spread"
+  }
+]

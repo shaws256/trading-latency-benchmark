@@ -1,0 +1,4 @@
+[
+  {"count": 3, "az": "a", "placement": "cluster"},
+  {"count": 7, "az": "b", "placement": "spread"}
+]

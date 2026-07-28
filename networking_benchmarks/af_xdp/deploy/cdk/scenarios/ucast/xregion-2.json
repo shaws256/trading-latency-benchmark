@@ -1,0 +1,11 @@
+[
+  {
+    "count": 1,
+    "role": "source"
+  },
+  {
+    "count": 1,
+    "role": "destination",
+    "region": "eu-west-2"
+  }
+]

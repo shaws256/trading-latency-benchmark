@@ -529,7 +529,8 @@ int main(int argc, char* argv[]) {
                 ts_mode == RxTimestampMode::HW_PHC ? "nitro_phc_hw" :
                 ts_mode == RxTimestampMode::SW_KERNEL ? "kernel_sw" : "userspace");
         fprintf(jf, "  \"timestamp_tx\": \"tsc\",\n");
-        fprintf(jf, "  \"tsc_ns_per_tick\": %.6f,\n", g_tsc.ns_per_tick);
+        fprintf(jf, "  \"tsc_ns_per_tick\": %.6f%s\n", g_tsc.ns_per_tick,
+                (service_rtts.empty() && response_rtts.empty()) ? "" : ",");
         if (!service_rtts.empty()) {
             fprintf(jf, "  \"service_rtt_us\": {\n");
             fprintf(jf, "    \"min\": %ld,\n", service_rtts.front() / 1000);
@@ -540,7 +541,7 @@ int main(int argc, char* argv[]) {
             fprintf(jf, "    \"p99\": %ld,\n", percentile(service_rtts, 99) / 1000);
             fprintf(jf, "    \"p999\": %ld,\n", percentile(service_rtts, 99.9) / 1000);
             fprintf(jf, "    \"max\": %ld\n", service_rtts.back() / 1000);
-            fprintf(jf, "  },\n");
+            fprintf(jf, "  }%s\n", response_rtts.empty() ? "" : ",");
         }
         if (!response_rtts.empty()) {
             fprintf(jf, "  \"response_rtt_us\": {\n");

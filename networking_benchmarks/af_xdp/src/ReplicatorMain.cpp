@@ -15,7 +15,9 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+#ifndef KERNEL_MODE_ONLY
 #include "Replicator.hpp"
+#endif
 #include <iostream>
 #include <string>
 #include <thread>
@@ -23,15 +25,19 @@
 #include <signal.h>
 #include <unistd.h>
 
+#ifndef KERNEL_MODE_ONLY
 static std::unique_ptr<Replicator> g_replicator;
+#endif
 volatile bool g_running = true;
 
 void signalHandler(int signum) {
     std::cout << "\nReceived signal " << signum << ", shutting down..." << std::endl;
     g_running = false;
+#ifndef KERNEL_MODE_ONLY
     if (g_replicator) {
         g_replicator->stop();
     }
+#endif
 }
 
 // Forward declaration for kernel-mode echo server
@@ -78,6 +84,7 @@ void printUsage(const char* progName) {
     std::cout << "  List destinations:  [3]" << std::endl;
 }
 
+#ifndef KERNEL_MODE_ONLY
 void printStatisticsLoop() {
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
@@ -86,6 +93,7 @@ void printStatisticsLoop() {
         }
     }
 }
+#endif
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -106,6 +114,11 @@ int main(int argc, char* argv[]) {
         return run_kernel_mode(ip, port);
     }
 
+#ifdef KERNEL_MODE_ONLY
+    std::cerr << "Error: This binary was built in kernel-mode-only configuration." << std::endl;
+    std::cerr << "AF_XDP mode is not available. Use --kernel-mode flag." << std::endl;
+    return 1;
+#else
     if (argc < 4) {
         printUsage(argv[0]);
         return 1;
@@ -250,4 +263,5 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Packet replicator stopped" << std::endl;
     return 0;
+#endif  // KERNEL_MODE_ONLY
 }
