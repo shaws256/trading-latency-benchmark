@@ -19,8 +19,8 @@ import {
 import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 
 // c7i.2xlarge = 8 vCPU / 4 physical cores. Non-competing busy-polling needs a
-// dedicated physical core each for: replicator poll thread, rtt_kernel sender,
-// rtt_kernel receiver, plus one core for OS + NIC IRQs. c7i.xlarge (2 physical
+// dedicated physical core each for: replicator poll thread, rtt sender,
+// rtt receiver, plus one core for OS + NIC IRQs. c7i.xlarge (2 physical
 // cores) forces these threads to share physical cores/HT siblings, injecting
 // jitter. See bake-ami.sh CPU-isolation section (isolcpus=1-3, nosmt).
 const DEFAULT_INSTANCE_TYPE = 'c7i.2xlarge';

@@ -74,7 +74,7 @@
 
     - name: Prewarm RTT to each peer (discard results)
       ansible.builtin.shell: |
-        /opt/af-xdp/rtt_kernel \
+        /opt/af-xdp/rtt \
           {{ hostvars[item].private_ip_address }} {{ data_port }} \
           {{ private_ip_address }} {{ listen_port }} \
           {{ prewarm_count }} {{ prewarm_rate }} 0 {{ send_cpu }} {{ recv_cpu }} \
@@ -102,19 +102,26 @@
     # core 2 = rtt receiver, core 3 = rtt sender, core 0 = OS/IRQ.
     send_cpu: "3"
     recv_cpu: "2"
+    # Optional AF_XDP zero-copy TX for the send leg (kernel-bypass). The sender
+    # binds a dedicated queue (default 1) so it does not clash with the local
+    # replicator's AF_XDP socket on queue 0. RX stays kernel-socket.
+    xdp_tx: false
+    xdp_tx_queue: "1"
 
   tasks:
 
     - name: Run RTT to each peer
       ansible.builtin.shell: |
-        /opt/af-xdp/rtt_kernel \
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        /opt/af-xdp/rtt \
           {{ hostvars[item].private_ip_address }} {{ data_port }} \
           {{ private_ip_address }} {{ listen_port }} \
-          {{ count }} {{ rate }} {{ warmup }} {{ send_cpu }} {{ recv_cpu }} ; \
+          {{ count }} {{ rate }} {{ warmup }} {{ send_cpu }} {{ recv_cpu }} \
+          {% if xdp_tx | bool %}--xdp-tx={{ xdp_tx_queue }} --iface "$IFACE"{% endif %} ; \
         mv /tmp/rtt_results.json /tmp/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json 2>/dev/null || true
       loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
       loop_control:
-        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}"
+        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}{{ ' [xdp-tx]' if xdp_tx | bool else '' }}"
       ignore_errors: yes
 
     - name: Fetch per-pair results

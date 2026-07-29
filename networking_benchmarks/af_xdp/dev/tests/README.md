@@ -33,7 +33,7 @@ Verifies packet echo behavior:
 - Unregistered address does NOT receive packets
 
 ### TestRTTMeasurement (3 tests)
-Runs the `rtt_kernel` client against kernel-mode replicator:
+Runs the `rtt` client against kernel-mode replicator:
 - Produces valid JSON at `/tmp/rtt_results.json`
 - Warmup messages are excluded from results
 - Kernel-mode latency sanity check (p50 < 5ms)

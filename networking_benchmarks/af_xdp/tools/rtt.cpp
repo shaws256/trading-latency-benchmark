@@ -55,6 +55,9 @@
 #include <immintrin.h>  // _mm_pause for busy-poll spin
 
 #include "ControlPort.hpp"
+#ifndef KERNEL_MODE_ONLY
+#include "XdpTxSend.hpp"   // AF_XDP zero-copy TX backend (full builds only)
+#endif
 
 // ---------------------------------------------------------------------------
 // TSC calibration
@@ -297,23 +300,42 @@ static void sig_handler(int) { g_running = false; }
 // Main
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
-    if (argc < 7 || argc > 10) {
-        std::cerr << "Usage: " << argv[0]
+    // Separate optional flags (--xdp-tx[=queue], --iface <name>) from positionals.
+    bool use_xdp_tx = false;
+    [[maybe_unused]] int xdp_queue = 1;   // avoid queue 0 (owned by the local ucast replicator's AF_XDP socket)
+    std::string iface;
+    std::vector<const char*> pos;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--xdp-tx")                    { use_xdp_tx = true; }
+        else if (a.rfind("--xdp-tx=", 0) == 0)  { use_xdp_tx = true; xdp_queue = atoi(a.c_str() + 9); }
+        else if (a == "--iface" && i + 1 < argc){ iface = argv[++i]; }
+        else                                     { pos.push_back(argv[i]); }
+    }
+
+    if (pos.size() < 7 || pos.size() > 10) {
+        std::cerr << "Usage: " << pos[0]
                   << " <replicator_ip> <replicator_port> <local_ip> <local_port>"
                   << " <total_messages> <rate_per_sec>"
-                  << " [warmup=10000] [send_cpu=1] [recv_cpu=2]" << std::endl;
+                  << " [warmup=10000] [send_cpu=1] [recv_cpu=2]"
+                  << " [--xdp-tx[=queue]] [--iface <name>]" << std::endl;
         return 1;
     }
 
-    const char* replicator_ip = argv[1];
-    uint16_t    replicator_port = static_cast<uint16_t>(atoi(argv[2]));
-    const char* local_ip = argv[3];
-    uint16_t    local_port = static_cast<uint16_t>(atoi(argv[4]));
-    uint64_t    total_msgs = strtoull(argv[5], nullptr, 10);
-    uint64_t    rate_per_sec = strtoull(argv[6], nullptr, 10);
-    uint64_t    warmup = (argc > 7) ? strtoull(argv[7], nullptr, 10) : 10000;
-    int         send_cpu = (argc > 8) ? atoi(argv[8]) : 1;
-    int         recv_cpu = (argc > 9) ? atoi(argv[9]) : 2;
+    const char* replicator_ip = pos[1];
+    uint16_t    replicator_port = static_cast<uint16_t>(atoi(pos[2]));
+    const char* local_ip = pos[3];
+    uint16_t    local_port = static_cast<uint16_t>(atoi(pos[4]));
+    uint64_t    total_msgs = strtoull(pos[5], nullptr, 10);
+    uint64_t    rate_per_sec = strtoull(pos[6], nullptr, 10);
+    uint64_t    warmup = (pos.size() > 7) ? strtoull(pos[7], nullptr, 10) : 10000;
+    int         send_cpu = (pos.size() > 8) ? atoi(pos[8]) : 1;
+    int         recv_cpu = (pos.size() > 9) ? atoi(pos[9]) : 2;
+
+#ifdef KERNEL_MODE_ONLY
+    if (use_xdp_tx) { std::cerr << "--xdp-tx not available in this (kernel-mode) build" << std::endl; return 1; }
+#endif
+    if (use_xdp_tx && iface.empty()) { std::cerr << "--xdp-tx requires --iface <name>" << std::endl; return 1; }
 
     if (total_msgs == 0 || rate_per_sec == 0) {
         std::cerr << "total_messages and rate must be positive" << std::endl;
@@ -445,6 +467,21 @@ int main(int argc, char* argv[]) {
     pin_to_cpu(send_cpu);
     enable_realtime();  // RT scheduling on sender thread
 
+#ifndef KERNEL_MODE_ONLY
+    XdpTxSend xtx;
+    if (use_xdp_tx) {
+        std::string xerr;
+        if (!xtx.init(iface, xdp_queue, replicator_ip, replicator_port,
+                      MSG_TEMPLATE, MSG_LEN, TRADE_ID_OFFSET, xerr)) {
+            std::cerr << "AF_XDP TX init failed (" << xerr
+                      << "); falling back to kernel sendto" << std::endl;
+            use_xdp_tx = false;
+        } else {
+            std::cout << "AF_XDP TX enabled on " << iface << " queue " << xdp_queue << std::endl;
+        }
+    }
+#endif
+
     char msg_buf[512];
     uint64_t interval_ns = 1000000000ULL / rate_per_sec;
 
@@ -461,21 +498,25 @@ int main(int argc, char* argv[]) {
         deadline.tv_nsec = intended_ns % 1000000000ULL;
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
 
-        // Encode and send
-        encode_message(msg_buf, i);
+        // Send: AF_XDP zero-copy TX (kernel-bypass) or kernel sendto.
+        uint64_t send_tsc; int64_t send_rt_ns;
+#ifndef KERNEL_MODE_ONLY
+        if (use_xdp_tx) {
+            xtx.send(i, send_tsc, send_rt_ns);
+        } else
+#endif
+        {
+            encode_message(msg_buf, i);
+            send_tsc = rdtsc();
+            struct timespec send_ts;
+            clock_gettime(CLOCK_REALTIME, &send_ts);
+            send_rt_ns = send_ts.tv_sec * 1000000000LL + send_ts.tv_nsec;
+            sendto(send_fd, msg_buf, MSG_LEN, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+        }
 
-        // TX timestamp: use CLOCK_REALTIME to match the receive-side kernel timestamp
-        // (SO_TIMESTAMP/SCM_TIMESTAMP reports in wall-clock time). For short benchmark
-        // runs (<60s), NTP steering is negligible and the RTT is accurate.
-        uint64_t send_tsc = rdtsc();
-        struct timespec send_ts;
-        clock_gettime(CLOCK_REALTIME, &send_ts);
-
-        sendto(send_fd, msg_buf, MSG_LEN, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
-
-        // Record both TSC and monotonic - use monotonic for HW PHC comparison
+        // Record both TSC and CLOCK_REALTIME (same domain as the RX SO_TIMESTAMP)
         slots[i - 1].send_tsc = send_tsc;
-        slots[i - 1].send_monotonic_ns = send_ts.tv_sec * 1000000000LL + send_ts.tv_nsec;
+        slots[i - 1].send_monotonic_ns = send_rt_ns;
         slots[i - 1].intended_send_ns = intended_ns;
 
         // Progress every 10K
@@ -577,6 +618,7 @@ int main(int argc, char* argv[]) {
                 ts_mode == RxTimestampMode::HW_PHC ? "nitro_phc_hw" :
                 ts_mode == RxTimestampMode::SW_KERNEL ? "kernel_sw" : "userspace");
         fprintf(jf, "  \"timestamp_tx\": \"tsc\",\n");
+        fprintf(jf, "  \"tx_path\": \"%s\",\n", use_xdp_tx ? "af_xdp" : "kernel");
         fprintf(jf, "  \"tsc_ns_per_tick\": %.6f%s\n", g_tsc.ns_per_tick,
                 (service_rtts.empty() && response_rtts.empty()) ? "" : ",");
         if (!service_rtts.empty()) {

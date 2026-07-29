@@ -97,7 +97,7 @@ export AWS_DEFAULT_REGION=us-east-1
 Instances boot with `replicator.service` in unicast-mode. Run RTT tests directly:
 
 ```bash
-ssh ec2-user@<nodeA> '/opt/af-xdp/rtt_kernel <nodeB_ip> 5000 <nodeA_ip> 19020 1000 1000 100 0 1'
+ssh ec2-user@<nodeA> '/opt/af-xdp/rtt <nodeB_ip> 5000 <nodeA_ip> 19020 1000 1000 100 0 1'
 ```
 
 ### Multicast

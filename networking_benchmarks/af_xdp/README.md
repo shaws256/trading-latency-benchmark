@@ -8,7 +8,7 @@ Measures round-trip and one-way latency between EC2 instances at microsecond pre
 ```
 af_xdp/
 ├── src/            Core replicator engine (AF_XDP + kernel-mode) + eBPF (ucast.o/mcast.o)
-├── tools/          Measurement instruments (rtt_kernel, mcast_send/receive, replicator_ctl, udp_send)
+├── tools/          Measurement instruments (rtt, mcast_send/receive, replicator_ctl, udp_send)
 ├── deploy/         Infrastructure (CDK stacks + benchmark/runtime Ansible playbooks)
 │   ├── cdk/        Fleet deployment + AMI builder
 │   └── ansible/    run_ucast / run_mcast / configure_mcast / prepare_mcast_nodes + inventory

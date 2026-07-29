@@ -6,27 +6,46 @@ Measurement instruments and control utilities.
 
 | File | Binary | Description |
 |------|--------|-------------|
-| `rtt_kernel.cpp` | `rtt_kernel` | High-precision RTT measurement client. Subscribes to replicator, sends UDP packets, measures round-trip via SO_TIMESTAMP (kernel RX) + TSC (TX). Outputs JSON with p50/p90/p95/p99/p999/max. |
+| `rtt.cpp` | `rtt` | High-precision RTT measurement client. Subscribes to replicator, sends UDP packets, measures round-trip via SO_TIMESTAMP (kernel RX) + TSC (TX). Outputs JSON with p50/p90/p95/p99/p999/max. |
 | `mcast_send.cpp` | `mcast_send` | Multicast sender — timestamps packets, sends to GRE tunnel or multicast group. Used as the "exchange" in multicast scenarios. |
 | `mcast_receive.cpp` | `mcast_receive` | Multicast receiver — attaches `mcast.o`, seeds its `config_map` with the target group+port (`-g`/`-p`) so the XDP filter redirects to the AF_XDP socket, captures packets, computes one-way + per-hop latency from sender/replicator timestamps. Requires PHC clock sync between hosts. |
 | `replicator_ctl.cpp` | `replicator_ctl` | Control protocol client. Sends ADD/REMOVE/LIST commands to replicator's control port (12345). |
 | `udp_send.cpp` | `udp_send` | Simple UDP connectivity probe. Sends packets to a target and reports reachability. Supports multicast groups. |
 
-## rtt_kernel usage
+## rtt usage
 
 ```bash
-sudo ./rtt_kernel <replicator_ip> <data_port> <listen_ip> <listen_port> \
-           <count> <rate_per_sec> <warmup> <tx_cpu> <rx_cpu>
+sudo ./rtt <replicator_ip> <data_port> <listen_ip> <listen_port> \
+           <count> <rate_per_sec> <warmup> <tx_cpu> <rx_cpu> \
+           [--xdp-tx[=queue]] [--iface <name>]
 ```
 
 Requires `sudo` for SCHED_FIFO and mlockall. Runs without root but degrades gracefully
 (warnings printed, continues with SCHED_OTHER).
 
+### `--xdp-tx` (AF_XDP zero-copy send)
+
+By default the probe is sent with `sendto()` (kernel UDP stack). Pass `--xdp-tx[=queue]`
++ `--iface <name>` to send via a TX-only AF_XDP socket instead, building the
+`Eth|IPv4|UDP|payload` frame in userspace and stamping the TX timestamp immediately
+before `submit` (sfence-ordered). This removes the ~3-5µs kernel TX stack from the
+measured send leg — expect a few µs lower p50 and tighter tails; RX stays kernel-socket
+(`SO_TIMESTAMPING`), same clock domain, so the RTT stays valid.
+
+- Binds a **dedicated queue (default 1)**: queue 0 is owned by the local ucast
+  `replicator.service` AF_XDP socket (RSS is pinned to queue 0), so the sender must use a
+  different queue. TX egress is independent of RSS. Falls back to kernel `sendto` (with a
+  warning) if AF_XDP init fails.
+- Only available in `make full` builds (needs libxdp); `make kernel-mode` rejects the flag.
+- JSON gains `"tx_path": "af_xdp" | "kernel"`. Enable fleet-wide via
+  `run_ucast.yaml -e xdp_tx=true [-e xdp_tx_queue=1]`.
+
+
 Output: JSON at `/tmp/rtt_results.json` with `service_rtt_us` and `response_rtt_us` percentiles.
 
 ### Latency optimizations
 
-The `rtt_kernel` binary implements the following optimizations to minimize measurement overhead
+The `rtt` binary implements the following optimizations to minimize measurement overhead
 and isolate the true network/replicator latency from OS noise:
 
 | Optimization | Mechanism | Impact |

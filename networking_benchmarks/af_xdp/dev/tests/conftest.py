@@ -4,7 +4,7 @@ Fixtures shared across test modules.
 Ports are deliberately off the production defaults (control 12345, ucast data
 5000, rtt local 19020) so the suite can run on a host with a live
 replicator.service without colliding. The control port is exported via
-AFXDP_CONTROL_PORT so the kernel-mode replicator, rtt_kernel and replicator_ctl
+AFXDP_CONTROL_PORT so the kernel-mode replicator, rtt and replicator_ctl
 all agree (see src/ControlPort.hpp).
 """
 

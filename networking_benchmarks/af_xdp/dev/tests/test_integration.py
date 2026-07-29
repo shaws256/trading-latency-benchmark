@@ -5,7 +5,7 @@ Kernel mode (``replicator --kernel-mode``) implements the same control protocol
 (ADD/REMOVE/LIST on the control port) and UDP echo as the AF_XDP replicator, but
 over standard kernel sockets — no root, no XDP/BPF. That makes these tests
 runnable in containers / CI / macOS. They exercise the *real* measurement client
-(``rtt_kernel``) and the ``replicator_ctl`` / ``udp_send`` binaries end-to-end;
+(``rtt``) and the ``replicator_ctl`` / ``udp_send`` binaries end-to-end;
 the echo/control server is a lightweight stand-in (src/KernelEcho.cpp), so this
 is a functional/contract smoke test — the production AF_XDP datapath itself is
 validated separately on EC2 (run_ucast).
@@ -35,7 +35,7 @@ import pytest
 # dev/tests/ → af_xdp root is three levels up (binaries built by `make` at the root).
 AF_XDP_DIR = Path(__file__).parent.parent.parent
 REPLICATOR = AF_XDP_DIR / "replicator"
-RTT = AF_XDP_DIR / "rtt_kernel"
+RTT = AF_XDP_DIR / "rtt"
 REPLICATOR_CTL = AF_XDP_DIR / "replicator_ctl"
 UDP_SEND = AF_XDP_DIR / "udp_send"
 MCAST_SEND = AF_XDP_DIR / "mcast_send"
@@ -257,9 +257,9 @@ class TestRTTMeasurement:
 
     def test_rtt_produces_json(self, replicator_process):
         if not RTT.exists():
-            pytest.skip("rtt_kernel binary not found")
+            pytest.skip("rtt binary not found")
         result, json_path = self._run_rtt(29020, 1000, 1000, 100)
-        assert result.returncode == 0, f"rtt_kernel failed: {result.stderr}\n{result.stdout}"
+        assert result.returncode == 0, f"rtt failed: {result.stderr}\n{result.stdout}"
         assert os.path.exists(json_path), "JSON output not created"
         with open(json_path) as f:
             data = json.load(f)
@@ -272,7 +272,7 @@ class TestRTTMeasurement:
     def test_rtt_json_schema_fields(self, replicator_process):
         """Top-level JSON must carry the run metadata the report relies on."""
         if not RTT.exists():
-            pytest.skip("rtt_kernel binary not found")
+            pytest.skip("rtt binary not found")
         result, json_path = self._run_rtt(29023, 1000, 1000, 100)
         assert result.returncode == 0
         with open(json_path) as f:
@@ -286,7 +286,7 @@ class TestRTTMeasurement:
     def test_rtt_zero_loss_localhost(self, replicator_process):
         """Localhost kernel echo should not drop packets."""
         if not RTT.exists():
-            pytest.skip("rtt_kernel binary not found")
+            pytest.skip("rtt binary not found")
         result, json_path = self._run_rtt(29024, 2000, 2000, 200)
         assert result.returncode == 0
         with open(json_path) as f:
@@ -295,16 +295,16 @@ class TestRTTMeasurement:
 
     def test_rtt_respects_warmup(self, replicator_process):
         if not RTT.exists():
-            pytest.skip("rtt_kernel binary not found")
+            pytest.skip("rtt binary not found")
         result, json_path = self._run_rtt(29021, 500, 1000, 400)
         assert result.returncode == 0
         with open(json_path) as f:
             data = json.load(f)
         assert data.get("messages", 0) in (500, 100)
 
-    def test_rtt_kernel_mode_latency_sanity(self, replicator_process):
+    def test_rtt_localhost_latency_sanity(self, replicator_process):
         if not RTT.exists():
-            pytest.skip("rtt_kernel binary not found")
+            pytest.skip("rtt binary not found")
         result, json_path = self._run_rtt(29022, 1000, 1000, 100)
         assert result.returncode == 0
         with open(json_path) as f:
@@ -313,12 +313,26 @@ class TestRTTMeasurement:
         assert p50 < 5000, f"p50={p50}µs — too high for localhost kernel echo"
 
     def test_rtt_invalid_args(self):
-        """rtt_kernel with too few args should exit non-zero and print usage."""
+        """rtt with too few args should exit non-zero and print usage."""
         if not RTT.exists():
-            pytest.skip("rtt_kernel binary not found")
+            pytest.skip("rtt binary not found")
         result = subprocess.run([str(RTT), LISTEN_IP], capture_output=True, text=True, timeout=5)
         assert result.returncode != 0
         assert "Usage" in (result.stdout + result.stderr)
+
+    def test_rtt_xdp_tx_requires_iface(self):
+        """--xdp-tx must be rejected (exit != 0) without --iface. Validated before
+        any socket/AF_XDP setup, so it is container-safe."""
+        if not RTT.exists():
+            pytest.skip("rtt binary not found")
+        result = subprocess.run(
+            [str(RTT), LISTEN_IP, str(DATA_PORT), LISTEN_IP, "29030", "100", "100", "--xdp-tx"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # kernel-mode builds reject --xdp-tx outright; full builds require --iface.
+        assert result.returncode != 0
+        out = (result.stdout + result.stderr).lower()
+        assert "iface" in out or "kernel-mode" in out
 
 
 # ── Test: replicator_ctl CLI round-trip ───────────────────────────────────────

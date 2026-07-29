@@ -71,7 +71,7 @@ else
   cd /tmp/build-src/networking_benchmarks/af_xdp
   make full
   mkdir -p /opt/af-xdp/xdp
-  cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/ 2>/dev/null || true
+  cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/ 2>/dev/null || true
   cp -f src/xdp/*.o /opt/af-xdp/xdp/ 2>/dev/null || true
 fi
 
@@ -125,7 +125,7 @@ net.ipv4.igmp_qrv = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 net.core.netdev_max_backlog = 10000
-# Socket buffer ceilings. rtt_kernel requests SO_RCVBUF=4MB; the kernel silently
+# Socket buffer ceilings. rtt requests SO_RCVBUF=4MB; the kernel silently
 # clamps it to rmem_max (AL2023 default 208KB), which caused ~0.6% UDP
 # RcvbufErrors (client-side reply drops) under coalesced micro-bursts. Raise the
 # ceiling so the 4MB request sticks.

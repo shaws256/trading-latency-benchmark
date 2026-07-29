@@ -86,7 +86,7 @@
           - "--exclude=*.o"
           - "--exclude=*.d"
           - "--exclude=/replicator"
-          - "--exclude=/rtt_kernel"
+          - "--exclude=/rtt"
           - "--exclude=/mcast_send"
           - "--exclude=/mcast_receive"
           - "--exclude=/replicator_ctl"
@@ -100,7 +100,7 @@
         make full
         # Install to /opt/af-xdp for consistent path with baked AMI
         mkdir -p /opt/af-xdp/xdp
-        cp -f replicator rtt_kernel mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
+        cp -f replicator rtt mcast_send mcast_receive replicator_ctl udp_send /opt/af-xdp/
         cp -f src/xdp/*.o /opt/af-xdp/xdp/
         chown -R ec2-user:ec2-user /home/ec2-user/af_xdp
 
@@ -160,7 +160,7 @@
           net.ipv4.conf.all.rp_filter = 0
           net.ipv4.conf.default.rp_filter = 0
           net.core.netdev_max_backlog = 10000
-          # rtt_kernel requests SO_RCVBUF=4MB; kernel clamps to rmem_max (AL2023
+          # rtt requests SO_RCVBUF=4MB; kernel clamps to rmem_max (AL2023
           # default 208KB) -> ~0.6% UDP RcvbufErrors. Raise the ceiling.
           net.core.rmem_max = 16777216
           net.core.wmem_max = 16777216
