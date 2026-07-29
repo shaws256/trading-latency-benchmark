@@ -10,8 +10,8 @@ Unified deployment stack for all benchmark topologies. Handles single-region (sa
 - Per-entry: type, count, role, az, pgType, pgName, region
 - Placement groups: cluster (single-AZ enforced), spread (≤7/AZ), partition
 - Cross-region: secondary VPC + VPC peering + bidirectional SG rules
-- Dynamic instance creation with tags (Role, AZ, InstanceType, PlacementStrategy)
-- FleetManifest JSON output for script consumption
+- Dynamic instance creation with tags (Role, AZ, InstanceType; PlacementStrategy + PlacementGroup when in a PG)
+- FleetManifest JSON output for script consumption — records `pgName` per node (including standalone/non-PG nodes) so reporting can cluster/disambiguate by group label
 
 **Validation (synth-time):**
 - Cluster placement across multiple AZs → error

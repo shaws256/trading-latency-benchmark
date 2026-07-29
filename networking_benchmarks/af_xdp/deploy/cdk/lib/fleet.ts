@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import {
   Vpc,
   SubnetType,
@@ -24,9 +25,10 @@ import { Tags, RemovalPolicy } from 'aws-cdk-lib';
 // cores) forces these threads to share physical cores/HT siblings, injecting
 // jitter. See bake-ami.sh CPU-isolation section (isolcpus=1-3, nosmt).
 const DEFAULT_INSTANCE_TYPE = 'c7i.2xlarge';
-/** SSM parameter path where the AMI builder stores the latest AMI ID per region */
-const SSM_AMI_PREFIX = '/af-xdp/ami';
 const DEFAULT_ROLE = 'replicator';
+const DEFAULT_PRIMARY_CIDR = '10.61.0.0/16';
+const DEFAULT_SECONDARY_CIDR = '10.62.0.0/16';
+const CONTROL_PORT = 12345;
 
 export type PlacementStrategy = 'cluster' | 'spread' | 'partition';
 
@@ -42,106 +44,142 @@ export interface FleetEntry {
   az?: string;
   /** Placement strategy: "cluster", "spread", "partition". Default: none. */
   pgType?: PlacementStrategy;
-  /** Placement group name. Entries with the same name share a PG.
-   *  Different names → separate PGs (even in the same AZ/strategy).
-   *  Default: one shared PG per strategy+AZ combination. */
+  /** Placement group / reporting label. Entries with the same name share a PG. */
   pgName?: string;
   /** AWS region (e.g. "us-east-1", "eu-west-2"). Default: stack's region.
-   *  Cross-region entries create a secondary VPC with VPC peering. */
+   *  Entries whose region differs from the primary become a second stack. */
   region?: string;
 }
 
+/** A fleet entry with its AZ resolved to a full AZ name. */
+export type ResolvedEntry = FleetEntry & { _resolvedAz: string };
+
 export interface FleetStackProps extends cdk.StackProps {
-  /** SSH key pair name (must exist in the primary region) */
+  /** SSH key pair name (must exist in this stack's region). */
   keyPairName: string;
-  /** SSH key pair name for secondary region (cross-region only). Defaults to keyPairName. */
-  secondaryKeyPairName?: string;
-  /** Custom AMI ID for primary region. Default: latest Amazon Linux 2023 */
+  /** Custom AMI ID for this region. Default: SSM-resolved (primary) or AL2023. */
   amiId?: string;
-  /** Custom AMI ID for secondary region. Default: latest Amazon Linux 2023 */
-  secondaryAmiId?: string;
-  /** Primary VPC CIDR. Default: 10.61.0.0/16 */
+  /** VPC CIDR for this region. */
   vpcCidr?: string;
-  /** Secondary VPC CIDR (cross-region). Default: 10.62.0.0/16 */
-  secondaryVpcCidr?: string;
-  /** UDP data port (used for cross-region SG rules). Default: 5000 */
+  /** UDP data port (SG rules). Default: 5000 */
   dataPort?: number;
-  /** Fleet specification (required). */
-  fleet: FleetEntry[];
+  /** Resolved fleet entries that belong to THIS stack's region. */
+  entries: ResolvedEntry[];
+  /** This stack's region (explicit — env.region may be a token at synth). */
+  regionName: string;
+  /** Peer region VPC CIDR — opens SG ingress for cross-region data/control. */
+  peerVpcCidr?: string;
+  /** Resolve the AMI from SSM /af-xdp/ami/<region> (primary region only). */
+  ssmAmi?: boolean;
+}
+
+/** Resolve an AZ spec ("a" | "us-east-1a" | undefined) to a full AZ name. */
+export function resolveAz(azSpec: string | undefined, region: string): string {
+  if (!azSpec) return `${region}a`;
+  if (azSpec.includes('-')) return azSpec;
+  return `${region}${azSpec}`;
+}
+
+/** Partition a fleet into primary/secondary regions and resolve AZs. */
+export function partitionFleet(fleet: FleetEntry[], primaryRegion: string): {
+  primaryEntries: ResolvedEntry[];
+  secondaryEntries: ResolvedEntry[];
+  secondaryRegion?: string;
+} {
+  const primaryEntries: ResolvedEntry[] = [];
+  const secondaryEntries: ResolvedEntry[] = [];
+  let secondaryRegion: string | undefined;
+
+  for (const entry of fleet) {
+    const entryRegion = entry.region ?? primaryRegion;
+    const isSecondary = entryRegion !== primaryRegion;
+    if (isSecondary) {
+      if (secondaryRegion && secondaryRegion !== entryRegion) {
+        throw new Error(
+          `Only one secondary region is supported. Got entries for both "${secondaryRegion}" and "${entryRegion}".`
+        );
+      }
+      secondaryRegion = entryRegion;
+    }
+    const resolved: ResolvedEntry = { ...entry, _resolvedAz: resolveAz(entry.az, entryRegion) };
+    (isSecondary ? secondaryEntries : primaryEntries).push(resolved);
+  }
+
+  if (primaryEntries.length === 0) {
+    throw new Error('Fleet must have at least one entry in the primary region');
+  }
+  return { primaryEntries, secondaryEntries, secondaryRegion };
+}
+
+/** Validate placement-group constraints for one region's entries. */
+function validateEntries(entries: ResolvedEntry[]): void {
+  const clusterGroupAZs = new Map<string, Set<string>>();
+  const spreadPerAz = new Map<string, number>();
+
+  for (const entry of entries) {
+    const count = entry.count ?? 1;
+    const az = entry._resolvedAz;
+    if (entry.pgType === 'cluster') {
+      const group = entry.pgName ?? '__default__';
+      if (!clusterGroupAZs.has(group)) clusterGroupAZs.set(group, new Set());
+      clusterGroupAZs.get(group)!.add(az);
+    }
+    if (entry.pgType === 'spread') {
+      spreadPerAz.set(az, (spreadPerAz.get(az) ?? 0) + count);
+    }
+  }
+
+  for (const [group, azs] of clusterGroupAZs) {
+    if (azs.size > 1) {
+      const label = group === '__default__' ? '(unnamed)' : `"${group}"`;
+      throw new Error(
+        `Cluster placement group ${label} requires all instances in the same AZ. ` +
+        `Got: ${Array.from(azs).join(', ')}`
+      );
+    }
+  }
+  for (const [az, count] of spreadPerAz) {
+    if (count > 7) {
+      throw new Error(`Spread placement max 7 per AZ. Got ${count} in ${az}.`);
+    }
+  }
 }
 
 /**
- * Unified regional deployment stack.
+ * Region-scoped deployment stack.
  *
- * Handles single-region (same/cross-AZ) and cross-region topologies from
- * a single fleet spec. Cross-region is triggered when any FleetEntry has a
- * `region` field different from the stack's primary region.
- *
- * Cross-region creates:
- *   - A secondary VPC in the secondary region (via AwsCustomResource)
- *   - VPC peering connection between primary and secondary
- *   - Routes and SG rules on both sides for UDP data traffic
- *   - Instances in the secondary region
+ * Builds a VPC, security group, placement groups and instances for the fleet
+ * entries that belong to ITS region. A CloudFormation stack is single-region,
+ * so cross-region topologies use TWO FleetStacks (one per region) wired
+ * together by {@link connectRegions}.
  */
 export class FleetStack extends cdk.Stack {
+  public readonly vpc: Vpc;
+  public readonly sg: SecurityGroup;
+  public readonly vpcCidr: string;
+  public readonly dataPort: number;
+
   constructor(scope: cdk.App, id: string, props: FleetStackProps) {
     super(scope, id, props);
 
-    const primaryRegion = this.region;
+    const region = props.regionName;
     const dataPort = props.dataPort ?? 5000;
-    const primaryVpcCidr = props.vpcCidr ?? '10.61.0.0/16';
-    const secondaryVpcCidr = props.secondaryVpcCidr ?? '10.62.0.0/16';
+    const vpcCidr = props.vpcCidr ?? DEFAULT_PRIMARY_CIDR;
+    this.dataPort = dataPort;
+    this.vpcCidr = vpcCidr;
 
-    // ── Partition fleet into primary vs secondary region ──────────────────
-    const primaryEntries: (FleetEntry & { _resolvedAz: string })[] = [];
-    const secondaryEntries: (FleetEntry & { _resolvedAz: string })[] = [];
-    let secondaryRegion: string | undefined;
+    validateEntries(props.entries);
 
-    for (const entry of props.fleet) {
-      const entryRegion = entry.region ?? primaryRegion;
-      const isSecondary = entryRegion !== primaryRegion;
-
-      if (isSecondary) {
-        if (secondaryRegion && secondaryRegion !== entryRegion) {
-          throw new Error(
-            `Only one secondary region is supported. Got entries for both "${secondaryRegion}" and "${entryRegion}".`
-          );
-        }
-        secondaryRegion = entryRegion;
-      }
-
-      const resolveAz = (azSpec?: string, region?: string): string => {
-        const reg = region ?? primaryRegion;
-        if (!azSpec) return `${reg}a`; // default to 'a' suffix
-        if (azSpec.includes('-')) return azSpec;
-        return `${reg}${azSpec}`;
-      };
-
-      const resolved = { ...entry, _resolvedAz: resolveAz(entry.az, entryRegion) };
-      if (isSecondary) {
-        secondaryEntries.push(resolved);
-      } else {
-        primaryEntries.push(resolved);
-      }
+    const azs = Array.from(new Set(props.entries.map(e => e._resolvedAz))).sort();
+    if (azs.length === 0) {
+      throw new Error(`No entries for region ${region}`);
     }
 
-    // ── Validate ─────────────────────────────────────────────────────────
-    this.validateEntries(primaryEntries);
-    if (secondaryEntries.length > 0) {
-      this.validateEntries(secondaryEntries);
-    }
-
-    // ── Primary region AZs ───────────────────────────────────────────────
-    const primaryAZs = Array.from(new Set(primaryEntries.map(e => e._resolvedAz))).sort();
-    if (primaryAZs.length === 0) {
-      throw new Error('Fleet must have at least one entry in the primary region');
-    }
-
-    // ── Primary VPC ──────────────────────────────────────────────────────
+    // ── VPC ──────────────────────────────────────────────────────────────
     const vpc = new Vpc(this, 'Vpc', {
-      ipAddresses: ec2.IpAddresses.cidr(primaryVpcCidr),
+      ipAddresses: ec2.IpAddresses.cidr(vpcCidr),
       natGateways: 0,
-      availabilityZones: primaryAZs,
+      availabilityZones: azs,
       subnetConfiguration: [{
         cidrMask: 24,
         name: 'Public',
@@ -151,8 +189,9 @@ export class FleetStack extends cdk.Stack {
       gatewayEndpoints: {},
     });
     vpc.applyRemovalPolicy(RemovalPolicy.DESTROY);
+    this.vpc = vpc;
 
-    // ── Primary Security Group ───────────────────────────────────────────
+    // ── Security group ─────────────────────────────────────────────────────
     const sg = new SecurityGroup(this, 'Sg', {
       vpc,
       description: 'AF_XDP benchmark: SSH + intra-group + cross-region data',
@@ -161,15 +200,18 @@ export class FleetStack extends cdk.Stack {
     sg.applyRemovalPolicy(RemovalPolicy.DESTROY);
     sg.addIngressRule(Peer.anyIpv4(), Port.tcp(22), 'SSH');
     sg.addIngressRule(sg, Port.allTraffic(), 'All intra-group traffic');
+    if (props.peerVpcCidr) {
+      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.udp(dataPort), 'UDP data from peer region');
+      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.tcp(CONTROL_PORT), 'Control from peer region');
+    }
+    this.sg = sg;
 
-    // ── Placement Groups (primary region) ────────────────────────────────
+    // ── Placement groups ───────────────────────────────────────────────────
     const placementGroups = new Map<string, CfnPlacementGroup>();
     const getOrCreatePG = (strategy: PlacementStrategy, az: string, groupName?: string): CfnPlacementGroup => {
-      // Key includes groupName so different named groups get separate PGs
       const key = groupName
         ? `${strategy}:${groupName}`
         : (strategy === 'cluster' ? `cluster:${az}` : strategy);
-
       if (!placementGroups.has(key)) {
         const sanitized = (groupName ?? az).replace(/[^a-zA-Z0-9]/g, '');
         const pgId = groupName
@@ -182,34 +224,30 @@ export class FleetStack extends cdk.Stack {
       return placementGroups.get(key)!;
     };
 
-    // ── AMI + Key ────────────────────────────────────────────────────────
-    // ── AMI resolution (priority: explicit amiId > SSM param > AL2023) ─────
-    // SSM /af-xdp/ami/<region> is written by ami-builder after each bake.
-    // Override with --context amiId=<id> for manual control.
-    const resolveAmi = (region: string, explicitAmiId?: string): ec2.IMachineImage => {
-      if (explicitAmiId) {
-        return MachineImage.genericLinux({ [region]: explicitAmiId });
-      }
-      // SSM deploy-time resolution only works for the stack's own region
-      if (region === primaryRegion) {
-        const ssmParam = ssm.StringParameter.valueForStringParameter(this, `/af-xdp/ami/${region}`);
-        return MachineImage.genericLinux({ [region]: ssmParam });
-      }
-      // Secondary region: fall back to AL2023 (build AMI there separately if needed)
-      return MachineImage.latestAmazonLinux2023();
-    };
-
-    const primaryAmi = resolveAmi(primaryRegion, props.amiId);
+    // ── AMI + key pair ─────────────────────────────────────────────────────
+    // Primary region resolves the baked AMI from SSM (/af-xdp/ami/<region>,
+    // written by ami-builder). A secondary region can't read the primary's SSM
+    // param at deploy time, so it uses an explicit amiId or falls back to AL2023
+    // (bake/provision it separately). Override either with --context amiId=.
+    let ami: ec2.IMachineImage;
+    if (props.amiId) {
+      ami = MachineImage.genericLinux({ [region]: props.amiId });
+    } else if (props.ssmAmi) {
+      const ssmParam = ssm.StringParameter.valueForStringParameter(this, `/af-xdp/ami/${region}`);
+      ami = MachineImage.genericLinux({ [region]: ssmParam });
+    } else {
+      ami = MachineImage.latestAmazonLinux2023();
+    }
     const keyPair = KeyPair.fromKeyPairName(this, 'KeyPair', props.keyPairName);
 
-    // ── Deploy primary instances ─────────────────────────────────────────
-    let globalIndex = 0;
+    // ── Instances ──────────────────────────────────────────────────────────
     const fleetManifest: {
       index: number; instanceType: string; role: string;
       az: string; region: string; pgType: string | null; pgName: string | null; outputPrefix: string;
     }[] = [];
 
-    for (const entry of primaryEntries) {
+    let globalIndex = 0;
+    for (const entry of props.entries) {
       const count = entry.count ?? 1;
       const role = entry.role ?? DEFAULT_ROLE;
       const instType = entry.type ?? DEFAULT_INSTANCE_TYPE;
@@ -225,7 +263,7 @@ export class FleetStack extends cdk.Stack {
         const inst = new Instance(this, nodeId, {
           vpc,
           instanceType: new InstanceType(instType),
-          machineImage: primaryAmi,
+          machineImage: ami,
           securityGroup: sg,
           vpcSubnets: { availabilityZones: [az] },
           keyPair,
@@ -247,6 +285,7 @@ export class FleetStack extends cdk.Stack {
         Tags.of(inst).add('Role', role);
         Tags.of(inst).add('InstanceType', instType);
         Tags.of(inst).add('AZ', az);
+        Tags.of(inst).add('Region', region);
 
         new cdk.CfnOutput(this, `${prefix}InstanceId`, { value: inst.instanceId });
         new cdk.CfnOutput(this, `${prefix}PublicIp`, { value: inst.instancePublicIp });
@@ -254,183 +293,104 @@ export class FleetStack extends cdk.Stack {
 
         fleetManifest.push({
           index: globalIndex, instanceType: instType, role, az,
-          region: primaryRegion, pgType, pgName: entry.pgName ?? null, outputPrefix: prefix,
+          region, pgType, pgName: entry.pgName ?? null, outputPrefix: prefix,
         });
         globalIndex++;
       }
     }
 
-    // ── Cross-region: secondary VPC + peering + instances ────────────────
-    if (secondaryRegion && secondaryEntries.length > 0) {
-      const secondaryAZs = Array.from(new Set(secondaryEntries.map(e => e._resolvedAz))).sort();
-
-      // Secondary VPC (same account, different region)
-      const secVpc = new Vpc(this, 'SecVpc', {
-        ipAddresses: ec2.IpAddresses.cidr(secondaryVpcCidr),
-        natGateways: 0,
-        availabilityZones: secondaryAZs,
-        subnetConfiguration: [{
-          cidrMask: 24,
-          name: 'Public',
-          subnetType: SubnetType.PUBLIC,
-          mapPublicIpOnLaunch: true,
-        }],
-        gatewayEndpoints: {},
-      });
-      secVpc.applyRemovalPolicy(RemovalPolicy.DESTROY);
-
-      // Secondary SG
-      const secSg = new SecurityGroup(this, 'SecSg', {
-        vpc: secVpc,
-        description: 'AF_XDP benchmark (secondary): SSH + intra-group + cross-region data',
-        allowAllOutbound: true,
-      });
-      secSg.applyRemovalPolicy(RemovalPolicy.DESTROY);
-      secSg.addIngressRule(Peer.anyIpv4(), Port.tcp(22), 'SSH');
-      secSg.addIngressRule(secSg, Port.allTraffic(), 'All intra-group traffic');
-      // Allow UDP data from primary VPC CIDR (will traverse peering)
-      secSg.addIngressRule(Peer.ipv4(primaryVpcCidr), Port.udp(dataPort), 'UDP data from primary via peering');
-      secSg.addIngressRule(Peer.ipv4(primaryVpcCidr), Port.tcp(12345), 'Control from primary via peering');
-
-      // Primary SG: allow UDP from secondary VPC CIDR
-      sg.addIngressRule(Peer.ipv4(secondaryVpcCidr), Port.udp(dataPort), 'UDP data from secondary via peering');
-      sg.addIngressRule(Peer.ipv4(secondaryVpcCidr), Port.tcp(12345), 'Control from secondary via peering');
-
-      // VPC Peering (same-account cross-region, auto-accepted)
-      const peering = new ec2.CfnVPCPeeringConnection(this, 'VpcPeering', {
-        vpcId: vpc.vpcId,
-        peerVpcId: secVpc.vpcId,
-        peerRegion: secondaryRegion,
-        tags: [{ key: 'Name', value: 'PrimaryToSecondaryPeering' }],
-      });
-
-      // Routes: primary → secondary
-      for (const subnet of vpc.publicSubnets) {
-        new ec2.CfnRoute(this, `PriRoute${subnet.node.id}`, {
-          routeTableId: subnet.routeTable.routeTableId,
-          destinationCidrBlock: secondaryVpcCidr,
-          vpcPeeringConnectionId: peering.ref,
-        });
-      }
-
-      // Routes: secondary → primary
-      for (const subnet of secVpc.publicSubnets) {
-        new ec2.CfnRoute(this, `SecRoute${subnet.node.id}`, {
-          routeTableId: subnet.routeTable.routeTableId,
-          destinationCidrBlock: primaryVpcCidr,
-          vpcPeeringConnectionId: peering.ref,
-        });
-      }
-
-      // Secondary instances
-      const secAmi = resolveAmi(secondaryRegion, props.secondaryAmiId);
-      const secKeyPair = KeyPair.fromKeyPairName(this, 'SecKeyPair', props.secondaryKeyPairName ?? props.keyPairName);
-
-      for (const entry of secondaryEntries) {
-        const count = entry.count ?? 1;
-        const role = entry.role ?? DEFAULT_ROLE;
-        const instType = entry.type ?? DEFAULT_INSTANCE_TYPE;
-        const az = entry._resolvedAz;
-        const pgType = entry.pgType ?? null;
-
-        for (let i = 0; i < count; i++) {
-          const shortType = instType.replace('.', '-');
-          const nodeId = `Node${globalIndex}`;
-          const nodeName = `${role}-${globalIndex}-${shortType}`;
-          const prefix = `Node${globalIndex}`;
-
-          const inst = new Instance(this, nodeId, {
-            vpc: secVpc,
-            instanceType: new InstanceType(instType),
-            machineImage: secAmi,
-            securityGroup: secSg,
-            vpcSubnets: { availabilityZones: [az] },
-            keyPair: secKeyPair,
-            blockDevices: [{ deviceName: '/dev/xvda', volume: BlockDeviceVolume.ebs(100) }],
-            userData: UserData.forLinux(),
-          });
-          inst.applyRemovalPolicy(RemovalPolicy.DESTROY);
-          (inst.node.defaultChild as ec2.CfnInstance).sourceDestCheck = false;
-
-          if (pgType) {
-            const pg = getOrCreatePG(pgType, az, entry.pgName);
-            (inst.node.defaultChild as ec2.CfnInstance).placementGroupName = pg.ref;
-            Tags.of(inst).add('PlacementStrategy', pgType);
-            if (entry.pgName) Tags.of(inst).add('PlacementGroup', entry.pgName);
-          }
-
-          Tags.of(inst).add('Name', nodeName);
-          Tags.of(inst).add('Role', role);
-          Tags.of(inst).add('InstanceType', instType);
-          Tags.of(inst).add('AZ', az);
-          Tags.of(inst).add('Region', secondaryRegion);
-
-          new cdk.CfnOutput(this, `${prefix}InstanceId`, { value: inst.instanceId });
-          new cdk.CfnOutput(this, `${prefix}PublicIp`, { value: inst.instancePublicIp });
-          new cdk.CfnOutput(this, `${prefix}PrivateIp`, { value: inst.instancePrivateIp });
-
-          fleetManifest.push({
-            index: globalIndex, instanceType: instType, role, az,
-            region: secondaryRegion, pgType, pgName: entry.pgName ?? null, outputPrefix: prefix,
-          });
-          globalIndex++;
-        }
-      }
-
-      new cdk.CfnOutput(this, 'PeeringConnectionId', { value: peering.ref });
-      new cdk.CfnOutput(this, 'SecondaryVpcId', { value: secVpc.vpcId });
-      new cdk.CfnOutput(this, 'SecondaryRegion', { value: secondaryRegion });
-    }
-
-    // ── Fleet outputs ────────────────────────────────────────────────────
+    // ── Outputs ────────────────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'FleetManifest', {
       value: JSON.stringify(fleetManifest),
       description: 'JSON fleet manifest',
     });
     new cdk.CfnOutput(this, 'FleetSize', { value: String(globalIndex) });
     new cdk.CfnOutput(this, 'VpcId', { value: vpc.vpcId });
-    new cdk.CfnOutput(this, 'AvailabilityZones', { value: primaryAZs.join(',') });
+    new cdk.CfnOutput(this, 'Region', { value: region });
+    new cdk.CfnOutput(this, 'AvailabilityZones', { value: azs.join(',') });
     if (placementGroups.size > 0) {
       new cdk.CfnOutput(this, 'PlacementGroups', {
         value: JSON.stringify(Array.from(placementGroups.keys())),
       });
     }
   }
+}
 
-  // ── Validation ─────────────────────────────────────────────────────────
-  private validateEntries(entries: (FleetEntry & { _resolvedAz: string })[]): void {
-    // Cluster: entries sharing the same pgName must be in one AZ
-    const clusterGroupAZs = new Map<string, Set<string>>(); // groupName → AZs
-    const spreadPerAz = new Map<string, number>();
+/**
+ * Wire cross-region VPC peering between a primary and secondary FleetStack.
+ *
+ * Both stacks must be created with `crossRegionReferences: true`.
+ *
+ * All peering resources are anchored in the PRIMARY stack to avoid a circular
+ * stack dependency (peering needs the secondary VPC id; the secondary route
+ * needs the peering id). The primary stack therefore depends on the secondary
+ * (for the VPC id + route-table ids); the secondary never depends on the
+ * primary. The primary→secondary route is created by an AwsCustomResource that
+ * calls ec2:CreateRoute in the secondary region.
+ *
+ * Same-account cross-region peering is auto-accepted by CloudFormation, so no
+ * explicit accept step is needed.
+ */
+export function connectRegions(
+  primary: FleetStack,
+  secondary: FleetStack,
+  opts: { secondaryRegion: string },
+): void {
+  const peering = new ec2.CfnVPCPeeringConnection(primary, 'VpcPeering', {
+    vpcId: primary.vpc.vpcId,
+    peerVpcId: secondary.vpc.vpcId,        // cross-region ref → primary depends on secondary
+    peerRegion: opts.secondaryRegion,
+    tags: [{ key: 'Name', value: 'PrimaryToSecondaryPeering' }],
+  });
 
-    for (const entry of entries) {
-      const count = entry.count ?? 1;
-      const az = entry._resolvedAz;
+  // Primary → secondary routes (native, local to the primary stack).
+  primary.vpc.publicSubnets.forEach((subnet, i) => {
+    new ec2.CfnRoute(primary, `PriPeerRoute${i}`, {
+      routeTableId: subnet.routeTable.routeTableId,
+      destinationCidrBlock: secondary.vpcCidr,
+      vpcPeeringConnectionId: peering.ref,
+    });
+  });
 
-      if (entry.pgType === 'cluster') {
-        const group = entry.pgName ?? '__default__';
-        if (!clusterGroupAZs.has(group)) clusterGroupAZs.set(group, new Set());
-        clusterGroupAZs.get(group)!.add(az);
-      }
-      if (entry.pgType === 'spread') {
-        spreadPerAz.set(az, (spreadPerAz.get(az) ?? 0) + count);
-      }
-    }
+  // Secondary → primary routes: created in the secondary region via an
+  // AwsCustomResource anchored in the PRIMARY stack (keeps the dependency
+  // one-directional: primary → secondary).
+  const routePolicy = cr.AwsCustomResourcePolicy.fromStatements([
+    new iam.PolicyStatement({
+      actions: ['ec2:CreateRoute', 'ec2:DeleteRoute', 'ec2:DescribeRouteTables'],
+      resources: ['*'],
+    }),
+  ]);
+  secondary.vpc.publicSubnets.forEach((subnet, i) => {
+    const rtbId = subnet.routeTable.routeTableId; // cross-region ref
+    new cr.AwsCustomResource(primary, `SecPeerRoute${i}`, {
+      resourceType: 'Custom::SecondaryPeerRoute',
+      onCreate: {
+        service: 'EC2',
+        action: 'createRoute',
+        region: opts.secondaryRegion,
+        parameters: {
+          RouteTableId: rtbId,
+          DestinationCidrBlock: primary.vpcCidr,
+          VpcPeeringConnectionId: peering.ref,
+        },
+        physicalResourceId: cr.PhysicalResourceId.of(`secroute-${opts.secondaryRegion}-${i}`),
+      },
+      onDelete: {
+        service: 'EC2',
+        action: 'deleteRoute',
+        region: opts.secondaryRegion,
+        parameters: {
+          RouteTableId: rtbId,
+          DestinationCidrBlock: primary.vpcCidr,
+        },
+      },
+      policy: routePolicy,
+      installLatestAwsSdk: false,
+    });
+  });
 
-    for (const [group, azs] of clusterGroupAZs) {
-      if (azs.size > 1) {
-        const label = group === '__default__' ? '(unnamed)' : `"${group}"`;
-        throw new Error(
-          `Cluster placement group ${label} requires all instances in the same AZ. ` +
-          `Got: ${Array.from(azs).join(', ')}`
-        );
-      }
-    }
-
-    for (const [az, count] of spreadPerAz) {
-      if (count > 7) {
-        throw new Error(`Spread placement max 7 per AZ. Got ${count} in ${az}.`);
-      }
-    }
-  }
+  new cdk.CfnOutput(primary, 'PeeringConnectionId', { value: peering.ref });
+  new cdk.CfnOutput(primary, 'SecondaryRegion', { value: opts.secondaryRegion });
+  new cdk.CfnOutput(primary, 'SecondaryVpcId', { value: secondary.vpc.vpcId });
 }

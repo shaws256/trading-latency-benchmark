@@ -3,7 +3,7 @@ import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
 import * as fs from 'fs';
 import * as path from 'path';
-import { FleetStack, FleetEntry } from '../lib/fleet';
+import { FleetStack, FleetEntry, partitionFleet, connectRegions } from '../lib/fleet';
 import { AmiBuilderStack } from '../lib/ami-builder';
 
 const app = new cdk.App();
@@ -120,18 +120,45 @@ switch (deploymentType) {
 
   default: {
     const fleet = resolveFleet();
+    const { primaryEntries, secondaryEntries, secondaryRegion } = partitionFleet(fleet, region);
+    const crossRegion = !!(secondaryRegion && secondaryEntries.length > 0);
 
-    new FleetStack(app, stackName, {
+    const primaryCidr = vpcCidr || '10.61.0.0/16';
+    const secondaryCidr = secondaryVpcCidr || '10.62.0.0/16';
+    const parsedDataPort = dataPort ? parseInt(dataPort, 10) : undefined;
+
+    // Primary region stack (baked AMI via SSM).
+    const primary = new FleetStack(app, stackName, {
       env: { account: process.env.CDK_DEFAULT_ACCOUNT, region },
+      crossRegionReferences: crossRegion || undefined,
       keyPairName,
-      secondaryKeyPairName,
       amiId,
-      secondaryAmiId,
-      vpcCidr,
-      secondaryVpcCidr,
-      dataPort: dataPort ? parseInt(dataPort, 10) : undefined,
-      fleet,
+      vpcCidr: primaryCidr,
+      dataPort: parsedDataPort,
+      entries: primaryEntries,
+      regionName: region,
+      peerVpcCidr: crossRegion ? secondaryCidr : undefined,
+      ssmAmi: true,
     });
+
+    // Cross-region: a second stack in the secondary region + VPC peering.
+    // A CloudFormation stack is single-region, so cross-region topologies
+    // need two stacks wired by connectRegions().
+    if (crossRegion && secondaryRegion) {
+      const secondary = new FleetStack(app, `${stackName}-Sec`, {
+        env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: secondaryRegion },
+        crossRegionReferences: true,
+        keyPairName: secondaryKeyPairName || keyPairName,
+        amiId: secondaryAmiId,
+        vpcCidr: secondaryCidr,
+        dataPort: parsedDataPort,
+        entries: secondaryEntries,
+        regionName: secondaryRegion,
+        peerVpcCidr: primaryCidr,
+        ssmAmi: false,
+      });
+      connectRegions(primary, secondary, { secondaryRegion });
+    }
     break;
   }
 }

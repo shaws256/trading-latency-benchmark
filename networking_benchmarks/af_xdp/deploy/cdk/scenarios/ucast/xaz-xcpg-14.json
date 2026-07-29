@@ -1,8 +1,0 @@
-[
-  {"count": 2, "az": "a", "pgType": "cluster", "pgName": "cpg-a-1"},
-  {"count": 2, "az": "a", "pgType": "cluster", "pgName": "cpg-a-2"},
-  {"count": 2, "az": "b", "pgType": "cluster", "pgName": "cpg-b-1"},
-  {"count": 2, "az": "b", "pgType": "cluster", "pgName": "cpg-b-2"},
-  {"count": 3, "az": "a", "pgType": "spread", "pgName": "spg-a-1"},
-  {"count": 3, "az": "b", "pgType": "spread", "pgName": "spg-b-1"}
-]
