@@ -1,69 +1,72 @@
-# tests/
+# dev/tests/
 
-Integration tests for the AF_XDP benchmark using pytest.
+Integration tests for the AF_XDP benchmark (pytest). They exercise the real
+`rtt`, `replicator_ctl`, `udp_send`, `mcast_send`, `mcast_receive` binaries and
+the control protocol against a kernel-mode replicator — no root, no XDP/BPF — so
+they run in containers / CI / macOS. The production AF_XDP datapath itself is
+validated on EC2 (`run_ucast.yaml` / `run_mcast.yaml`).
+
+Non-production ports are used (control **23456**, data **29000**, rtt-local
+**29020+**) so the suite never collides with a live `replicator.service`. The
+control port is exported via `AFXDP_CONTROL_PORT` (see `src/ControlPort.hpp`).
 
 ## Running
 
 ```bash
-# Build first (kernel-mode works in containers)
-make kernel-mode   # or: make all (on EC2)
+# Build first (from af_xdp/): full needs libxdp; kernel-mode runs anywhere
+make full            # or: make kernel-mode
 
-# Run all tests
-pytest -v
-
-# Run specific test class
-pytest -v -k TestRTTMeasurement
+pytest dev/tests/ -v
+pytest dev/tests/ -v -k TestRTTMeasurement    # one class
 ```
 
-## Test Classes (14 tests)
+Binaries are located three parents up from the tests (the af_xdp root, where
+`make` puts them). Tests skip gracefully if a binary is missing.
 
-### TestBinaries (4 tests)
-Verifies all expected binaries exist after `make`.
+## Test classes (34 tests)
 
-### TestControlProtocol (4 tests)
-Starts replicator in `--kernel-mode`, exercises the binary control protocol:
-- ADD destination → ACK
-- ADD duplicate → handled gracefully
-- LIST → returns registered destinations
-- REMOVE → removes destination
+| Class | # | Covers |
+|-------|---|--------|
+| `TestBinaries` | 4 | `replicator` / `rtt` / `replicator_ctl` / `udp_send` exist |
+| `TestControlProtocol` | 4 | ADD, ADD-duplicate, LIST (count+entries), REMOVE → ACK |
+| `TestControlProtocolNegative` | 3 | remove-unknown, unknown-command, malformed-ADD → NAK |
+| `TestDataEcho` | 5 | echo to registered, no echo to unregistered, multi-destination fan-out, remove-stops-echo, near-MTU binary payload |
+| `TestRTTMeasurement` | 7 | JSON produced, schema fields, zero-loss localhost, warmup exclusion, localhost latency sanity, invalid-args, `--xdp-tx` requires `--iface` |
+| `TestReplicatorCtl` | 2 | `replicator_ctl` add→list round-trip, usage on no command |
+| `TestUdpSend` | 1 | `udp_send` CLI help |
+| `TestMcastBinaries` | 2 | `mcast_send` / `mcast_receive` exist |
+| `TestMcastSendCli` | 3 | `-h`, missing `-D`, unknown option |
+| `TestMcastReceiveCli` | 3 | `-h`, missing `-I`, unknown option |
 
-### TestDataEcho (2 tests)
-Verifies packet echo behavior:
-- Registered destination receives echoed packets
-- Unregistered address does NOT receive packets
+The mcast tests cover only the CLI/arg layer (the GRE datapath needs root + XDP +
+a real NIC — EC2 only, via `run_mcast.yaml`).
 
-### TestRTTMeasurement (3 tests)
-Runs the `rtt` client against kernel-mode replicator:
-- Produces valid JSON at `/tmp/rtt_results.json`
-- Warmup messages are excluded from results
-- Kernel-mode latency sanity check (p50 < 5ms)
-
-### TestUdpSend (1 test)
-Verifies `udp_send` CLI help output.
-
-## Fixtures
+## Fixtures (conftest.py + test module)
 
 | Fixture | Scope | Description |
 |---------|-------|-------------|
-| `build_dir` | session | Path to af_xdp directory |
-| `bin_dir` | session | Path to built binaries |
-| `replicator_process` | function | Starts/stops replicator in `--kernel-mode` |
+| `check_binaries` | session (autouse) | Skips the suite if the `replicator` binary is missing |
+| `replicator_process` | module | Starts/stops `replicator --kernel-mode` (control port from `AFXDP_CONTROL_PORT`) |
+| `ctrl_socket` | function | UDP socket for control-protocol tests |
 
 ## Requirements
 
-- Python 3.9+
-- pytest (`pip install pytest`)
+- Python 3.9+, `pytest` (`pip install pytest`)
 - Built binaries (tests skip gracefully if missing)
 
-## Container testing
+## Container testing (recommended)
+
+The Docker harness (`dev/docker/Dockerfile`) mirrors the AMI bake (xdp-tools +
+`make full`) then runs the suite. The Makefile targets x86_64, so build for
+`linux/amd64` (emulated on Apple Silicon):
 
 ```bash
-docker run --platform linux/amd64 -v $(pwd):/src -w /src amazonlinux:2023 bash -c '
-  dnf install -y gcc-c++ make python3-pip
-  pip3 install pytest
-  make kernel-mode
-  pytest -v
-'
+# from af_xdp/
+docker build --platform linux/amd64 -f dev/docker/Dockerfile -t afxdp-test .
+docker run  --rm --platform linux/amd64 afxdp-test            # runs pytest dev/tests/
+
+# iterate on tests without rebuilding binaries:
+docker run --rm --platform linux/amd64 -v "$PWD/dev/tests:/src/dev/tests" afxdp-test
 ```
 
-All 14 tests pass in an AL2023 container with kernel-mode build.
+All 34 tests pass in an AL2023 container.

@@ -33,7 +33,7 @@ Dev/iteration tooling lives outside deploy/, under af_xdp/dev/:
    cdk deploy --context deploymentType=ami-builder --context keyPairName=virginia
 
 2. Deploy fleet (instant readiness)
-   cdk deploy --context scenario=ucast/az-cpg-3 --context amiId=ami-xxx
+   cdk deploy --context scenario=ucast/az-cpg-2 --context amiId=ami-xxx
 
 3. (Multicast only) Configure topology
    ansible-playbook configure_mcast.yaml -e replicator_private_ip=10.61.0.5
@@ -46,7 +46,7 @@ Dev/iteration tooling lives outside deploy/, under af_xdp/dev/:
 
 ```
 1. Deploy fleet (stock AMI)
-   cdk deploy --context scenario=ucast/az-cpg-3
+   cdk deploy --context scenario=ucast/az-cpg-2
 
 2. Provision instances (~8 min)
    ansible-playbook provision.yaml

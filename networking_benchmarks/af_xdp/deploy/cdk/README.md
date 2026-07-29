@@ -7,7 +7,7 @@ Fleet-driven CDK infrastructure for the AF_XDP latency benchmark. Deploys EC2 in
 | Directory | Description | Details |
 |-----------|-------------|---------|
 | [`lib/`](lib/README.md) | CDK stack constructs (FleetStack, AmiBuilderStack) | Placement validation, cross-region peering |
-| [`scenarios/`](scenarios/README.md) | Pre-built fleet topologies (ucast + mcast) | 8 scenarios, costs, custom format |
+| [`scenarios/`](scenarios/README.md) | Pre-built fleet topologies (ucast + mcast) | 7 scenarios, costs, custom format |
 | [`scripts/`](scripts/README.md) | AMI bake script and configs applied | Binaries, sysctl, chrony, systemd units |
 | `bin/` | CDK app entry point | Fleet resolution, deployment type routing |
 
@@ -24,11 +24,11 @@ Fleet-driven CDK infrastructure for the AF_XDP latency benchmark. Deploys EC2 in
 npm install
 
 # Deploy fleet (stock AL2023 — needs ansible provisioning)
-cdk deploy --context keyPairName=virginia --context scenario=ucast/az-cpg-3
+cdk deploy --context keyPairName=virginia --context scenario=ucast/az-cpg-2
 
 # Or build AMI first (~10 min), then deploy (instant readiness)
 cdk deploy --context keyPairName=virginia --context deploymentType=ami-builder
-cdk deploy --context keyPairName=virginia --context scenario=ucast/az-cpg-3 --context amiId=ami-xxx
+cdk deploy --context keyPairName=virginia --context scenario=ucast/az-cpg-2 --context amiId=ami-xxx
 ```
 
 ## Deployment Types
@@ -48,7 +48,7 @@ JSON array of node entries — all fields optional with defaults:
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `type` | `c7i.xlarge` | EC2 instance type |
+| `type` | `c7i.2xlarge` | EC2 instance type |
 | `count` | `1` | Number of instances |
 | `role` | `replicator` | `source`, `replicator`, `destination` |
 | `pgType` | none | `cluster`, `spread`, `partition` |
@@ -59,7 +59,7 @@ JSON array of node entries — all fields optional with defaults:
 ### Loading
 
 ```bash
---context scenario=ucast/az-cpg-3              # from scenarios/
+--context scenario=ucast/az-cpg-2              # from scenarios/
 --context fleet=@path/to/file.json             # from file
 --context fleet='[{"count":2}]'                # inline
 ```
@@ -67,7 +67,7 @@ JSON array of node entries — all fields optional with defaults:
 ## Multiple Stacks
 
 ```bash
-cdk deploy --context scenario=ucast/az-cpg-3 --context stackName=cpg-bench
+cdk deploy --context scenario=ucast/az-cpg-2 --context stackName=cpg-bench
 cdk deploy --context scenario=ucast/xaz-xcpg-14 --context stackName=xcpg-bench
 cdk destroy --context stackName=cpg-bench
 ```
@@ -80,7 +80,7 @@ cdk destroy --context stackName=cpg-bench
 | `deploymentType` | `fleet` | `fleet` or `ami-builder` |
 | `region` | `us-east-1` | Primary AWS region |
 | `stackName` | `XdpStack` | CloudFormation stack name |
-| `scenario` | — | Scenario path (e.g. `ucast/az-cpg-3`) |
+| `scenario` | — | Scenario path (e.g. `ucast/az-cpg-2`) |
 | `fleet` | — | Inline JSON or `@file.json` |
 | `amiId` | AL2023 latest | Custom/baked AMI |
 | `secondaryAmiId` | AL2023 latest | AMI for secondary region |

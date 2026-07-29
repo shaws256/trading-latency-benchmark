@@ -26,7 +26,7 @@ Single-stack AMI builder. Launches a temporary instance, runs `bake-ami.sh` via 
 - VPC (minimal, public subnet)
 - Security group (SSH debug only)
 - IAM role (SSM, CreateImage, StopInstances, CloudWatch Logs, SSM PutParameter)
-- EC2 instance (UserData = base64-encoded bake script with env vars)
+- EC2 instance (UserData = gzip+base64 bake script with env vars; gzip keeps it under EC2's 16KB UserData limit)
 - WaitConditionHandle + WaitCondition (20 min timeout)
 - Lambda (CreateImage, wait for availability, write SSM, terminate)
 - Custom Resource (triggers Lambda after WaitCondition passes)

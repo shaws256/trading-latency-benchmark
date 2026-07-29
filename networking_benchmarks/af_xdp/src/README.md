@@ -25,15 +25,30 @@ ReplicatorMain
                        └── xdp/ucast.o or xdp/mcast.o (BPF program)
 ```
 
-## Control Protocol (port 12345)
+## Control Protocol (default port 12345)
 
-Binary protocol, same in both modes:
+Binary protocol, same in both modes. The port is configurable via the
+`AFXDP_CONTROL_PORT` env var (default 12345) — honoured by the replicator,
+`rtt`, and `replicator_ctl` (see `src/ControlPort.hpp`).
 
 | Opcode | Payload | Action |
 |--------|---------|--------|
-| `0x01` | 4B IP + 2B port | ADD destination |
+| `0x01` | 4B IP + 2B port | ADD destination (unicast) |
 | `0x02` | 4B IP + 2B port | REMOVE destination |
-| `0x03` | (none) | LIST destinations |
+| `0x03` | (none) | LIST — replies `[1B count][per dest: 4B IP + 2B port]` |
+| `0x04` | 4B group IP | MCAST_JOIN (GRE mode) — join a multicast group; dest IP inferred from sender |
+| `0x05` | 4B group IP | MCAST_LEAVE (GRE mode) |
+
+## XDP filter config (`config_map`)
+
+`ucast.o` / `mcast.o` only redirect a packet to the AF_XDP socket when its
+`{dst IP/group, dst port}` matches an entry in the BPF `config_map` (else
+`XDP_PASS`). The replicator seeds it from the listen IP (unicast) or per
+`MCAST_JOIN` (GRE). Capacity: **`MAX_GROUPS = 16`** groups; per group the
+replicator fans out to the full set of registered destinations. Standalone
+`mcast_receive` seeds its own `config_map[0]` from `-g`/`-p`. See
+`deploy/ansible/README.md → "Multicast: groups & destinations"` for the
+multi-group/multi-destination capability and roadmap.
 
 ## Build modes
 

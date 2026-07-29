@@ -36,7 +36,7 @@ pip install pytest && pytest -v
 |-----------|--------|-------------|
 | [`src/`](src/README.md) | Architecture, control protocol, build modes | Core C++ replicator + eBPF XDP programs |
 | [`tools/`](tools/README.md) | Usage, CLI flags, timestamp modes | RTT client, multicast tools, control CLI |
-| [`dev/tests/`](dev/tests/README.md) | Running, test classes, container testing | 33 integration tests, kernel-mode compatible |
+| [`dev/`](dev/README.md) | Dev tooling: tests, Docker harness, sync/provision | 34 integration tests, local build+test |
 | [`deploy/`](deploy/README.md) | Deployment flows, instance roles | CDK + Ansible orchestration |
 | [`deploy/cdk/`](deploy/cdk/README.md) | Fleet spec, scenarios, parameters | Infrastructure as code |
 | [`deploy/ansible/`](deploy/ansible/README.md) | Playbooks, inventory, variables | Runtime provisioning |
