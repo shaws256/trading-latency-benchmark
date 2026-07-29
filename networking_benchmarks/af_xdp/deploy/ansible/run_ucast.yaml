@@ -151,6 +151,8 @@
             "instance_type": tags.InstanceType | default('unknown'),
             "az": placement.availability_zone | default('unknown'),
             "region": placement.region | default('unknown'),
+            "account": owner_id | default('unknown'),
+            "vpc_id": vpc_id | default('unknown'),
             "pg_type": tags.PlacementStrategy | default(None),
             "pg_name": tags.PlacementGroup | default(None)
           } | to_nice_json }}

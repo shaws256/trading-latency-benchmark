@@ -107,14 +107,63 @@ def get_instance_metadata(instance_type: str) -> Dict[str, Any]:
 
 
 def load_fleet_metadata(results_dir: Path) -> dict:
-    """Load fleet.json metadata from results directory."""
+    """Load fleet metadata for the run.
+
+    Prefers a consolidated ``fleet.json`` (``{"nodes": [...]}``) when present.
+    Otherwise assembles the fleet from the per-node ``<ip>_metadata.json`` files
+    that ``run_ucast.yaml`` writes (fields: ``instance_type``, ``az``, ``region``,
+    ``pg_name``, ``pg_type``, ``private_ip``, ``hostname`` and — for newer runs —
+    ``account``/``vpc_id``).
+
+    An account id may be injected via the ``AFXDP_ACCOUNT`` env var to stamp runs
+    whose metadata predates account capture (used only to draw the account
+    boundary; it does not alter measured data).
+    """
+    account_override = os.environ.get("AFXDP_ACCOUNT")
+
     fleet_path = results_dir / "fleet.json"
     if fleet_path.exists():
         try:
-            return json.loads(fleet_path.read_text())
+            fleet = json.loads(fleet_path.read_text())
+            if account_override:
+                fleet.setdefault("account", account_override)
+                for nd in fleet.get("nodes", []):
+                    nd.setdefault("account", account_override)
+            return fleet
         except json.JSONDecodeError:
             print(f"  Warning: could not parse {fleet_path}")
-    return {}
+
+    # Assemble from per-node <ip>_metadata.json files.
+    nodes: List[Dict[str, Any]] = []
+    for mf in sorted(results_dir.glob("*_metadata.json")):
+        try:
+            m = json.loads(mf.read_text())
+        except json.JSONDecodeError:
+            print(f"  Warning: could not parse {mf}")
+            continue
+        ip = m.get("private_ip") or mf.stem.replace("_metadata", "")
+        nodes.append({
+            "name": ip,
+            "private_ip": ip,
+            "public_ip": m.get("hostname") or m.get("public_ip") or "",
+            "ec2_name": m.get("ec2_name") or ip,
+            "type": m.get("instance_type") or "unknown",
+            "az": m.get("az") or "unknown",
+            "region": m.get("region") or "unknown",
+            "account": m.get("account") or account_override or "unknown",
+            "vpc_id": m.get("vpc_id") or "unknown",
+            "cpg_name": m.get("pg_name") or "unknown",
+            "pg_type": m.get("pg_type") or "unknown",
+        })
+
+    if not nodes:
+        return {"account": account_override} if account_override else {}
+
+    return {
+        "nodes": nodes,
+        "region": nodes[0]["region"],
+        "account": nodes[0]["account"],
+    }
 
 
 def parse_result_json(filepath: Path) -> Optional[dict]:
@@ -346,6 +395,23 @@ def color_for_value(value: float, vmin: float, vmax: float) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def fmt_lat(us) -> str:
+    """Format microseconds: >=500us -> ms (0.5 ms), >=500ms -> s (0.5 s)."""
+    try:
+        v = float(us)
+    except (TypeError, ValueError):
+        return "\u2014"
+    if v <= 0:
+        return "\u2014"
+    def trim(x: float) -> str:
+        return f"{x:.2f}".rstrip("0").rstrip(".")
+    if v >= 500000:
+        return f"{trim(v / 1e6)} s"
+    if v >= 500:
+        return f"{trim(v / 1e3)} ms"
+    return f"{int(round(v))} \u03bcs"
+
+
 def generate_html_report(node_names: List[str], matrix: dict, fleet: dict,
                          asymmetries: list, type_stats: dict, output_path: Path) -> None:
     """Generate a full HTML heatmap report (matrix_report.html)."""
@@ -378,13 +444,13 @@ def generate_html_report(node_names: List[str], matrix: dict, fleet: dict,
                         val = data[metric]
                         color = color_for_value(val, vmin, vmax)
                         tooltip = (f"{src} → {dst}\\n"
-                                   f"p50={data.get('p50_us',0)}us  "
-                                   f"p99={data.get('p99_us',0)}us  "
-                                   f"p99.9={data.get('p999_us',0)}us  "
-                                   f"max={data.get('max_us',0)}us  "
+                                   f"p50={fmt_lat(data.get('p50_us',0))}  "
+                                   f"p99={fmt_lat(data.get('p99_us',0))}  "
+                                   f"p99.9={fmt_lat(data.get('p999_us',0))}  "
+                                   f"max={fmt_lat(data.get('max_us',0))}  "
                                    f"loss={data.get('loss_pct',0):.2f}%")
                         cells += (f"<td style='background:{color}' title='{tooltip}'>"
-                                  f"<strong>{val}</strong></td>")
+                                  f"<strong>{fmt_lat(val)}</strong></td>")
                     else:
                         cells += "<td class='na'>N/A</td>"
             rows += f"<tr>{cells}</tr>\n"
@@ -393,14 +459,14 @@ def generate_html_report(node_names: List[str], matrix: dict, fleet: dict,
 
     asym_rows = ""
     for a in asymmetries[:10]:
-        asym_rows += (f"<tr><td>{a['pair']}</td><td>{a['a_to_b_p50']}</td>"
-                      f"<td>{a['b_to_a_p50']}</td><td>{a['diff_us']}</td>"
+        asym_rows += (f"<tr><td>{a['pair']}</td><td>{fmt_lat(a['a_to_b_p50'])}</td>"
+                      f"<td>{fmt_lat(a['b_to_a_p50'])}</td><td>{fmt_lat(a['diff_us'])}</td>"
                       f"<td>{a['diff_pct']}%</td></tr>\n")
 
     type_rows = ""
     for label, s in type_stats.items():
-        type_rows += (f"<tr><td>{label}</td><td>{s['count']}</td><td>{s['min_p50']}</td>"
-                      f"<td>{s['max_p50']}</td><td>{s['mean_p50']}</td><td>{s['spread']}</td></tr>\n")
+        type_rows += (f"<tr><td>{label}</td><td>{s['count']}</td><td>{fmt_lat(s['min_p50'])}</td>"
+                      f"<td>{fmt_lat(s['max_p50'])}</td><td>{fmt_lat(s['mean_p50'])}</td><td>{fmt_lat(s['spread'])}</td></tr>\n")
 
     pairs_measured = len(matrix)
     total_pairs = n * (n - 1)
@@ -438,14 +504,14 @@ table.data td:first-child {{ text-align: left; }}
 <div class="summary">
   <div class="stat-card"><div class="value">{n}</div><div class="label">Nodes</div></div>
   <div class="stat-card"><div class="value">{pairs_measured}/{total_pairs}</div><div class="label">Pairs Measured</div></div>
-  <div class="stat-card"><div class="value">{median_p50}μs</div><div class="label">Median p50 RTT</div></div>
-  <div class="stat-card"><div class="value">{median_p99}μs</div><div class="label">Median p99 RTT</div></div>
-  <div class="stat-card"><div class="value">{vmax_p50 - vmin_p50}μs</div><div class="label">p50 Spread (max−min)</div></div>
+  <div class="stat-card"><div class="value">{fmt_lat(median_p50)}</div><div class="label">Median p50 RTT</div></div>
+  <div class="stat-card"><div class="value">{fmt_lat(median_p99)}</div><div class="label">Median p99 RTT</div></div>
+  <div class="stat-card"><div class="value">{fmt_lat(vmax_p50 - vmin_p50)}</div><div class="label">p50 Spread (max−min)</div></div>
 </div>
-<h2>p50 Heatmap (μs)</h2>
+<h2>p50 Heatmap</h2>
 <div class="legend"><span>Low</span><div class="legend-bar"></div><span>High</span></div>
 {build_heatmap("p50_us", vmin_p50, vmax_p50)}
-<h2>p99 Heatmap (μs)</h2>
+<h2>p99 Heatmap</h2>
 <div class="legend"><span>Low</span><div class="legend-bar"></div><span>High</span></div>
 {build_heatmap("p99_us", vmin_p99, vmax_p99)}
 <h2>Asymmetry Analysis (top 10)</h2>
@@ -496,11 +562,14 @@ def _build_topology_fleet_json(node_names: List[str], matrix: dict, fleet: dict)
             "ec2_name": meta.get("ec2_name", meta.get("name", name)),
             "type": itype,
             "private_ip": meta.get("private_ip", meta.get("ip", f"10.0.0.{idx + 10}")),
+            "public_ip": meta.get("public_ip", ""),
             # Per-node topology fields (fall back to global fleet values)
             "az": meta.get("az", fleet.get("az", "unknown")),
             "region": meta.get("region", fleet.get("region", "unknown")),
+            "account": meta.get("account", fleet.get("account", "unknown")),
             "vpc_id": meta.get("vpc_id", fleet.get("vpc_id", "unknown")),
             "cpg_name": meta.get("cpg_name", fleet.get("cpg_name", "unknown")),
+            "pg_type": meta.get("pg_type", "unknown"),
             # Hardware metadata (per-node overrides > lookup table)
             "enis": meta.get("enis", hw["enis"]),
             "bw_gbps": meta.get("bw_gbps", hw["bw_gbps"]),
@@ -556,6 +625,7 @@ def _build_contour_js() -> str:
 (function renderContours() {
   const container = document.getElementById('container');
   const maxR = Math.max(...fleet.nodes.map(n => nodeRadius(n)));
+  const vpcBoxes = [];
 
   // Group nodes by topology dimensions
   function groupBy(key) {
@@ -571,14 +641,20 @@ def _build_contour_js() -> str:
   const regionGroups = groupBy('region');
   const azGroups = groupBy('az');
   const vpcGroups = groupBy('vpc_id');
-  const cpgGroups = groupBy('cpg_name');
+  const accountGroups = groupBy('account');
 
   const PAD_BASE = 12;
+  // CPG is intentionally NOT drawn as a contour — it is shown as a per-node
+  // badge instead, so dense multi-PG scenarios stay readable.
+  // Strict nesting (inner → outer), by grouping granularity so boxes never
+  // overlap: AZ ⊂ VPC ⊂ Region ⊂ Account. (A VPC spans its AZs, a Region holds
+  // its VPCs, an Account holds its Regions.)
+  const STEP = 18;
   const contourDefs = [
-    { groups: cpgGroups,   cls: 'cpg',    prefix: 'CPG',    pad: PAD_BASE },
-    { groups: vpcGroups,   cls: 'vpc',    prefix: 'VPC',    pad: PAD_BASE + 16 },
-    { groups: azGroups,    cls: 'az',     prefix: 'AZ',     pad: PAD_BASE + 32 },
-    { groups: regionGroups, cls: 'region', prefix: 'Region', pad: PAD_BASE + 48 },
+    { groups: azGroups,      cls: 'az',      prefix: 'AZ',      pad: PAD_BASE },
+    { groups: vpcGroups,     cls: 'vpc',     prefix: 'VPC',     pad: PAD_BASE + STEP },
+    { groups: regionGroups,  cls: 'region',  prefix: 'Region',  pad: PAD_BASE + STEP * 2 },
+    { groups: accountGroups, cls: 'account', prefix: 'Account', pad: PAD_BASE + STEP * 3 },
   ];
 
   contourDefs.forEach(def => {
@@ -612,8 +688,48 @@ def _build_contour_js() -> str:
       const label = keys.length === 1 ? def.prefix + ': ' + key : key;
       el.innerHTML = '<span class="label">' + label + '</span>';
       container.appendChild(el);
+      if (def.cls === 'vpc') {
+        vpcBoxes.push({ cx: (left + right) / 2, cy: (top + bottom) / 2, hw: (right - left) / 2, hh: (bottom - top) / 2 });
+      }
     });
   });
+
+  // Cross-region VPC peering: connect the VPC boundaries with a labeled line.
+  if (vpcBoxes.length >= 2) {
+    const svg = document.getElementById('edges');
+    function edgePoint(P, dx, dy) {
+      const adx = Math.abs(dx) || 1e-6, ady = Math.abs(dy) || 1e-6;
+      const t = Math.min(P.hw / adx, P.hh / ady);
+      return { x: P.cx + dx * t, y: P.cy + dy * t };
+    }
+    for (let a = 0; a < vpcBoxes.length; a++)
+      for (let b = a + 1; b < vpcBoxes.length; b++) {
+        const A = vpcBoxes[a], B = vpcBoxes[b];
+        const dx = B.cx - A.cx, dy = B.cy - A.cy;
+        const p1 = edgePoint(A, dx, dy), p2 = edgePoint(B, -dx, -dy);
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', p1.x); line.setAttribute('y1', p1.y);
+        line.setAttribute('x2', p2.x); line.setAttribute('y2', p2.y);
+        line.setAttribute('class', 'peering-line');
+        svg.appendChild(line);
+        const lbl = document.createElement('div');
+        lbl.className = 'peering-label';
+        lbl.style.left = ((p1.x + p2.x) / 2) + 'px';
+        lbl.style.top = ((p1.y + p2.y) / 2) + 'px';
+        lbl.textContent = 'VPC Peering';
+        lbl.style.display = 'none';
+        container.appendChild(lbl);
+        // Transparent wide hit-line: keeps the peering edge in the background
+        // (visually) yet hoverable; hovering it reveals the label.
+        const hit = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        hit.setAttribute('x1', p1.x); hit.setAttribute('y1', p1.y);
+        hit.setAttribute('x2', p2.x); hit.setAttribute('y2', p2.y);
+        hit.setAttribute('class', 'peering-hit');
+        hit.addEventListener('mouseenter', () => { lbl.style.display = ''; });
+        hit.addEventListener('mouseleave', () => { lbl.style.display = 'none'; });
+        svg.appendChild(hit);
+      }
+  }
 })();
 """
 
@@ -648,7 +764,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
 .container {{ width: 100vw; height: 100vh; position: relative; }}
 svg.edges {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }}
 .edge-label {{
-  position: absolute; z-index: 5;
+  position: absolute; z-index: 40;
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 13px; font-weight: 700;
   background: rgba(13, 17, 23, 0.94);
@@ -663,17 +779,22 @@ svg.edges {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; poi
   position: absolute; z-index: 20; border-radius: 50%;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; border: 2.5px solid rgba(255,255,255,0.25);
-  box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.6); cursor: pointer;
 }}
 .node .instance-type {{ font-size: 11px; font-weight: 700; color: #fff; white-space: nowrap; }}
 .node .ec2-name {{ font-size: 9px; color: #79c0ff; white-space: nowrap; margin-top: 1px; }}
 .node .ip {{ font-size: 9px; color: #b1bac4; font-family: 'SF Mono', monospace; }}
+.node .ip-public {{ color: #79c0ff; font-weight: 700; margin-top: 1px; }}
+.node .ip-private {{ color: #8b949e; }}
+.panel-caret {{ display: inline-block; width: 12px; margin-right: 4px; font-size: 10px; color: #8b949e; }}
+.stats h3, .vis-legend h3, .instance-legend h3 {{ cursor: move; user-select: none; }}
 .node .specs {{ font-size: 8px; color: #8b949e; margin-top: 2px; white-space: nowrap; }}
-.node .eni-badge {{
-  position: absolute; top: -5px; right: -5px;
-  background: #f0883e; color: #fff; font-size: 9px; font-weight: 700;
-  min-width: 20px; height: 20px; padding: 0 4px; border-radius: 10px;
+.node .pg-badge {{
+  position: absolute; top: -9px; left: 50%;
+  background: #f0883e; color: #fff; font-size: 11px; font-weight: 700;
+  min-width: 22px; height: 21px; padding: 0 9px; border-radius: 11px;
   display: flex; align-items: center; justify-content: center; border: 2px solid #0d1117;
+  white-space: nowrap; letter-spacing: 0.2px;
 }}
 .node-tooltip {{
   position: absolute; z-index: 100;
@@ -686,10 +807,11 @@ svg.edges {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; poi
 .node-tooltip.visible {{ opacity: 1; }}
 .node-tooltip h4 {{ font-size: 12px; color: #58a6ff; margin-bottom: 6px; }}
 .node-tooltip table {{ border-collapse: collapse; width: 100%; }}
-.node-tooltip th {{ text-align: left; font-size: 10px; color: #8b949e; padding: 2px 6px 2px 0; border-bottom: 1px solid #21262d; }}
-.node-tooltip td {{ text-align: right; font-family: 'SF Mono', monospace; font-size: 11px; padding: 3px 4px; color: #e6edf3; }}
+.node-tooltip th {{ text-align: center; font-size: 10px; color: #8b949e; padding: 2px 6px; border-bottom: 1px solid #21262d; }}
+.node-tooltip td {{ text-align: center; font-family: 'SF Mono', monospace; font-size: 11px; padding: 3px 6px; color: #e6edf3; }}
 .node-tooltip td.peer-name {{ text-align: left; color: #79c0ff; font-family: inherit; }}
 .node-tooltip td.highlight {{ color: #f0883e; font-weight: 600; }}
+.node-tooltip tr.pg-group td {{ text-align: left; color: #8b949e; font-weight: 700; font-size: 10px; letter-spacing: 0.3px; padding: 6px 6px 2px; border-bottom: 1px solid #30363d; }}
 .node-tooltip .direction {{ font-size: 9px; color: #6e7681; }}
 .edge-tooltip {{
   position: absolute; z-index: 100;
@@ -710,7 +832,7 @@ svg.edges {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; poi
 .edge-tooltip .asymmetry {{ font-size: 10px; color: #f0883e; margin-top: 4px; padding-top: 4px; border-top: 1px solid #21262d; }}
 svg.edges line.edge-line {{ transition: opacity 0.15s, stroke-width 0.15s; }}
 svg.edges line.edge-line.dimmed {{ opacity: 0.12 !important; }}
-svg.edges line.edge-line.highlighted {{ opacity: 1 !important; stroke-width: 6px !important; filter: drop-shadow(0 0 4px currentColor); }}
+svg.edges line.edge-line.highlighted {{ opacity: 1 !important; filter: drop-shadow(0 0 6px currentColor) brightness(1.3); }}
 .contour {{
   position: absolute; z-index: 0; border-radius: 24px; border: 1.5px dashed; pointer-events: none;
 }}
@@ -726,6 +848,16 @@ svg.edges line.edge-line.highlighted {{ opacity: 1 !important; stroke-width: 6px
 .contour.vpc .label {{ background: rgba(57,211,83,0.12); color: #39d353; }}
 .contour.cpg {{ border-color: rgba(240,136,62,0.3); }}
 .contour.cpg .label {{ background: rgba(240,136,62,0.15); color: #f0883e; }}
+.contour.account {{ border-color: rgba(248,81,73,0.28); border-style: solid; }}
+.contour.account .label {{ background: rgba(248,81,73,0.15); color: #f85149; }}
+svg.edges line.peering-line {{ stroke: #58a6ff; stroke-width: 2.5; stroke-dasharray: 7 5; opacity: 0.75; }}
+svg.edges line.peering-hit {{ stroke: transparent; stroke-width: 18; pointer-events: stroke; cursor: help; }}
+.peering-label {{
+  position: absolute; z-index: 1; transform: translate(-50%, -50%);
+  font-size: 10px; font-weight: 700; color: #58a6ff;
+  background: rgba(13,17,23,0.9); border: 1px solid rgba(88,166,255,0.45);
+  border-radius: 4px; padding: 1px 7px; white-space: nowrap;
+}}
 .instance-legend {{
   position: fixed; bottom: 20px; left: 20px; z-index: 1000;
   background: rgba(22, 27, 34, 0.96); border: 1px solid #30363d;
@@ -751,6 +883,8 @@ svg.edges line.edge-line.highlighted {{ opacity: 1 !important; stroke-width: 6px
 .vis-legend .swatch {{ width: 32px; height: 5px; border-radius: 2px; }}
 .vis-legend .contour-samples {{ margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }}
 .vis-legend .contour-samples span {{ border-radius: 4px; padding: 2px 8px; font-size: 11px; }}
+.vis-legend .ux-hint {{ margin-top: 10px; padding-top: 8px; border-top: 1px solid #30363d; font-size: 10px; color: #8b949e; line-height: 1.6; max-width: 300px; }}
+.vis-legend .ux-hint b {{ color: #e6edf3; }}
 .stats {{
   position: fixed; top: 20px; left: 20px; z-index: 1000;
   background: rgba(22, 27, 34, 0.96); border: 1px solid #30363d;
@@ -777,6 +911,17 @@ const H = window.innerHeight;
 const N = fleet.nodes.length;
 const CX = W / 2;
 const CY = H / 2;
+
+// Latency unit formatter: >=500us -> ms (e.g. 0.5 ms), >=500ms -> s (e.g. 0.5 s).
+function fmtLat(us) {{
+  if (us === null || us === undefined || us === '') return '\\u2014';
+  const v = +us;
+  if (!isFinite(v)) return '\\u2014';
+  const trim = (x) => (Math.round(x * 100) / 100).toString();
+  if (v >= 500000) return trim(v / 1000000) + ' s';
+  if (v >= 500) return trim(v / 1000) + ' ms';
+  return Math.round(v) + ' \\u03bcs';
+}}
 
 // ─── Node sizing (composite capability score) ────────────────────────────────
 function computeNodeScore(node) {{
@@ -876,32 +1021,49 @@ function computePositions() {{
 
 const {{ positions, stress }} = computePositions();
 
-// ─── Edge color & width ──────────────────────────────────────────────────────
-let allP50 = [], allP99 = [];
+// ─── Edge encoding: color + width = latency jitter (variance / std) ──────────
+// Distance already encodes p50 (SMACOF), so edges carry a second dimension:
+// dispersion. σ is estimated from percentiles assuming a normal tail
+// (σ ≈ (p99 − p50) / 2.326), averaged over both directions of a pair.
+function dirSigma(d) {{ return (d && d.p99 > d.p50) ? (d.p99 - d.p50) / 2.326 : 0; }}
+function edgeSigma(ab, ba) {{
+  const vals = [ab, ba].filter(Boolean).map(dirSigma);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+}}
+
+let allP50 = [], allP99 = [], allSigma = [];
 for (let i = 0; i < N; i++)
   for (let j = 0; j < N; j++)
     if (fleet.matrix[i] && fleet.matrix[i][j]) {{
       allP50.push(fleet.matrix[i][j].p50);
       allP99.push(fleet.matrix[i][j].p99);
     }}
+for (let i = 0; i < N; i++)
+  for (let j = i + 1; j < N; j++) {{
+    const ab = fleet.matrix[i]?.[j], ba = fleet.matrix[j]?.[i];
+    if (!ab && !ba) continue;
+    allSigma.push(edgeSigma(ab, ba));
+  }}
 const minP50 = allP50.length ? Math.min(...allP50) : 0;
 const maxP50 = allP50.length ? Math.max(...allP50) : 100;
 const minP99 = allP99.length ? Math.min(...allP99) : 0;
 const maxP99 = allP99.length ? Math.max(...allP99) : 100;
+const minSigma = allSigma.length ? Math.min(...allSigma) : 0;
+const maxSigma = allSigma.length ? Math.max(...allSigma) : 1;
 
-function latencyColor(p50) {{
-  const t = (maxP50 === minP50) ? 0.5 : (p50 - minP50) / (maxP50 - minP50);
-  if (t <= 0.5) {{
-    const s = t * 2;
-    return 'rgb(' + Math.round(35 + 205*s) + ',' + Math.round(134 + 20*s) + ',' + Math.round(54*(1-s)) + ')';
-  }} else {{
-    const s = (t - 0.5) * 2;
-    return 'rgb(' + Math.round(240 - 22*s) + ',' + Math.round(154*(1-s)) + ',' + Math.round(51*s) + ')';
-  }}
+// green (steady, low jitter) → red (high jitter)
+function jitterColor(sigma) {{
+  const t = (maxSigma === minSigma) ? 0.5 : (sigma - minSigma) / (maxSigma - minSigma);
+  // attractive 3-stop palette: teal (#2dd4bf) -> amber (#fbbf24) -> rose (#fb7185)
+  const stops = [[45,212,191],[251,191,36],[251,113,133]];
+  const seg = t <= 0.5 ? 0 : 1;
+  const lt = t <= 0.5 ? t * 2 : (t - 0.5) * 2;
+  const a = stops[seg], b = stops[seg + 1];
+  return 'rgb(' + Math.round(a[0]+(b[0]-a[0])*lt) + ',' + Math.round(a[1]+(b[1]-a[1])*lt) + ',' + Math.round(a[2]+(b[2]-a[2])*lt) + ')';
 }}
-function edgeWidth(p99) {{
-  const t = (maxP99 === minP99) ? 0.5 : (p99 - minP99) / (maxP99 - minP99);
-  return 2 + t * 4;
+const EDGE_WIDTH = 2.5; // static edge width — only COLOR encodes jitter σ
+function edgeWidthFromSigma(sigma) {{
+  return EDGE_WIDTH;
 }}
 
 // ─── Render contours (dynamic, per-node topology) ────────────────────────────
@@ -916,12 +1078,12 @@ const edgeElements = [];
       const ab = fleet.matrix[i]?.[j], ba = fleet.matrix[j]?.[i];
       if (!ab && !ba) continue;
       const avgP50 = Math.round(((ab?.p50||0) + (ba?.p50||0)) / 2);
-      const avgP99 = ((ab?.p99||0) + (ba?.p99||0)) / 2;
+      const sigma = edgeSigma(ab, ba);
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
       line.setAttribute('x1', positions[i].x); line.setAttribute('y1', positions[i].y);
       line.setAttribute('x2', positions[j].x); line.setAttribute('y2', positions[j].y);
-      line.setAttribute('stroke', latencyColor(avgP50));
-      line.setAttribute('stroke-width', edgeWidth(avgP99));
+      line.setAttribute('stroke', jitterColor(sigma));
+      line.setAttribute('stroke-width', edgeWidthFromSigma(sigma));
       line.setAttribute('opacity', '0.55');
       line.classList.add('edge-line');
       svgEl.appendChild(line);
@@ -943,12 +1105,12 @@ function showEdgeTooltip(i, j) {{
   if (ab) {{
     html += '<div class="dir-block"><div class="dir-label">\\u2192 ' + nodeA.ec2_name + ' \\u2192 ' + nodeB.ec2_name + '</div>';
     html += '<div class="dir-values"><span class="metric-label">p50</span><span class="metric-label">p90</span><span class="metric-label">p99</span><span class="metric-label">p99.9</span><span class="metric-label">max</span><span class="metric-label">loss</span>';
-    html += '<span class="metric-val highlight">' + ab.p50 + '</span><span class="metric-val">' + (ab.p90||'\\u2014') + '</span><span class="metric-val">' + ab.p99 + '</span><span class="metric-val">' + (ab.p999||'\\u2014') + '</span><span class="metric-val">' + (ab.max||'\\u2014') + '</span><span class="metric-val">' + (ab.loss !== undefined ? ab.loss+'%' : '\\u2014') + '</span></div></div>';
+    html += '<span class="metric-val highlight">' + fmtLat(ab.p50) + '</span><span class="metric-val">' + (ab.p90 ? fmtLat(ab.p90) : '\\u2014') + '</span><span class="metric-val">' + fmtLat(ab.p99) + '</span><span class="metric-val">' + (ab.p999 ? fmtLat(ab.p999) : '\\u2014') + '</span><span class="metric-val">' + (ab.max ? fmtLat(ab.max) : '\\u2014') + '</span><span class="metric-val">' + (ab.loss !== undefined ? ab.loss+'%' : '\\u2014') + '</span></div></div>';
   }}
   if (ba) {{
     html += '<div class="dir-block"><div class="dir-label">\\u2190 ' + nodeB.ec2_name + ' \\u2192 ' + nodeA.ec2_name + '</div>';
     html += '<div class="dir-values"><span class="metric-label">p50</span><span class="metric-label">p90</span><span class="metric-label">p99</span><span class="metric-label">p99.9</span><span class="metric-label">max</span><span class="metric-label">loss</span>';
-    html += '<span class="metric-val highlight">' + ba.p50 + '</span><span class="metric-val">' + (ba.p90||'\\u2014') + '</span><span class="metric-val">' + ba.p99 + '</span><span class="metric-val">' + (ba.p999||'\\u2014') + '</span><span class="metric-val">' + (ba.max||'\\u2014') + '</span><span class="metric-val">' + (ba.loss !== undefined ? ba.loss+'%' : '\\u2014') + '</span></div></div>';
+    html += '<span class="metric-val highlight">' + fmtLat(ba.p50) + '</span><span class="metric-val">' + (ba.p90 ? fmtLat(ba.p90) : '\\u2014') + '</span><span class="metric-val">' + fmtLat(ba.p99) + '</span><span class="metric-val">' + (ba.p999 ? fmtLat(ba.p999) : '\\u2014') + '</span><span class="metric-val">' + (ba.max ? fmtLat(ba.max) : '\\u2014') + '</span><span class="metric-val">' + (ba.loss !== undefined ? ba.loss+'%' : '\\u2014') + '</span></div></div>';
   }}
   if (diff > 0) html += '<div class="asymmetry">Asymmetry: \\u0394' + diff + '\\u03bcs (' + diffPct + '%)</div>';
   edgeTooltip.innerHTML = html;
@@ -964,10 +1126,10 @@ function positionEdgeTooltip(e) {{
 }}
 function hideEdgeTooltip() {{ edgeTooltip.classList.remove('visible'); }}
 
-// ─── Edge labels (hover triggers edge tooltip) ───────────────────────────────
+// ─── Edge labels (hidden until node hover / pinned by click) ─────────────────
+const edgeLabelEls = [];
 (function renderEdgeLabels() {{
   const container = document.getElementById('container');
-  const placed = [];
   for (let i = 0; i < N; i++)
     for (let j = i + 1; j < N; j++) {{
       const ab = fleet.matrix[i]?.[j], ba = fleet.matrix[j]?.[i];
@@ -976,21 +1138,17 @@ function hideEdgeTooltip() {{ edgeTooltip.classList.remove('visible'); }}
       const x1 = positions[i].x, y1 = positions[i].y;
       const x2 = positions[j].x, y2 = positions[j].y;
       const mx = (x1+x2)/2, my = (y1+y2)/2;
-      const dx = x2-x1, dy = y2-y1;
-      const len = Math.sqrt(dx*dx + dy*dy) || 1;
-      let lx = mx + (-dy/len) * 18, ly = my + (dx/len) * 18;
-      for (const p of placed) {{
-        if (Math.sqrt((lx-p.x)**2 + (ly-p.y)**2) < 32) {{
-          lx += (-dy/len) * 14; ly += (dx/len) * 14;
-        }}
-      }}
-      placed.push({{x: lx, y: ly}});
+      let ang = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+      if (ang > 90) ang -= 180; else if (ang < -90) ang += 180; // keep text upright
       const el = document.createElement('div');
       el.className = 'edge-label';
-      el.style.left = lx + 'px'; el.style.top = ly + 'px';
-      el.style.color = latencyColor(avgP50);
-      el.textContent = avgP50 + ' \\u03bcs';
+      el.style.left = mx + 'px'; el.style.top = my + 'px';
+      el.style.transform = 'translate(-50%, -50%) rotate(' + ang + 'deg)';
+      el.style.color = jitterColor(edgeSigma(ab, ba));
+      el.textContent = fmtLat(avgP50) + ' \\u00b1' + fmtLat(edgeSigma(ab, ba));
+      el.style.display = 'none';
       const ci = i, cj = j;
+      edgeLabelEls.push({{ el, i: ci, j: cj }});
       el.addEventListener('mouseenter', () => showEdgeTooltip(ci, cj));
       el.addEventListener('mousemove', positionEdgeTooltip);
       el.addEventListener('mouseleave', hideEdgeTooltip);
@@ -998,10 +1156,48 @@ function hideEdgeTooltip() {{ edgeTooltip.classList.remove('visible'); }}
     }}
 }})();
 
+// Edge-label visibility: shown only for the hovered node's edges, plus any
+// nodes the user has pinned by clicking. Clicking a pinned node un-pins it.
+const pinnedNodes = new Set();
+function updateEdgeLabels(hover) {{
+  for (const it of edgeLabelEls) {{
+    const show = pinnedNodes.has(it.i) || pinnedNodes.has(it.j) || it.i === hover || it.j === hover;
+    it.el.style.display = show ? '' : 'none';
+  }}
+}}
+
 // ─── Render nodes + hover tooltips ───────────────────────────────────────────
 const tooltip = document.createElement('div');
 tooltip.className = 'node-tooltip';
 document.getElementById('container').appendChild(tooltip);
+
+// Per-node latency table: peers grouped by placement group, sorted by p50.
+function buildPeerTable(i, inbound) {{
+  const rows = [];
+  for (let j = 0; j < N; j++) {{
+    if (i === j) continue;
+    const data = inbound ? (fleet.matrix[j] && fleet.matrix[j][i]) : (fleet.matrix[i] && fleet.matrix[i][j]);
+    if (!data) continue;
+    rows.push({{ peer: fleet.nodes[j], data: data }});
+  }}
+  const groups = {{}};
+  rows.forEach(r => {{
+    const pg = (r.peer.cpg_name && r.peer.cpg_name !== 'unknown') ? r.peer.cpg_name : 'no PG';
+    (groups[pg] = groups[pg] || []).push(r);
+  }});
+  const keys = Object.keys(groups).sort((a, b) =>
+    Math.min(...groups[a].map(r => r.data.p50)) - Math.min(...groups[b].map(r => r.data.p50)));
+  let h = '<table><tr><th>Peer</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th><th>max</th><th>loss</th></tr>';
+  keys.forEach(pg => {{
+    h += '<tr class="pg-group"><td colspan="7">' + pg + '</td></tr>';
+    groups[pg].sort((a, b) => a.data.p50 - b.data.p50).forEach(r => {{
+      const d = r.data;
+      h += '<tr><td class="peer-name">' + r.peer.ec2_name + '</td><td class="highlight">' + fmtLat(d.p50) + '</td><td>' + (d.p90 ? fmtLat(d.p90) : '\\u2014') + '</td><td>' + fmtLat(d.p99) + '</td><td>' + (d.p999 ? fmtLat(d.p999) : '\\u2014') + '</td><td>' + (d.max ? fmtLat(d.max) : '\\u2014') + '</td><td>' + (d.loss !== undefined ? d.loss + '%' : '\\u2014') + '</td></tr>';
+    }});
+  }});
+  h += '</table>';
+  return h;
+}}
 
 fleet.nodes.forEach((node, i) => {{
   const container = document.getElementById('container');
@@ -1015,35 +1211,19 @@ fleet.nodes.forEach((node, i) => {{
   el.style.background = colors.bg;
   el.style.borderColor = colors.border;
   el.innerHTML = '<span class="instance-type">' + node.type + '</span>'
-    + '<span class="ec2-name">' + node.ec2_name + '</span>'
-    + '<span class="ip">' + node.private_ip + '</span>'
-    + '<span class="specs">' + node.bw_gbps + 'G \\u00b7 ' + node.pps_mpps + 'Mpps \\u00b7 N' + node.nitro_gen + '</span>'
-    + '<span class="eni-badge">' + node.enis + '</span>';
+    + '<span class="ip ip-public">' + (node.public_ip || '\\u2014') + '</span>'
+    + '<span class="ip ip-private">' + node.private_ip + '</span>'
+    + ((node.cpg_name && node.cpg_name !== 'unknown') ? '<span class="pg-badge" title="Placement group">' + node.cpg_name + '</span>' : '');
   container.appendChild(el);
 
   el.addEventListener('mouseenter', (e) => {{
+    updateEdgeLabels(i);
     edgeElements.forEach(({{line, i: ei, j: ej}}) => {{
       if (ei === i || ej === i) {{ line.classList.add('highlighted'); line.classList.remove('dimmed'); }}
       else {{ line.classList.add('dimmed'); line.classList.remove('highlighted'); }}
     }});
-    let html = '<h4>' + node.ec2_name + ' \\u2192 peers</h4>';
-    html += '<table><tr><th>Peer</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th><th>max</th><th>loss</th></tr>';
-    for (let j = 0; j < N; j++) {{
-      if (i === j) continue;
-      const peer = fleet.nodes[j]; const data = fleet.matrix[i]?.[j];
-      if (!data) continue;
-      html += '<tr><td class="peer-name">' + peer.ec2_name + '</td><td class="highlight">' + data.p50 + '</td><td>' + (data.p90||'\\u2014') + '</td><td>' + data.p99 + '</td><td>' + (data.p999||'\\u2014') + '</td><td>' + (data.max||'\\u2014') + '</td><td>' + (data.loss !== undefined ? data.loss+'%' : '\\u2014') + '</td></tr>';
-    }}
-    html += '</table>';
-    html += '<div class="direction" style="margin-top:6px">\\u2190 Inbound (peers \\u2192 this node):</div>';
-    html += '<table><tr><th>From</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th><th>max</th><th>loss</th></tr>';
-    for (let j = 0; j < N; j++) {{
-      if (i === j) continue;
-      const peer = fleet.nodes[j]; const data = fleet.matrix[j]?.[i];
-      if (!data) continue;
-      html += '<tr><td class="peer-name">' + peer.ec2_name + '</td><td class="highlight">' + data.p50 + '</td><td>' + (data.p90||'\\u2014') + '</td><td>' + data.p99 + '</td><td>' + (data.p999||'\\u2014') + '</td><td>' + (data.max||'\\u2014') + '</td><td>' + (data.loss !== undefined ? data.loss+'%' : '\\u2014') + '</td></tr>';
-    }}
-    html += '</table>';
+    let html = '<h4>' + node.ec2_name + ' \\u2192 peers</h4>' + buildPeerTable(i, false);
+    html += '<div class="direction" style="margin-top:6px">\\u2190 Inbound (peers \\u2192 this node):</div>' + buildPeerTable(i, true);
     tooltip.innerHTML = html;
     tooltip.classList.add('visible');
   }});
@@ -1060,6 +1240,12 @@ fleet.nodes.forEach((node, i) => {{
   el.addEventListener('mouseleave', () => {{
     tooltip.classList.remove('visible');
     edgeElements.forEach(({{line}}) => {{ line.classList.remove('highlighted', 'dimmed'); }});
+    updateEdgeLabels(null);
+  }});
+
+  el.addEventListener('click', () => {{
+    if (pinnedNodes.has(i)) pinnedNodes.delete(i); else pinnedNodes.add(i);
+    updateEdgeLabels(i);
   }});
 }});
 
@@ -1094,16 +1280,19 @@ fleet.nodes.forEach((node, i) => {{
   const container = document.getElementById('container');
   const el = document.createElement('div');
   el.className = 'vis-legend';
-  el.innerHTML = '<h3>Visual Encoding</h3>'
-    + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#238636,#f09a3e,#da3633)"></div><span>Edge color = p50 RTT (' + minP50 + '\\u03bcs \\u2192 ' + maxP50 + '\\u03bcs)</span></div>'
-    + '<div class="row"><div class="swatch" style="background:#8b949e;height:2px"></div><span>Edge width \\u221d p99 (' + minP99 + '\\u2013' + maxP99 + '\\u03bcs)</span></div>'
+  el.innerHTML = '<h3>Legend</h3>'
+    + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#2dd4bf,#fbbf24,#fb7185)"></div><span>Edge color = jitter \\u03c3 (' + fmtLat(minSigma) + ' \\u2192 ' + fmtLat(maxSigma) + ')</span></div>'
     + '<div class="row"><span>Node size = f(BW, PPS, ENIs, Nitro, CPU, Mem, metal)</span></div>'
-    + '<div class="row"><span>Distance \\u221d latency (SMACOF stress: ' + (stress*100).toFixed(1) + '%)</span></div>'
+    + '<div class="row"><span>Distance \\u221d p50 latency (SMACOF stress: ' + (stress*100).toFixed(1) + '%)</span></div>'
+    + '<div class="row"><span style="color:#79c0ff;font-weight:700">Public IP</span><span style="color:#8b949e">&nbsp;/&nbsp;</span><span style="color:#8b949e">Private IP</span><span>&nbsp;\\u2014 shown on each node</span></div>'
     + '<div class="contour-samples">'
-    + '<span style="border:1.5px dashed rgba(240,136,62,0.4);color:#f0883e">CPG</span>'
     + '<span style="border:1.5px dashed rgba(57,211,83,0.3);color:#39d353">VPC</span>'
     + '<span style="border:1.5px dashed rgba(163,113,247,0.3);color:#a371f7">AZ</span>'
-    + '<span style="border:1.5px dashed rgba(88,166,255,0.3);color:#58a6ff">Region</span></div>';
+    + '<span style="border:1.5px dashed rgba(88,166,255,0.3);color:#58a6ff">Region</span>'
+    + '<span style="border:1.5px solid rgba(248,81,73,0.5);color:#f85149">Account</span></div>'
+    + '<div class="ux-hint"><b>Hover</b> a node \\u2014 reveal its edge latencies &amp; highlight. '
+    + '<b>Click</b> a node \\u2014 pin/unpin those labels (click again to clear). '
+    + '<b>Drag</b> a panel\\u2019s title to move it; <b>click</b> the title to fold.</div>';
   container.appendChild(el);
 }})();
 
@@ -1116,24 +1305,64 @@ const medP99 = allP99.length ? [...allP99].sort((a,b)=>a-b)[Math.floor(allP99.le
 const uniqueRegions = [...new Set(fleet.nodes.map(n => n.region))].filter(v => v !== 'unknown');
 const uniqueAZs = [...new Set(fleet.nodes.map(n => n.az))].filter(v => v !== 'unknown');
 const uniqueCPGs = [...new Set(fleet.nodes.map(n => n.cpg_name))].filter(v => v !== 'unknown');
+const uniqueAccounts = [...new Set(fleet.nodes.map(n => n.account))].filter(v => v !== 'unknown');
 
 let scopeHtml = '';
-if (uniqueCPGs.length === 1) scopeHtml += '<div class="stat"><span>CPG</span><span class="val">' + uniqueCPGs[0] + '</span></div>';
-else if (uniqueCPGs.length > 1) scopeHtml += '<div class="stat"><span>CPGs</span><span class="val">' + uniqueCPGs.length + ' groups</span></div>';
+if (uniqueCPGs.length === 1) scopeHtml += '<div class="stat"><span>Placement Group</span><span class="val">' + uniqueCPGs[0] + '</span></div>';
+else if (uniqueCPGs.length > 1) scopeHtml += '<div class="stat"><span>Placement Groups</span><span class="val">' + uniqueCPGs.length + '</span></div>';
 if (uniqueAZs.length === 1) scopeHtml += '<div class="stat"><span>AZ</span><span class="val">' + uniqueAZs[0] + '</span></div>';
 else if (uniqueAZs.length > 1) scopeHtml += '<div class="stat"><span>AZs</span><span class="val">' + uniqueAZs.join(', ') + '</span></div>';
 if (uniqueRegions.length === 1) scopeHtml += '<div class="stat"><span>Region</span><span class="val">' + uniqueRegions[0] + '</span></div>';
 else if (uniqueRegions.length > 1) scopeHtml += '<div class="stat"><span>Regions</span><span class="val">' + uniqueRegions.join(', ') + '</span></div>';
+if (uniqueAccounts.length === 1) scopeHtml += '<div class="stat"><span>Account</span><span class="val">' + uniqueAccounts[0] + '</span></div>';
+else if (uniqueAccounts.length > 1) scopeHtml += '<div class="stat"><span>Accounts</span><span class="val">' + uniqueAccounts.length + '</span></div>';
 
-statsEl.innerHTML = '<h3>Topology Summary</h3>'
+statsEl.innerHTML = '<h3>Summary</h3>'
   + '<div class="stat"><span>Nodes</span><span class="val">' + N + '</span></div>'
   + '<div class="stat"><span>Pairs</span><span class="val">' + allP50.length + '</span></div>'
-  + '<div class="stat"><span>p50 range</span><span class="val">' + minP50 + '\\u2013' + maxP50 + ' \\u03bcs</span></div>'
-  + '<div class="stat"><span>p99 range</span><span class="val">' + minP99 + '\\u2013' + maxP99 + ' \\u03bcs</span></div>'
-  + '<div class="stat"><span>Median p50</span><span class="val">' + medP50 + ' \\u03bcs</span></div>'
-  + '<div class="stat"><span>Spread</span><span class="val">' + (maxP50-minP50) + ' \\u03bcs</span></div>'
+  + '<div class="stat"><span>p50 range</span><span class="val">' + fmtLat(minP50) + '\\u2013' + fmtLat(maxP50) + '</span></div>'
+  + '<div class="stat"><span>p99 range</span><span class="val">' + fmtLat(minP99) + '\\u2013' + fmtLat(maxP99) + '</span></div>'
+  + '<div class="stat"><span>Jitter \\u03c3</span><span class="val">' + fmtLat(minSigma) + '\\u2013' + fmtLat(maxSigma) + '</span></div>'
+  + '<div class="stat"><span>Median p50</span><span class="val">' + fmtLat(medP50) + '</span></div>'
+  + '<div class="stat"><span>Spread</span><span class="val">' + fmtLat(maxP50-minP50) + '</span></div>'
   + '<div style="margin-top:8px;border-top:1px solid #30363d;padding-top:6px">' + scopeHtml + '</div>'
   + '<div class="stress">Layout fidelity (SMACOF): <span class="val">' + (100 - stress*100).toFixed(1) + '%</span> \\u2014 stress ' + (stress*100).toFixed(1) + '%</div>';
+
+// ─── Foldable + draggable panels ─────────────────────────────────────────────
+function enhancePanel(el) {{
+  const h = el.querySelector('h3');
+  if (!h) return;
+  const body = document.createElement('div');
+  body.className = 'panel-body';
+  while (h.nextSibling) body.appendChild(h.nextSibling);
+  el.appendChild(body);
+  const caret = document.createElement('span');
+  caret.className = 'panel-caret';
+  caret.textContent = '\\u25be';
+  h.insertBefore(caret, h.firstChild);
+  let collapsed = false, dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
+  h.addEventListener('mousedown', (e) => {{
+    dragging = true; moved = false; sx = e.clientX; sy = e.clientY;
+    const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
+    el.style.right = 'auto'; el.style.bottom = 'auto';
+    el.style.left = ox + 'px'; el.style.top = oy + 'px';
+    e.preventDefault();
+  }});
+  window.addEventListener('mousemove', (e) => {{
+    if (!dragging) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    el.style.left = (ox + dx) + 'px'; el.style.top = (oy + dy) + 'px';
+  }});
+  window.addEventListener('mouseup', () => {{ dragging = false; }});
+  h.addEventListener('click', () => {{
+    if (moved) {{ moved = false; return; }}
+    collapsed = !collapsed;
+    body.style.display = collapsed ? 'none' : '';
+    caret.textContent = collapsed ? '\\u25b8' : '\\u25be';
+  }});
+}}
+document.querySelectorAll('.stats, .vis-legend, .instance-legend').forEach(enhancePanel);
 </script>
 </body></html>"""
 
