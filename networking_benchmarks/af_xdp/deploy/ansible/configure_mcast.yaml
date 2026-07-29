@@ -5,11 +5,15 @@
 # which already contains: build deps, xdp-tools, benchmark binaries, PTP/chrony
 # config, sysctl tuning, and systemd units.
 #
-# This playbook only handles runtime-specific configuration that depends on
-# instance IPs, roles, and topology:
-#   1. source      — GRE tunnel to replicator
-#   2. replicator  — replicator systemd service
-#   3. destination — multicast group registration
+# This playbook is self-contained: it adapts the ucast-baked nodes for their
+# mcast roles AND wires the topology. The baked AMI runs replicator.service on
+# every node (ucast mode) which holds AF_XDP queue 0, so mcast_send/mcast_receive
+# would fail "Device or resource busy" — this playbook stops+disables it on the
+# source and destination (pure sender/receiver) as the first step of each play:
+#   source      — stop replicator (free AF_XDP queue) + GRE tunnel to replicator
+#   replicator  — replicator systemd service in mcast mode
+#   destination — stop replicator + multicast group registration + ARP seed
+#   verify      — best-effort datapath probe (udp_send over GRE)
 #
 # Required variable (pass via --extra-vars or inventory host_vars):
 #   replicator_private_ip — private IP of the replicator (GRE tunnel + control channel)
@@ -19,9 +23,7 @@
 #   base_mcast_group  (default: 224.0.31.50)
 #   data_port         (default: 5000)
 #
-# Usage (run prepare_mcast_nodes.yaml first to free the AF_XDP queue on
-# source/destination — the ucast-baked replicator.service otherwise holds it):
-#   ansible-playbook -i inventory.aws_ec2.yml prepare_mcast_nodes.yaml
+# Usage:
 #   ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml \
 #       --extra-vars "replicator_private_ip=10.61.0.5"
 
@@ -39,6 +41,20 @@
           - replicator_private_ip is defined
           - replicator_private_ip | length > 0
         fail_msg: "replicator_private_ip must be provided via --extra-vars"
+
+    - name: Free the AF_XDP queue — stop + disable replicator (source is a pure mcast sender)
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Detach any stale XDP program from the primary NIC
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set dev "$IFACE" xdp off 2>/dev/null || true
+        ip link set dev "$IFACE" xdpgeneric off 2>/dev/null || true
+      changed_when: false
 
     - name: Check if GRE tunnel already exists
       ansible.builtin.shell: ip tunnel show gre_feed
@@ -115,6 +131,20 @@
     - name: Skip when replicator_private_ip is not defined
       ansible.builtin.meta: end_play
       when: replicator_private_ip is not defined
+
+    - name: Free the AF_XDP queue — stop + disable replicator (destination uses mcast_receive)
+      ansible.builtin.systemd:
+        name: replicator.service
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Detach any stale XDP program from the primary NIC
+      ansible.builtin.shell: |
+        IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
+        ip link set dev "$IFACE" xdp off 2>/dev/null || true
+        ip link set dev "$IFACE" xdpgeneric off 2>/dev/null || true
+      changed_when: false
 
     - name: Compute per-destination multicast group
       ansible.builtin.set_fact:

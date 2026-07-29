@@ -64,8 +64,7 @@ After provisioning, binaries are installed to `/opt/af-xdp/` and the `replicator
 
 | File | Purpose | When to use |
 |------|---------|-------------|
-| `prepare_mcast_nodes.yaml` | Adapt ucast-baked nodes for mcast roles | Before configure_mcast — stops/disables replicator on source+destination to free the AF_XDP queue |
-| `configure_mcast.yaml` | Multicast runtime config | After prepare_mcast_nodes — GRE tunnel, replicator mcast mode, registration, ARP seed, datapath probe |
+| `configure_mcast.yaml` | Multicast setup (self-contained) | Adapts source/dest nodes (stops replicator to free the AF_XDP queue) + GRE tunnel, replicator mcast mode, registration, ARP seed, datapath probe |
 | `run_ucast.yaml` | Run unicast NxN RTT benchmark | After provisioning — measures every pair |
 | `run_mcast.yaml` | Run multicast fan-out benchmark | After configure_mcast — source→replicator→destinations |
 | `run_ucast.yaml` | Run NxN unicast RTT benchmark + generate report | Serial measurement, then local HTML/JSON report |
@@ -102,14 +101,14 @@ ssh ec2-user@<nodeA> '/opt/af-xdp/rtt <nodeB_ip> 5000 <nodeA_ip> 19020 1000 1000
 
 ### Multicast
 
-Full run order (the baked AMI is ucast-tailored, so nodes are adapted first):
+`configure_mcast.yaml` is self-contained — it adapts the ucast-baked source/dest
+nodes (stops the replicator to free the AF_XDP queue) as the first step of each
+play, then wires the topology:
 
 ```bash
-# 1. Free the AF_XDP queue on source/destination (stop the ucast replicator)
-ansible-playbook -i inventory.aws_ec2.yml prepare_mcast_nodes.yaml
-# 2. GRE tunnel + replicator mcast mode + destination registration + ARP seed
+# 1. Adapt nodes + GRE tunnel + replicator mcast mode + registration + ARP seed
 ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml -e replicator_private_ip=10.0.1.20
-# 3. Fan-out latency benchmark (source → replicator → destinations)
+# 2. Fan-out latency benchmark (source → replicator → destinations)
 ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml -e replicator_private_ip=10.0.1.20
 ```
 
@@ -123,9 +122,9 @@ ansible-playbook -i inventory.aws_ec2.yml provision.yaml -e rebuild=true
 
 | Play | Hosts | What it does |
 |------|-------|--------------|
-| 1 | `source` | Creates GRE tunnel to replicator + NM dispatcher persistence |
+| 1 | `source` | Stops+disables replicator (frees AF_XDP queue) + detaches stale XDP + creates GRE tunnel + NM dispatcher persistence |
 | 2 | `replicator` | Writes `/etc/default/replicator` (mcast mode) + restarts service |
-| 3 | `destination` | Registers each destination (CTRL_MCAST_JOIN) + seeds ARP toward the replicator so fan-out frames get a real dst MAC |
+| 3 | `destination` | Stops+disables replicator + detaches stale XDP + registers (CTRL_MCAST_JOIN) + seeds ARP toward the replicator so fan-out frames get a real dst MAC |
 | 4 | `replicator` | Best-effort datapath probe: `udp_send` over GRE, checks the XDP redirect counter moved (non-fatal) |
 
 ### Variables
