@@ -24,7 +24,8 @@
   tasks:
     - name: Compute results_dir (once)
       ansible.builtin.set_fact:
-        results_dir: "{{ playbook_dir }}/../../results/{{ ansible_date_time.iso8601_basic_short }}"
+        # Mirror run_ucast's naming (results/<date>/<hh-mm-ss>), suffixed -mcast.
+        results_dir: "{{ playbook_dir }}/../../results/{{ ansible_date_time.date }}/{{ ansible_date_time.hour }}-{{ ansible_date_time.minute }}-{{ ansible_date_time.second }}-mcast"
     - name: Create results directory
       ansible.builtin.file:
         path: "{{ results_dir }}"
@@ -41,7 +42,7 @@
     data_port: "5000"
     mcast_group: "224.0.31.50"
     timeout_sec: "60"
-    max_clock_offset_us: 2
+    max_clock_offset_us: 10
     allow_unsynced: false
     results_dir: "{{ hostvars['localhost'].results_dir }}"
 

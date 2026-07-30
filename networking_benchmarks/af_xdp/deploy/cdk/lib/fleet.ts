@@ -202,7 +202,7 @@ export class FleetStack extends cdk.Stack {
     sg.addIngressRule(sg, Port.allTraffic(), 'All intra-group traffic');
     if (props.peerVpcCidr) {
       sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.udp(dataPort), 'UDP data from peer region');
-      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.tcp(CONTROL_PORT), 'Control from peer region');
+      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.udp(CONTROL_PORT), 'UDP control from peer region');
     }
     this.sg = sg;
 

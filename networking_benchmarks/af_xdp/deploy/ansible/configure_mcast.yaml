@@ -40,30 +40,40 @@
   become: yes
   gather_facts: no
   vars:
-    max_clock_offset_us: 2      # same-AZ hops are ~15us; keep clock error well under signal
+    max_clock_offset_us: 10     # AWS Time Sync NTP inter-instance is ~us (not sub-us like a local PHC)
     clock_gate_retries: 20      # x delay(3s) = ~60s budget
     allow_unsynced: false       # -e allow_unsynced=true to bypass (e.g. cross-region ms runs)
   tasks:
-    - name: Assert ENA PHC + chronyd are present
+    # ROOT-CAUSE FIX: the ENA PHC refclock disciplines each node to its OWN
+    # hardware PHC, and two instances' PHCs disagree by ~100-200us — which
+    # dominates one-way latency (the per-node offset looks sub-us but INTER-node
+    # is ~200us). AWS Time Sync NTP (169.254.169.123, xleave) disciplines every
+    # node to the SAME reference, giving <10us inter-instance (this is what
+    # mcast2ucast relies on). Prefer it over the PHC. Deterministic + idempotent.
+    - name: Prefer AWS Time Sync NTP over the local PHC refclock
       ansible.builtin.shell: |
-        test -e /dev/ptp0
-        test "$(cat /sys/module/ena/parameters/phc_enable 2>/dev/null)" = "1"
+        set -e
         systemctl is-active --quiet chronyd
+        if [ -f /etc/chrony.d/aws-phc.conf ]; then
+          mv /etc/chrony.d/aws-phc.conf /etc/chrony.d/aws-phc.conf.disabled
+          systemctl restart chronyd
+          sleep 2
+        fi
       changed_when: false
 
-    - name: Force chrony to step to the PHC (deterministic convergence)
+    - name: Force chrony to step + burst to AWS Time Sync (deterministic convergence)
       ansible.builtin.shell: |
         chronyc -a makestep >/dev/null 2>&1 || true
         chronyc -a 'burst 4/4' >/dev/null 2>&1 || true
       changed_when: false
 
-    - name: Gate — wait until |last offset| <= {{ max_clock_offset_us }}us and reference is PHC
+    - name: Gate — wait until synchronised and |last offset| <= {{ max_clock_offset_us }}us
       ansible.builtin.shell: |
         t=$(chronyc tracking 2>/dev/null)
-        ref=$(printf '%s\n' "$t" | awk -F': *' '/Reference ID/{print $2}')
+        leap=$(printf '%s\n' "$t" | awk -F': *' '/Leap status/{print $2}')
         last=$(printf '%s\n' "$t" | awk -F': *' '/Last offset/{print $2}' | awk '{print $1}')
-        awk -v l="$last" -v ref="$ref" 'BEGIN{
-          if (ref !~ /PHC/) exit 2;                 # not disciplined by the PHC yet
+        awk -v l="$last" -v leap="$leap" 'BEGIN{
+          if (leap !~ /Normal/) exit 2;             # chrony not synchronised yet
           a = (l < 0) ? -l : l;
           exit (a*1e6 <= {{ max_clock_offset_us }}) ? 0 : 1
         }'
