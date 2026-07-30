@@ -62,8 +62,8 @@ order, guarded by `group_mutex_`:
 - `stats` — per-action counters.
 
 **Lock-free timing slots** (`rtt.cpp`) — a preallocated array indexed by
-sequence id, each `{ uint64_t send_tsc; int64_t send_monotonic_ns; }`. No hash
-map, no mutex on the hot path.
+sequence id, each holding the send timestamp(s), intended-send time, and RX
+timestamp for one probe. No hash map, no mutex on the hot path.
 
 ---
 
@@ -85,12 +85,14 @@ Topology: every node runs `replicator` (AF_XDP) and, to measure a peer, runs the
    `XDP_PASS` (normal kernel path, e.g. SSH).
 4. **Replicator RX/echo:** a per-queue `packet_processor_thread_` busy-polls the
    RX ring, reads the frame in-place from the UMEM, and for the echo/probe case
-   swaps src/dst and transmits from the TX ring (zero-copy) — or fans out to all
-   registered `Destination`s (rewriting dst IP/MAC/port and UDP/IP checksums).
+   swaps src/dst and transmits from the TX ring (zero-copy, `sendSinglePacketDirect`) — or
+   fans out to all registered `Destination`s (rewriting dst IP/MAC/port and UDP/IP checksums).
+   The AF_XDP zero-copy TX ring is the primary forward path; a kernel `sendto` fallback is used
+   only when a destination MAC is unresolved (ARP) or the direct AF_XDP send fails.
 5. **`rtt` client:** registers itself as a destination over the control channel
-   so the replicator returns packets to it, calibrates the TSC, then sends
-   `N` sequenced probes (plus warmup), timestamping each, and records RX
-   timestamps of the echoes. See *latency measurement* below.
+   so the replicator returns packets to it, then sends `N` sequenced probes (plus
+   warmup), timestamping each, and records RX timestamps of the echoes. See
+   *latency measurement* below.
 6. **Control channel:** a `control_thread_` serves the binary UDP protocol
    (`AFXDP_CONTROL_PORT`, default 12345) for add/remove/list/mcast-join.
 
@@ -141,29 +143,37 @@ Two send backends, selected by `rtt --xdp-tx`:
 
 ## How latency is measured
 
-**TX timestamp — `CLOCK_REALTIME` (a TSC is also captured but unused in the RTT).**
-On the send hot path the tool reads `clock_gettime(CLOCK_REALTIME)` immediately
-before `sendto()` — this is the value differenced in the RTT. An invariant `rdtsc()`
-is also read and calibrated against `CLOCK_MONOTONIC` at startup (`ns_per_tick`,
-reported as `tsc_ns_per_tick` and `timestamp_tx:"tsc"`), but it is **not** the value
-used in the reported RTT — it is retained only for optional TSC-only analysis. ENA
-provides **no TX hardware timestamp**.
+**TX timestamp — `CLOCK_REALTIME`.** On the send hot path the tool reads
+`clock_gettime(CLOCK_REALTIME)` immediately before the send (kernel `sendto`, or the
+AF_XDP TX frame build with `--xdp-tx`). This is the value differenced in the RTT and it
+matches the kernel-SW RX domain. ENA provides **no TX hardware timestamp**, and no TSC
+is used.
 
-**RX timestamp — kernel software, stamped early.** Auto-detected at startup:
+**RX timestamp — kernel software, stamped early.**
 1. **Kernel software** (`SO_TIMESTAMPING` + `SOF_TIMESTAMPING_RX_SOFTWARE`) —
-   `CLOCK_REALTIME` (`skb->tstamp = ktime_get_real`), recorded in the **NAPI receive
-   path** (`netif_receive_skb` / `net_timestamp_check`) as the driver hands the packet
-   to the stack, **before the socket receive-queue enqueue**, so it excludes
-   socket-queue + scheduler/wakeup jitter. This is the mode used on ENA.
-2. **Userspace fallback** — `clock_gettime` after `recvmsg` if no cmsg timestamp.
+   `CLOCK_REALTIME` (`skb->tstamp = ktime_get_real`), recorded by the stack in the
+   **NAPI receive path** (`netif_receive_skb` / `net_timestamp_check`) right after the
+   ENA driver pulls the frame off the RX ring and builds the skb, **before the socket
+   receive-queue enqueue**, so it excludes socket-queue + scheduler/wakeup jitter. This
+   is the default on ENA.
+2. **Userspace fallback** — `clock_gettime(CLOCK_REALTIME)` after `recvmsg` if no cmsg.
 
-Hardware PHC RX timestamps are **not** used for RTT — they live in a separate
+Hardware PHC RX timestamps are **not** used for the RTT — they live in a separate
 wall-clock epoch; PHC is only for the one-way multicast path below.
 
-**RTT computation.** Each echo carries its sequence id → index into the lock-free
-slot array → retrieve the send timestamp. RTT = RX timestamp − TX timestamp, both in
-the **`CLOCK_REALTIME`** domain. Because unicast RTT is round-trip on one host,
-**no clock synchronization is required**.
+**`--xdp-rx` (optional).** The RX time is instead stamped at the **XDP ingress hook**
+by the ucast XDP program via `bpf_ktime_get_ns()` (`CLOCK_MONOTONIC`), written into the
+echo payload; the client reads it and stamps TX with `CLOCK_MONOTONIC` to match. **This is
+not an AF_XDP RX datapath** — the echo still traverses the full kernel stack to the UDP
+socket (`recvmsg`); only the timestamp *source* moves to the XDP hook. (Contrast
+`mcast_receive`, which uses a true AF_XDP RX and reads `rx_ns` at XSK dequeue.) On ENA it
+measured no lower than kernel-SW — that stamp is already near-wire and the datapath is
+unchanged — so it is off by default.
+
+**RTT computation.** Each echo carries its sequence id → index into the lock-free slot
+array → retrieve the send timestamp. RTT = RX − TX, both in a single clock domain
+(`CLOCK_REALTIME` by default, `CLOCK_MONOTONIC` under `--xdp-rx`). Because unicast RTT is
+round-trip on one host, **no clock synchronization is required**.
 
 **Aggregation.** A configurable **warmup** count is discarded (cache/JIT/ARP
 warm-up), then min/mean/p50/p90/p95/p99/p99.9/max are computed and written as
@@ -202,7 +212,7 @@ UTC clock** (`CLOCK_REALTIME`, aligned to UTC to ~µs via the Nitro PHC + chrony
 When no replicator timestamps are present it falls back to a single-hop (total-only) view.
 
 **Why payload-carried, not the unicast slot array:** the receiver is a *different
-host*, so a host-local TSC value would be meaningless there — the stamp must
+host*, so a host-local clock value would be meaningless there — the stamp must
 accompany the packet and be compared against a UTC-aligned clock on both ends.
 
 **Accuracy & clock-skew guard:** one-way accuracy is bounded by each host's PHC
@@ -237,9 +247,8 @@ unicast round-trip (single-host `CLOCK_REALTIME`) path.
 
 ## Accuracy
 
-- **Resolution:** bounded by `clock_gettime(CLOCK_REALTIME)` on TX (tens of ns) and
-  the kernel software RX timestamp (~µs); the calibrated TSC is sub-ns but is not
-  differenced in the reported RTT.
+- **Resolution:** bounded by `clock_gettime` on TX (tens of ns) and the kernel software
+  RX timestamp (~µs, stamped in the NAPI path). No TSC or PHC is used in the RTT.
 - **Unicast:** round-trip on a single host's clock → no sync error. RX stamped in the
   NAPI `netif_receive_skb` path (before the socket queue) removes queueing/scheduling
   jitter from the RX leg. Measured intra-cluster p50 ≈ 24–30 µs; loss driven to 0
@@ -274,7 +283,8 @@ unicast round-trip (single-host `CLOCK_REALTIME`) path.
 - **Nitro PHC** (`/dev/ptp0`, enabled via the `ena` module + `modprobe.d`) feeds
   chrony as a refclock for the one-way multicast clock sync; also the source of
   RX hardware timestamps.
-- **No TX hardware timestamp on ENA** → TSC is used for the TX clock.
+- **No TX hardware timestamp on ENA** → the TX clock is `CLOCK_REALTIME`
+  (`clock_gettime` before the send); no TSC.
 - **No native L2 multicast on ENA** → multicast is tunneled over **GRE** and
   intercepted by `mcast.o` before `ip_gre` decap (preserving zero-copy).
 - **Zero-copy AF_XDP is supported on ENA** in DRV mode (Nitro v4/v5).
