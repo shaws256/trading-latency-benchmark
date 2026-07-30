@@ -178,6 +178,11 @@ def parse_result_json(filepath: Path) -> Optional[dict]:
         svc = raw.get("service_rtt_us", {})
         if not svc:
             return None
+        # Multicast per-pair JSON also carries the two-hop split (source->replicator,
+        # replicator->dest); ucast results omit these (left as None). Surfacing them
+        # is the whole point of the mcast measurement, so thread them through.
+        hop1 = raw.get("hop1_us") or {}
+        hop2 = raw.get("hop2_us") or {}
         return {
             "min_us": svc.get("min", 0),
             "p50_us": svc.get("p50", 0),
@@ -187,6 +192,10 @@ def parse_result_json(filepath: Path) -> Optional[dict]:
             "p999_us": svc.get("p999", 0),
             "max_us": svc.get("max", 0),
             "mean_us": svc.get("mean", 0),
+            "hop1_p50_us": hop1.get("p50"),
+            "hop1_p99_us": hop1.get("p99"),
+            "hop2_p50_us": hop2.get("p50"),
+            "hop2_p99_us": hop2.get("p99"),
             "messages": raw.get("messages", 0),
             "lost": raw.get("lost", 0),
             "loss_pct": raw.get("loss_pct", 0.0),
@@ -454,6 +463,10 @@ def generate_html_report(node_names: List[str], matrix: dict, fleet: dict,
                                    f"p99.9={fmt_lat(data.get('p999_us',0))}  "
                                    f"max={fmt_lat(data.get('max_us',0))}  "
                                    f"loss={data.get('loss_pct',0):.2f}%")
+                        # Multicast: append the two-hop split when present.
+                        if data.get("hop1_p50_us") is not None or data.get("hop2_p50_us") is not None:
+                            tooltip += (f"\\nhop1(src→repl) p50={fmt_lat(data.get('hop1_p50_us') or 0)}  "
+                                        f"hop2(repl→dst) p50={fmt_lat(data.get('hop2_p50_us') or 0)}")
                         cells += (f"<td style='background:{color}' title='{tooltip}'>"
                                   f"<strong>{fmt_lat(val)}</strong></td>")
                     else:
@@ -596,14 +609,20 @@ def _build_topology_fleet_json(node_names: List[str], matrix: dict, fleet: dict)
             else:
                 data = matrix.get((src, dst))
                 if data:
-                    row.append({
+                    cell = {
                         "p50": data.get("p50_us", 0),
                         "p90": data.get("p90_us", 0),
                         "p99": data.get("p99_us", 0),
                         "p999": data.get("p999_us", 0),
                         "max": data.get("max_us", 0),
                         "loss": data.get("loss_pct", 0),
-                    })
+                    }
+                    # Multicast two-hop split (source->replicator, replicator->dest);
+                    # present only for mcast results. Lets the viewer show per-hop cost.
+                    if data.get("hop1_p50_us") is not None or data.get("hop2_p50_us") is not None:
+                        cell["hop1"] = {"p50": data.get("hop1_p50_us"), "p99": data.get("hop1_p99_us")}
+                        cell["hop2"] = {"p50": data.get("hop2_p50_us"), "p99": data.get("hop2_p99_us")}
+                    row.append(cell)
                 else:
                     row.append(None)
         js_matrix.append(row)
