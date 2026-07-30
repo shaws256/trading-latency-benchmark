@@ -781,6 +781,11 @@ svg.edges {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; poi
   text-align: center; border: 2.5px solid rgba(255,255,255,0.25);
   box-shadow: 0 4px 24px rgba(0,0,0,0.6); cursor: pointer;
 }}
+.node.selected {{ box-shadow: 0 0 0 3px rgba(255,215,0,0.85), 0 0 22px 6px rgba(255,215,0,0.55); z-index: 30; }}
+.deselect-btn {{ position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 1100;
+  display: none; background: rgba(240,136,62,0.16); color: #f0883e; border: 1px solid #f0883e;
+  border-radius: 6px; padding: 7px 15px; font-size: 13px; font-weight: 600; cursor: pointer; backdrop-filter: blur(8px); }}
+.deselect-btn:hover {{ background: rgba(240,136,62,0.3); }}
 .node .instance-type {{ font-size: 11px; font-weight: 700; color: #fff; white-space: nowrap; }}
 .node .ec2-name {{ font-size: 9px; color: #79c0ff; white-space: nowrap; margin-top: 1px; }}
 .node .ip {{ font-size: 9px; color: #b1bac4; font-family: 'SF Mono', monospace; }}
@@ -898,6 +903,7 @@ svg.edges line.peering-hit {{ stroke: transparent; stroke-width: 18; pointer-eve
 </style>
 </head><body>
 <div class="container" id="container">
+  <button class="deselect-btn" id="deselect">Deselect all</button>
   <svg class="edges" id="edges"></svg>
   <div class="stats" id="stats"></div>
 </div>
@@ -1158,12 +1164,30 @@ const edgeLabelEls = [];
 
 // Edge-label visibility: shown only for the hovered node's edges, plus any
 // nodes the user has pinned by clicking. Clicking a pinned node un-pins it.
-const pinnedNodes = new Set();
-function updateEdgeLabels(hover) {{
-  for (const it of edgeLabelEls) {{
-    const show = pinnedNodes.has(it.i) || pinnedNodes.has(it.j) || it.i === hover || it.j === hover;
-    it.el.style.display = show ? '' : 'none';
-  }}
+const selected = new Set();
+const nodeEls = [];
+function neighborsOf(set) {{
+  const nb = new Set();
+  set.forEach(i => {{ nb.add(i); for (let j = 0; j < N; j++) if (j !== i && ((fleet.matrix[i] && fleet.matrix[i][j]) || (fleet.matrix[j] && fleet.matrix[j][i]))) nb.add(j); }});
+  return nb;
+}}
+function applySel(hover) {{
+  const hasSel = selected.size > 0;
+  const vis = hasSel ? neighborsOf(selected) : null;   // this node + 1-hop nodes
+  nodeEls.forEach((el, i) => {{
+    if (!el) return;
+    el.style.display = (!hasSel || vis.has(i)) ? '' : 'none';
+    el.classList.toggle('selected', selected.has(i));
+  }});
+  edgeElements.forEach(({{line, i, j}}) => {{
+    const touchSel = hasSel && (selected.has(i) || selected.has(j));
+    const touchHover = hover !== -1 && (i === hover || j === hover);
+    line.classList.remove('highlighted', 'dimmed');
+    if (hasSel) line.classList.add(touchSel ? 'highlighted' : 'dimmed');
+    else if (hover !== -1) line.classList.add(touchHover ? 'highlighted' : 'dimmed');
+  }});
+  for (const it of edgeLabelEls) it.el.style.display = ((selected.has(it.i) || selected.has(it.j)) || (hover !== -1 && (it.i === hover || it.j === hover))) ? '' : 'none';
+  const db = document.getElementById('deselect'); if (db) db.style.display = hasSel ? 'inline-block' : 'none';
 }}
 
 // ─── Render nodes + hover tooltips ───────────────────────────────────────────
@@ -1215,17 +1239,14 @@ fleet.nodes.forEach((node, i) => {{
     + '<span class="ip ip-private">' + node.private_ip + '</span>'
     + ((node.cpg_name && node.cpg_name !== 'unknown') ? '<span class="pg-badge" title="Placement group">' + node.cpg_name + '</span>' : '');
   container.appendChild(el);
+  nodeEls[i] = el;
 
   el.addEventListener('mouseenter', (e) => {{
-    updateEdgeLabels(i);
-    edgeElements.forEach(({{line, i: ei, j: ej}}) => {{
-      if (ei === i || ej === i) {{ line.classList.add('highlighted'); line.classList.remove('dimmed'); }}
-      else {{ line.classList.add('dimmed'); line.classList.remove('highlighted'); }}
-    }});
     let html = '<h4>' + node.ec2_name + ' \\u2192 peers</h4>' + buildPeerTable(i, false);
     html += '<div class="direction" style="margin-top:6px">\\u2190 Inbound (peers \\u2192 this node):</div>' + buildPeerTable(i, true);
     tooltip.innerHTML = html;
     tooltip.classList.add('visible');
+    if (selected.size === 0) applySel(i);
   }});
 
   el.addEventListener('mousemove', (e) => {{
@@ -1239,13 +1260,12 @@ fleet.nodes.forEach((node, i) => {{
 
   el.addEventListener('mouseleave', () => {{
     tooltip.classList.remove('visible');
-    edgeElements.forEach(({{line}}) => {{ line.classList.remove('highlighted', 'dimmed'); }});
-    updateEdgeLabels(null);
+    if (selected.size === 0) applySel(-1);
   }});
 
   el.addEventListener('click', () => {{
-    if (pinnedNodes.has(i)) pinnedNodes.delete(i); else pinnedNodes.add(i);
-    updateEdgeLabels(i);
+    if (selected.has(i)) selected.delete(i); else selected.add(i);   // toggle 1-hop cluster
+    applySel(-1);
   }});
 }});
 
@@ -1363,6 +1383,8 @@ function enhancePanel(el) {{
   }});
 }}
 document.querySelectorAll('.stats, .vis-legend, .instance-legend').forEach(enhancePanel);
+document.getElementById('deselect').addEventListener('click', () => {{ selected.clear(); applySel(-1); }});
+applySel(-1);
 </script>
 </body></html>"""
 

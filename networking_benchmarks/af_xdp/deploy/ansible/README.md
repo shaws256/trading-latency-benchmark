@@ -65,11 +65,10 @@ After provisioning, binaries are installed to `/opt/af-xdp/` and the `replicator
 | File | Purpose | When to use |
 |------|---------|-------------|
 | `configure_mcast.yaml` | Multicast setup (self-contained) | Adapts source/dest nodes (stops replicator to free the AF_XDP queue) + GRE tunnel, replicator mcast mode, registration, ARP seed, datapath probe |
-| `run_ucast.yaml` | Run unicast NxN RTT benchmark | After provisioning — measures every pair |
+| `run_ucast.yaml` | Run unicast NxN RTT benchmark + generate report | After provisioning — serial pairwise measurement, then local HTML/JSON report |
 | `run_mcast.yaml` | Run multicast fan-out benchmark | After configure_mcast — source→replicator→destinations |
-| `run_ucast.yaml` | Run NxN unicast RTT benchmark + generate report | Serial measurement, then local HTML/JSON report |
 | `inventory.aws_ec2.yml` | Dynamic EC2 inventory by Role tag | With CDK-deployed or manually-tagged instances |
-| `report/` | Python report generator + templates | Called by run_ucast.yaml (Play 4) |
+| `report/` | Python report generators | `generate_matrix_report.py` — heatmap + interactive **2D** topology map (called by `run_ucast.yaml` Play 4); `generate_topology_3d.py` — interactive **3D** topology (three.js, run manually on a results dir) |
 | **`../../dev/ansible/`** (moved) | | |
 | `provision.yaml` | Full install from scratch | Stock AL2023 — self-hosted or CDK without baked AMI |
 
