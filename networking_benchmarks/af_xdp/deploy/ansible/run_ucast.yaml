@@ -107,6 +107,10 @@
     # replicator's AF_XDP socket on queue 0. RX stays kernel-socket.
     xdp_tx: false
     xdp_tx_queue: "1"
+    # Optional --xdp-rx: read the XDP-stamped ingress time (bpf_ktime, MONOTONIC)
+    # from the echo payload instead of the kernel-SW RX timestamp. Requires the
+    # extended ucast.o loaded by replicator.service (stamps the rtt magic packets).
+    xdp_rx: false
 
   tasks:
 
@@ -117,11 +121,11 @@
           {{ hostvars[item].private_ip_address }} {{ data_port }} \
           {{ private_ip_address }} {{ listen_port }} \
           {{ count }} {{ rate }} {{ warmup }} {{ send_cpu }} {{ recv_cpu }} \
-          {% if xdp_tx | bool %}--xdp-tx={{ xdp_tx_queue }} --iface "$IFACE"{% endif %} ; \
+          {% if xdp_tx | bool %}--xdp-tx={{ xdp_tx_queue }} --iface "$IFACE"{% endif %} {% if xdp_rx | bool %}--xdp-rx{% endif %} ; \
         mv /tmp/rtt_results.json /tmp/{{ private_ip_address }}-{{ hostvars[item].private_ip_address }}.json 2>/dev/null || true
       loop: "{{ groups['replicator'] | difference([inventory_hostname]) }}"
       loop_control:
-        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}{{ ' [xdp-tx]' if xdp_tx | bool else '' }}"
+        label: "{{ private_ip_address }} → {{ hostvars[item].private_ip_address }}{{ ' [xdp-tx]' if xdp_tx | bool else '' }}{{ ' [xdp-rx]' if xdp_rx | bool else '' }}"
       ignore_errors: yes
 
     - name: Fetch per-pair results

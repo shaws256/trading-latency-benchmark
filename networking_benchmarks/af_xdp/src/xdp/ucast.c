@@ -35,6 +35,13 @@
 // Required license for BPF programs
 char _license[] SEC("license") = "GPL";
 
+// rtt --xdp-rx probe header (KEEP IN SYNC with tools/rtt.cpp). The rtt client sets
+// the magic at payload[0..3]; on the ECHO ingress (client host) we stamp an early
+// bpf_ktime_get_ns() (CLOCK_MONOTONIC) into payload[4..11] and XDP_PASS it up to the
+// kernel UDP socket. The same host writes and reads it, so host byte order (no bswap).
+#define RTT_MAGIC   0x58545452u   /* "RTTX" little-endian */
+#define RTT_HDR_LEN 12            /* [0..3] magic, [4..11] xdp_rx_ns */
+
 // Statistics map for monitoring
 struct
 {
@@ -162,8 +169,20 @@ int ucast(struct xdp_md *ctx)
         }
     }
 
-    if (!matched)
+    if (!matched) {
+        // rtt --xdp-rx: if this UDP packet carries the rtt magic (an echo returning
+        // to the rtt client), stamp an early RX timestamp into the payload and let it
+        // continue to the kernel socket. We mutate the payload, so zero the UDP
+        // checksum (IPv4: 0 == "no checksum", accepted by the receiver).
+        void *pl = (void *)udp + sizeof(struct udphdr);
+        if (pl + RTT_HDR_LEN <= data_end && *(__u32 *)pl == RTT_MAGIC) {
+            __u64 t = bpf_ktime_get_ns();
+            __builtin_memcpy((__u8 *)pl + 4, &t, sizeof(t));
+            udp->check = 0;
+            increment_counter(4);  // rtt --xdp-rx stamped
+        }
         return XDP_PASS;
+    }
 
     // Redirect to the AF_XDP socket registered for this RX queue.
     // XDP_PASS fallback: if no socket is registered (e.g. during the brief window

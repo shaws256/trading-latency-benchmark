@@ -173,8 +173,9 @@ struct alignas(64) TimingSlot {
     int64_t  send_monotonic_ns;   // MISNOMER: actually CLOCK_REALTIME at send (see sender);
                                   //   this is the TX stamp used in the RTT
     uint64_t intended_send_ns;    // intended send time (coordinated-omission baseline)
+    int64_t  send_mono_ns;        // CLOCK_MONOTONIC at actual send (used by --xdp-rx RTT)
     int64_t  recv_ns;             // RX timestamp (ns): kernel SW SO_TIMESTAMPING (CLOCK_REALTIME),
-                                  //   else userspace CLOCK_MONOTONIC fallback
+                                  //   userspace CLOCK_MONOTONIC fallback, or XDP ktime (--xdp-rx)
     uint8_t  received;            // 1 if response arrived
 };
 
@@ -188,8 +189,16 @@ static const char* MSG_TEMPLATE =
     R"({"e":"trade","E":1234567890123,"s":"BTC-USDT","t":0000000000,"p":"45000","q":"1.5","b":1000000001,"a":1000000002,"T":1234567890000,"S":"1","X":"MARKET"})";
 static size_t MSG_LEN = 0;  // set at init
 
+// rtt --xdp-rx wire header (KEEP IN SYNC with src/xdp/ucast.c): the first bytes of
+// the UDP payload carry [0..3] magic, [4..11] xdp_rx_ns (stamped by the XDP program
+// at echo ingress, host order). TRADE_ID_OFFSET (38) is past this header, so the
+// seq digits are unaffected.
+static constexpr uint32_t RTT_MAGIC = 0x58545452u;   // "RTTX" little-endian
+static constexpr size_t   RTT_HDR_LEN = 12;
+static char g_probe[256];                            // probe template (magic patched for --xdp-rx)
+
 static void encode_message(char* buf, uint64_t seq_id) {
-    memcpy(buf, MSG_TEMPLATE, MSG_LEN);
+    memcpy(buf, g_probe, MSG_LEN);
     char* pos = buf + TRADE_ID_OFFSET;
     for (int i = TRADE_ID_DIGITS - 1; i >= 0; --i) {
         pos[i] = '0' + (seq_id % 10);
@@ -314,6 +323,7 @@ static void sig_handler(int) { g_running = false; }
 int main(int argc, char* argv[]) {
     // Separate optional flags (--xdp-tx[=queue], --iface <name>) from positionals.
     bool use_xdp_tx = false;
+    bool xdp_rx = false;   // --xdp-rx: read the XDP-stamped ingress time from the payload
     [[maybe_unused]] int xdp_queue = 1;   // avoid queue 0 (owned by the local ucast replicator's AF_XDP socket)
     std::string iface;
     std::vector<const char*> pos;
@@ -322,6 +332,7 @@ int main(int argc, char* argv[]) {
         if (a == "--xdp-tx")                    { use_xdp_tx = true; }
         else if (a.rfind("--xdp-tx=", 0) == 0)  { use_xdp_tx = true; xdp_queue = atoi(a.c_str() + 9); }
         else if (a == "--iface" && i + 1 < argc){ iface = argv[++i]; }
+        else if (a == "--xdp-rx")               { xdp_rx = true; }
         else                                     { pos.push_back(argv[i]); }
     }
 
@@ -330,7 +341,7 @@ int main(int argc, char* argv[]) {
                   << " <replicator_ip> <replicator_port> <local_ip> <local_port>"
                   << " <total_messages> <rate_per_sec>"
                   << " [warmup=10000] [send_cpu=1] [recv_cpu=2]"
-                  << " [--xdp-tx[=queue]] [--iface <name>]" << std::endl;
+                  << " [--xdp-tx[=queue]] [--iface <name>] [--xdp-rx]" << std::endl;
         return 1;
     }
 
@@ -357,8 +368,15 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
 
-    // Initialize message template length
+    // Initialize message template length + probe buffer. For --xdp-rx, patch the
+    // magic into payload[0..3] and zero the stamp slot [4..11]; the XDP program on
+    // the echo's ingress writes the RX time there. TRADE_ID_OFFSET (38) is past it.
     MSG_LEN = strlen(MSG_TEMPLATE);
+    memcpy(g_probe, MSG_TEMPLATE, MSG_LEN);
+    if (xdp_rx) {
+        uint32_t m = RTT_MAGIC; memcpy(g_probe, &m, sizeof(m));
+        memset(g_probe + 4, 0, 8);
+    }
 
     // Calibrate TSC
     std::cout << "Calibrating TSC..." << std::endl;
@@ -395,8 +413,14 @@ int main(int argc, char* argv[]) {
         perror("bind"); close(recv_fd); return 1;
     }
 
-    // Detect and configure RX timestamp mode
-    RxTimestampMode ts_mode = detect_timestamp_mode(recv_fd);
+    // Detect and configure RX timestamp mode. --xdp-rx reads the XDP-stamped time
+    // from the payload instead, so skip kernel/HW RX timestamping.
+    RxTimestampMode ts_mode = RxTimestampMode::USERSPACE;
+    if (xdp_rx) {
+        std::cout << "Timestamp mode: XDP RX ktime (bpf_ktime_get_ns MONOTONIC, stamped at XDP ingress)" << std::endl;
+    } else {
+        ts_mode = detect_timestamp_mode(recv_fd);
+    }
 
     // Subscribe to the replicator
     if (!subscribe_to_replicator(replicator_ip, replicator_port, local_ip, local_port)) {
@@ -444,7 +468,13 @@ int main(int argc, char* argv[]) {
 
             // Get RX timestamp
             int64_t rx_ns;
-            if (ts_mode == RxTimestampMode::USERSPACE) {
+            if (xdp_rx) {
+                // XDP stamped bpf_ktime_get_ns() into payload[4..11] (host order);
+                // 0 means it was not stamped (old ucast.o / off path) -> dropped by sanity.
+                uint64_t xrx = 0;
+                if (n >= (ssize_t)RTT_HDR_LEN) memcpy(&xrx, buf + 4, sizeof(xrx));
+                rx_ns = static_cast<int64_t>(xrx);
+            } else if (ts_mode == RxTimestampMode::USERSPACE) {
                 struct timespec now;
                 clock_gettime(CLOCK_MONOTONIC, &now);
                 rx_ns = now.tv_sec * 1000000000LL + now.tv_nsec;
@@ -484,7 +514,7 @@ int main(int argc, char* argv[]) {
     if (use_xdp_tx) {
         std::string xerr;
         if (!xtx.init(iface, xdp_queue, replicator_ip, replicator_port,
-                      MSG_TEMPLATE, MSG_LEN, TRADE_ID_OFFSET, xerr)) {
+                      g_probe, MSG_LEN, TRADE_ID_OFFSET, xerr)) {
             std::cerr << "AF_XDP TX init failed (" << xerr
                       << "); falling back to kernel sendto" << std::endl;
             use_xdp_tx = false;
@@ -510,6 +540,10 @@ int main(int argc, char* argv[]) {
         deadline.tv_nsec = intended_ns % 1000000000ULL;
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
 
+        // Actual-send CLOCK_MONOTONIC (used by --xdp-rx, whose RX stamp is bpf_ktime MONOTONIC)
+        int64_t send_mono_ns = 0;
+        if (xdp_rx) { struct timespec m; clock_gettime(CLOCK_MONOTONIC, &m); send_mono_ns = m.tv_sec * 1000000000LL + m.tv_nsec; }
+
         // Send: AF_XDP zero-copy TX (kernel-bypass) or kernel sendto.
         uint64_t send_tsc; int64_t send_rt_ns;
 #ifndef KERNEL_MODE_ONLY
@@ -529,6 +563,7 @@ int main(int argc, char* argv[]) {
         // Record both TSC and CLOCK_REALTIME (same domain as the RX SO_TIMESTAMP)
         slots[i - 1].send_tsc = send_tsc;
         slots[i - 1].send_monotonic_ns = send_rt_ns;
+        slots[i - 1].send_mono_ns = send_mono_ns;
         slots[i - 1].intended_send_ns = intended_ns;
 
         // Progress every 10K
@@ -554,11 +589,12 @@ int main(int argc, char* argv[]) {
     for (uint64_t i = warmup; i < slot_count; ++i) {
         if (!slots[i].received) { ++lost; continue; }
 
-        // RTT = RX timestamp - TX timestamp, both in the CLOCK_REALTIME domain
-        // (TX = clock_gettime(CLOCK_REALTIME) before sendto; RX = kernel software
-        // SO_TIMESTAMPING). send_monotonic_ns is a misnomer - it holds REALTIME.
-        int64_t rtt = slots[i].recv_ns - slots[i].send_monotonic_ns;
-        if (rtt > 0 && rtt < 100000000) {  // sanity: 0 < RTT < 100ms
+        // Default: RX kernel-SW timestamp - TX CLOCK_REALTIME (both REALTIME;
+        // send_monotonic_ns is a misnomer - it holds REALTIME).
+        // --xdp-rx: RX = XDP bpf_ktime (MONOTONIC) - TX CLOCK_MONOTONIC send.
+        int64_t send_ref = xdp_rx ? slots[i].send_mono_ns : slots[i].send_monotonic_ns;
+        int64_t rtt = slots[i].recv_ns - send_ref;
+        if (rtt > 0 && rtt < 100000000) {  // sanity: 0 < RTT < 100ms (unstamped -> rtt<=0, dropped)
             service_rtts.push_back(rtt);
         }
 
@@ -589,12 +625,17 @@ int main(int argc, char* argv[]) {
     std::cout << "Messages: " << measured << " measured (+ " << warmup << " warmup)" << std::endl;
     std::cout << "Rate: " << rate_per_sec << " msg/sec" << std::endl;
     std::cout << "Lost: " << lost << " (" << (100.0 * lost / measured) << "%)" << std::endl;
-    std::cout << "Timestamp mode: "
-              << (ts_mode == RxTimestampMode::HW_PHC ? "Nitro PHC (hardware)" :
-                  ts_mode == RxTimestampMode::SW_KERNEL ? "kernel software" : "userspace")
-              << std::endl;
-    std::cout << "TX timestamp: CLOCK_REALTIME (used for RTT); invariant TSC also captured, "
-              << g_tsc.ns_per_tick << " ns/tick" << std::endl;
+    if (xdp_rx) {
+        std::cout << "Timestamp mode: XDP RX ktime (bpf_ktime_get_ns MONOTONIC, stamped at XDP ingress)" << std::endl;
+        std::cout << "TX timestamp: CLOCK_MONOTONIC (used for --xdp-rx RTT)" << std::endl;
+    } else {
+        std::cout << "Timestamp mode: "
+                  << (ts_mode == RxTimestampMode::HW_PHC ? "Nitro PHC (hardware)" :
+                      ts_mode == RxTimestampMode::SW_KERNEL ? "kernel software" : "userspace")
+                  << std::endl;
+        std::cout << "TX timestamp: CLOCK_REALTIME (used for RTT); invariant TSC also captured, "
+                  << g_tsc.ns_per_tick << " ns/tick" << std::endl;
+    }
 
     if (!service_rtts.empty()) {
         std::cout << "\nService-time RTT (recv - actual_send):" << std::endl;
@@ -629,9 +670,10 @@ int main(int argc, char* argv[]) {
         fprintf(jf, "  \"lost\": %lu,\n", lost);
         fprintf(jf, "  \"loss_pct\": %.4f,\n", 100.0 * lost / measured);
         fprintf(jf, "  \"timestamp_rx\": \"%s\",\n",
+                xdp_rx ? "xdp_ktime_mono" :
                 ts_mode == RxTimestampMode::HW_PHC ? "nitro_phc_hw" :
                 ts_mode == RxTimestampMode::SW_KERNEL ? "kernel_sw" : "userspace");
-        fprintf(jf, "  \"timestamp_tx\": \"tsc\",\n");
+        fprintf(jf, "  \"timestamp_tx\": \"%s\",\n", xdp_rx ? "clock_monotonic" : "tsc");
         fprintf(jf, "  \"tx_path\": \"%s\",\n", use_xdp_tx ? "af_xdp" : "kernel");
         fprintf(jf, "  \"tsc_ns_per_tick\": %.6f%s\n", g_tsc.ns_per_tick,
                 (service_rtts.empty() && response_rtts.empty()) ? "" : ",");
