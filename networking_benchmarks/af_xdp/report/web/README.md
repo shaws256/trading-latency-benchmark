@@ -39,7 +39,8 @@ web/
 │   ├── App.svelte        fetches fleet.json (?data= override) and mounts the renderer
 │   ├── app.css           global styles for the 3D renderer
 │   └── lib/
-│       ├── topology2d.js  2D DOM/SVG map (self-contained, injects scoped styles)
+│       ├── 2d/            2D DOM/SVG map — concern-modules (index, layout, palette,
+│       │                  contours, edges, nodes, panels, selection, tables, styles) sharing a ctx
 │       └── topology3d.js  3D three.js renderer (uses app.css)
 └── public/fleet.json     sample data (regenerate with gen/fleet_json.py)
 ```
@@ -47,7 +48,7 @@ web/
 ## Notes
 - three.js is a real dependency (bundled by Vite) — no CDN, no WASM.
 - Two **independent** renderers toggled from the toolbar on the same `fleet.json`:
-  `topology3d.js` (three.js, orbit) and `topology2d.js` (DOM/SVG map ported from the
+  `topology3d.js` (three.js, orbit) and `2d/` (DOM/SVG map ported from the
   original `topology_map.html`; injects its own scoped styles). No shared module — a
   small amount of helper duplication is intentional to keep them decoupled.
 - The NxN **heatmap** (`matrix_report.html`) remains a Python batch artifact for now

@@ -1,13 +1,13 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { mountTopology2D } from './lib/topology2d.js';
+  import { mountTopology2D } from './lib/2d/index.js';
   import { mountTopology3D } from './lib/topology3d.js';
 
   let container;
   let fleet = null;
   let error = '';
   let loading = true;
-  let mode = '3d';
+  let mode = '2d';
   let handle = null;
 
   function remount() {
@@ -39,8 +39,8 @@
 </script>
 
 <div class="toolbar">
-  <button class:active={mode === '3d'} on:click={() => setMode('3d')}>3D</button>
   <button class:active={mode === '2d'} on:click={() => setMode('2d')}>2D</button>
+  <button class:active={mode === '3d'} on:click={() => setMode('3d')}>3D</button>
 </div>
 
 <div class="root" bind:this={container}></div>

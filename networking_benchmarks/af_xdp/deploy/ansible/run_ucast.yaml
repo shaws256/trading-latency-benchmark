@@ -203,5 +203,6 @@
       ansible.builtin.debug:
         msg: >-
           Reports: {{ latest_dir.stdout | trim }}/
-          [matrix_report.html, topology_map.html, matrix_summary.json]
+          [matrix_report.html, fleet.json, matrix_summary.json]  —
+          view fleet.json in report/web (2D/3D)
       when: report_output.rc == 0

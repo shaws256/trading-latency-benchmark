@@ -1,4 +1,3 @@
-// topology.js — latency topology renderer (three.js), 2D or 3D.
 // topology3d.js — 3D latency topology renderer (three.js). Independent of the
 // 2D renderer (no shared module).
 //
@@ -35,7 +34,7 @@ export function mountTopology3D(container, fleet) {
     return Math.round(v) + ' \u03bcs';
   }
   function jitterColorRGB(t) {
-    const stops = [[45,212,191],[251,191,36],[251,113,133]];
+    const stops = [[57,211,83],[240,136,62],[248,81,73]];   // green → orange → red
     const seg = t <= 0.5 ? 0 : 1, lt = t <= 0.5 ? t*2 : (t-0.5)*2;
     const a = stops[seg], b = stops[seg+1];
     return [Math.round(a[0]+(b[0]-a[0])*lt), Math.round(a[1]+(b[1]-a[1])*lt), Math.round(a[2]+(b[2]-a[2])*lt)];
@@ -271,7 +270,7 @@ export function mountTopology3D(container, fleet) {
   // ── selection + gold-glow halos ───────────────────────────────────────────
   const selected = new Set();
   const halos = nodeMeshes.map((m, i) => {
-    const h = new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({color: 0xffd700, transparent: true, opacity: 0.55, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false}));
+    const h = new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({color: 0xffd700, transparent: true, opacity: 0.32, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false}));
     h.scale.setScalar(nodeRadius3D(fleet.nodes[i]) * 1.15); h.position.copy(positions[i]); h.visible = false; scene.add(h); return h;
   });
   function neighborsOf(set) {
@@ -285,8 +284,8 @@ export function mountTopology3D(container, fleet) {
     nodeMeshes.forEach((m, i) => {
       m.visible = !hasSel || vis.has(i);
       halos[i].visible = selected.has(i);
-      if (selected.has(i)) m.material.emissive.set(0xffd700).multiplyScalar(0.4);
-      else m.material.emissive.copy(m.userData.baseEmissive).multiplyScalar(i === hover ? 2.2 : 1);
+      if (selected.has(i)) m.material.emissive.set(0xffd700).multiplyScalar(0.28);
+      else m.material.emissive.copy(m.userData.baseEmissive).multiplyScalar(i === hover ? 1.5 : 1);
     });
     edges.forEach(e => {
       const touchSel = hasSel && (selected.has(e.i) || selected.has(e.j));
@@ -347,7 +346,7 @@ export function mountTopology3D(container, fleet) {
       + '<div class="scope">' + scope + '</div>';
   })();
   legendEl.innerHTML = '<h3>Legend</h3>'
-    + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#2dd4bf,#fbbf24,#fb7185)"></div><span>Edge colour = jitter \u03c3 ('+fmtLat(minSig)+' \u2192 '+fmtLat(maxSig)+')</span></div>'
+    + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#39d353,#f0883e,#f85149)"></div><span>Edge colour = jitter \u03c3 ('+fmtLat(minSig)+' \u2192 '+fmtLat(maxSig)+')</span></div>'
     + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,hsl(210,72%,55%),hsl(300,85%,45%),hsl(0,95%,32%))"></div><span>Node colour = capability (weak \u2192 metal / top-net), size = capability</span></div>'
     + '<div class="row"><span>Distance \u221d log(p50 latency)</span></div>'
     + '<div class="row"><span style="color:#79c0ff;font-weight:700">Public IP</span><span style="color:#8b949e">&nbsp;/&nbsp;Private IP</span><span>&nbsp;on each node</span></div>'
@@ -365,6 +364,7 @@ export function mountTopology3D(container, fleet) {
     itypesEl.innerHTML = '<h3>Instance Types</h3>' + rows;
   })();
 
+  const panelCleanups = [];
   function enhancePanel(el) {
     const h = el.querySelector('h3'); if (!h) return;
     const body = document.createElement('div'); body.className = 'panel-body';
@@ -372,11 +372,24 @@ export function mountTopology3D(container, fleet) {
     const caret = document.createElement('span'); caret.className = 'panel-caret'; caret.textContent = '\u25be';
     h.insertBefore(caret, h.firstChild);
     let collapsed = false, dragging = false, moved = false, sx=0, sy=0, ox=0, oy=0;
+    // content scales with panel width (drag the right edge to resize)
+    const scaler = document.createElement('div'); scaler.className = 'panel-scale';
+    while (el.firstChild) scaler.appendChild(el.firstChild); el.appendChild(scaler);
+    let base = 0;
+    const update = () => {
+      if (!base) { base = el.clientWidth || 1; scaler.style.width = base + 'px'; }
+      const k = el.clientWidth / base;
+      scaler.style.transform = 'scale(' + k + ')';
+      el.style.height = Math.ceil(scaler.offsetHeight * k) + 'px';
+    };
     h.addEventListener('mousedown', (e) => { dragging=true; moved=false; sx=e.clientX; sy=e.clientY;
       const r=el.getBoundingClientRect(); ox=r.left; oy=r.top; el.style.right='auto'; el.style.bottom='auto'; el.style.left=ox+'px'; el.style.top=oy+'px'; e.preventDefault(); });
-    window.addEventListener('mousemove', (e) => { if(!dragging) return; const dx=e.clientX-sx, dy=e.clientY-sy; if(Math.abs(dx)+Math.abs(dy)>3) moved=true; el.style.left=(ox+dx)+'px'; el.style.top=(oy+dy)+'px'; });
-    window.addEventListener('mouseup', () => { dragging=false; });
-    h.addEventListener('click', () => { if(moved){moved=false;return;} collapsed=!collapsed; body.style.display=collapsed?'none':''; caret.textContent=collapsed?'\u25b8':'\u25be'; });
+    const onMove = (e) => { if(!dragging) return; const dx=e.clientX-sx, dy=e.clientY-sy; if(Math.abs(dx)+Math.abs(dy)>3) moved=true; el.style.left=(ox+dx)+'px'; el.style.top=(oy+dy)+'px'; };
+    const onUp = () => { dragging=false; };
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
+    h.addEventListener('click', () => { if(moved){moved=false;return;} collapsed=!collapsed; body.style.display=collapsed?'none':''; caret.textContent=collapsed?'\u25b8':'\u25be'; update(); });
+    const ro = new ResizeObserver(update); ro.observe(el);
+    panelCleanups.push(() => { ro.disconnect(); window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); });
   }
   [statsEl, legendEl, itypesEl].forEach(enhancePanel);
 
@@ -387,5 +400,5 @@ export function mountTopology3D(container, fleet) {
   (function animate(){ rafId = requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); labelRenderer.render(scene,camera); })();
   render(-1);
 
-  return { dispose() { cancelAnimationFrame(rafId); window.removeEventListener('resize', onResize); } };
+  return { dispose() { cancelAnimationFrame(rafId); window.removeEventListener('resize', onResize); panelCleanups.forEach(fn => fn()); } };
 }
