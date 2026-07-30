@@ -134,6 +134,19 @@ def load_fleet_metadata(results_dir: Path) -> dict:
                 fleet.setdefault("account", account_override)
                 for nd in fleet.get("nodes", []):
                     nd.setdefault("account", account_override)
+            # Backfill role from per-node metadata for older fleet.json that
+            # predate role capture, so the viewer can distinguish the relay.
+            for nd in fleet.get("nodes", []):
+                if nd.get("role"):
+                    continue
+                mf = results_dir / f"{nd.get('private_ip') or nd.get('name')}_metadata.json"
+                if mf.exists():
+                    try:
+                        nd["role"] = json.loads(mf.read_text()).get("role") or "unknown"
+                    except json.JSONDecodeError:
+                        nd["role"] = "unknown"
+                else:
+                    nd["role"] = "unknown"
             return fleet
         except json.JSONDecodeError:
             print(f"  Warning: could not parse {fleet_path}")
@@ -159,6 +172,7 @@ def load_fleet_metadata(results_dir: Path) -> dict:
             "vpc_id": m.get("vpc_id") or "unknown",
             "cpg_name": m.get("pg_name") or "unknown",
             "pg_type": m.get("pg_type") or "unknown",
+            "role": m.get("role") or "unknown",
         })
 
     if not nodes:
@@ -588,6 +602,7 @@ def _build_topology_fleet_json(node_names: List[str], matrix: dict, fleet: dict)
             "vpc_id": meta.get("vpc_id", fleet.get("vpc_id", "unknown")),
             "cpg_name": meta.get("cpg_name", fleet.get("cpg_name", "unknown")),
             "pg_type": meta.get("pg_type", "unknown"),
+            "role": meta.get("role", "unknown"),   # source | replicator | destination
             # Hardware metadata (per-node overrides > lookup table)
             "enis": meta.get("enis", hw["enis"]),
             "bw_gbps": meta.get("bw_gbps", hw["bw_gbps"]),

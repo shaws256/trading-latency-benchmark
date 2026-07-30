@@ -17,3 +17,28 @@ export function buildPeerTable(ctx, i, inbound) {
   });
   return h + '</table>';
 }
+
+// Relay node (replicator): it is never a measured endpoint, but every fan-out
+// flow routes through it. Show the two-hop split (hop1 src→relay, hop2 relay→dst)
+// carried on each measured pair's cell, so the relay isn't an empty node.
+export function buildRelayTable(ctx, relayIdx) {
+  const { fleet, matrix, N } = ctx;
+  const rows = [];
+  for (let s = 0; s < N; s++) for (let d = 0; d < N; d++) {
+    if (s === d) continue;
+    const cell = matrix[s] && matrix[s][d];
+    if (!cell || (cell.hop1 == null && cell.hop2 == null)) continue;
+    rows.push({ s, d, cell });
+  }
+  if (!rows.length) return '<div class="relay-note">This node relays fan-out traffic; no per-hop split was recorded for this run.</div>';
+  rows.sort((a, b) => (a.cell.p50 || 0) - (b.cell.p50 || 0));
+  let h = '<table><tr><th>Flow (through relay)</th><th>hop1 src→relay</th><th>hop2 relay→dst</th><th>one-way</th></tr>';
+  rows.forEach(r => {
+    const h1 = r.cell.hop1 || {}, h2 = r.cell.hop2 || {};
+    h += '<tr data-peer="' + r.d + '"><td class="peer-name">' + fleet.nodes[r.s].ec2_name + ' \u2192 ' + fleet.nodes[r.d].ec2_name + '</td>'
+      + '<td class="highlight">' + (h1.p50 != null ? fmtLat(h1.p50) : '\u2014') + '</td>'
+      + '<td class="highlight">' + (h2.p50 != null ? fmtLat(h2.p50) : '\u2014') + '</td>'
+      + '<td>' + fmtLat(r.cell.p50) + '</td></tr>';
+  });
+  return h + '</table>';
+}
