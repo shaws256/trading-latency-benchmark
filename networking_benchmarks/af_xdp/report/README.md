@@ -40,10 +40,18 @@ browser. For mcast, the cell tooltip shows the one-way p50/p99 **and** the hop1/
 ```bash
 cd report/web
 npm install                                        # first time (svelte, vite, three)
+npm run dev                                         # http://localhost:5173
+```
 
-# point the viewer at a specific mcast run's fleet.json:
+Under `npm run dev` the toolbar has a **Browse results…** dropdown that lists every
+`fleet.json` under `af_xdp/results/` (newest first) — pick any run and it loads live.
+No copying, no URLs needed. (Alternatives below still work — e.g. for a static build.)
+
+Point the viewer at a specific run's fleet.json without the menu:
+
+```bash
 python3 ../gen/fleet_json.py ../../results/<date>/<hh-mm-ss>-mcast public/fleet.json
-npm run dev                                         # http://localhost:5173  (loads public/fleet.json)
+npm run dev
 ```
 
 Or load any fleet.json without copying it, via the `?data=` query param:
