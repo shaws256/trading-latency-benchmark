@@ -87,13 +87,17 @@ which would reduce p50 to ~12-15µs.
 
 | Mode | Source | Precision | Clock domain |
 |---|---|---|---|
-| Kernel software (`SO_TIMESTAMP`) | NIC interrupt handler | ~1µs | CLOCK_REALTIME |
-| Hardware PHC (`SOF_TIMESTAMPING_RX_HARDWARE`) | Nitro timestamping engine | ~15ns | PHC epoch (needs phc2sys for UTC) |
+| Kernel software (`SOF_TIMESTAMPING_RX_SOFTWARE`) | NAPI RX path (`netif_receive_skb`), as the driver hands the packet to the stack | ~1µs | CLOCK_REALTIME |
 | Userspace (fallback) | `clock_gettime` after `recvmsg` | ~1µs + queue delay | CLOCK_MONOTONIC |
+| Hardware PHC (`SOF_TIMESTAMPING_RX_HARDWARE`) — one-way only | Nitro timestamping engine | ~15ns | PHC epoch (needs phc2sys for UTC) |
 
-For RTT measurement (same host sends and receives), kernel software timestamps are optimal —
-both TX (TSC/CLOCK_REALTIME) and RX are in the same clock domain. Hardware PHC timestamps
-require `phc2sys` to align the PHC epoch with system clock.
+For **ucast RTT** (same host sends and receives) the tool uses the **kernel software** RX
+timestamp: TX is `clock_gettime(CLOCK_REALTIME)` just before `sendto()` and RX is the kernel
+software timestamp (also `CLOCK_REALTIME`, stamped in the NAPI receive path), so `rtt = rx − tx`
+is a single-domain delta — no clock sync needed. An invariant TSC is also captured at send
+(reported as `timestamp_tx: "tsc"`) but is not the value differenced in the RTT. **HW PHC is
+not used for RTT** — it lives in a separate wall-clock epoch and is only needed for the one-way
+(multicast) path, which requires `phc2sys`/chrony to align hosts.
 
 ## replicator_ctl usage
 

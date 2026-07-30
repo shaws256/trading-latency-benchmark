@@ -4,14 +4,23 @@
  * Measures round-trip latency through the packet replicator with minimal
  * measurement overhead. Timestamps are taken as close to the wire as possible:
  *
- *   TX side: invariant TSC (rdtsc), calibrated against CLOCK_MONOTONIC at startup.
- *            ENA does not support TX hardware timestamps - TSC is the best available.
+ *   TX side: CLOCK_REALTIME (clock_gettime) sampled immediately before sendto().
+ *            An invariant-TSC value is also captured at send (reported as
+ *            timestamp_tx="tsc" and used for TSC-only analysis) but is NOT the
+ *            value differenced in the reported RTT. ENA has no TX HW timestamp.
  *
- *   RX side (descending priority, auto-detected at startup):
- *     1. Nitro timestamping engine / ENA PHC hardware timestamp (SO_TIMESTAMPING
- *        with SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_RAW_HARDWARE)
- *     2. Kernel software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE)
- *     3. Userspace steady_clock (fallback if neither is available)
+ *   RX side (auto-detected at startup):
+ *     1. Kernel software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE): CLOCK_REALTIME
+ *        (skb->tstamp = ktime_get_real), recorded in the NAPI receive path
+ *        (netif_receive_skb / net_timestamp_check) as the driver hands the packet
+ *        to the stack - before the socket receive-queue enqueue. Removes socket-queue
+ *        + poll/schedule jitter while staying in the CLOCK_REALTIME domain.
+ *     2. Userspace fallback (clock_gettime after recvmsg) if no cmsg timestamp.
+ *
+ *   RTT = rx_realtime - tx_realtime: a single-domain delta on one host, so no
+ *   cross-host clock sync is needed. HW PHC timestamps are deliberately NOT used
+ *   here - they live in a separate wall-clock epoch and are only needed for
+ *   one-way (multicast) latency across phc2sys/chrony-synced hosts.
  *
  * Design:
  *   - Lock-free preallocated slot array indexed by sequence ID (no map, no mutex)
@@ -102,18 +111,18 @@ static TscCalibration g_tsc;
 enum class RxTimestampMode { HW_PHC, SW_KERNEL, USERSPACE };
 
 static RxTimestampMode detect_timestamp_mode(int sock_fd) {
-    // For RTT measurement, we need send and receive timestamps in the SAME clock domain.
-    // ENA's Nitro PHC hardware timestamps use a wall-clock epoch (like CLOCK_REALTIME),
-    // while our send timestamp uses CLOCK_MONOTONIC. Mixing them produces invalid RTTs.
+    // For RTT the send and receive timestamps must share one clock domain. The TX
+    // side stamps CLOCK_REALTIME (clock_gettime before sendto), so we pick a RX
+    // timestamp in the same domain:
+    //   1. Kernel software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE) - CLOCK_REALTIME
+    //      (skb->tstamp = ktime_get_real), recorded in the NAPI receive path
+    //      (netif_receive_skb / net_timestamp_check) as the driver hands the packet
+    //      to the stack, before the socket receive-queue enqueue. Removes socket-queue
+    //      + poll/schedule jitter while staying in the CLOCK_REALTIME domain.
+    //   2. Userspace fallback (clock_gettime after recvmsg returns).
     //
-    // Priority for RTT measurement:
-    //   1. Kernel software RX timestamp (SOF_TIMESTAMPING_RX_SOFTWARE) - uses
-    //      CLOCK_MONOTONIC, taken at driver interrupt (before socket buffer queue).
-    //      This removes poll()/schedule jitter while staying in the same clock domain.
-    //   2. Userspace fallback (steady_clock after recvmsg returns).
-    //
-    // NOTE: For one-way latency (with clock sync), HW PHC timestamps would be used.
-    // For RTT, kernel SW is the correct choice on ENA.
+    // HW PHC timestamps are deliberately NOT enabled here: they use a separate
+    // wall-clock epoch and are only needed for one-way (multicast) latency.
 
     int sw_flags = SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_SOFTWARE;
     if (setsockopt(sock_fd, SOL_SOCKET, SO_TIMESTAMPING, &sw_flags, sizeof(sw_flags)) == 0) {
@@ -121,12 +130,12 @@ static RxTimestampMode detect_timestamp_mode(int sock_fd) {
         // only populate SCM_TIMESTAMP, not SCM_TIMESTAMPING, for UDP)
         int one = 1;
         setsockopt(sock_fd, SOL_SOCKET, SO_TIMESTAMP, &one, sizeof(one));
-        std::cout << "Timestamp mode: kernel software RX (CLOCK_MONOTONIC, taken at NIC interrupt)"
+        std::cout << "Timestamp mode: kernel software RX (CLOCK_REALTIME, recorded in the NAPI netif_receive_skb path)"
                   << std::endl;
         return RxTimestampMode::SW_KERNEL;
     }
 
-    std::cout << "Timestamp mode: userspace fallback (steady_clock)" << std::endl;
+    std::cout << "Timestamp mode: userspace fallback (clock_gettime CLOCK_MONOTONIC after recvmsg)" << std::endl;
     return RxTimestampMode::USERSPACE;
 }
 
@@ -159,10 +168,13 @@ static int64_t extract_rx_timestamp_ns(struct msghdr* msg) {
 // Lock-free timing slots
 // ---------------------------------------------------------------------------
 struct alignas(64) TimingSlot {
-    uint64_t send_tsc;            // TSC at actual send (for TSC-only mode)
-    int64_t  send_monotonic_ns;   // CLOCK_MONOTONIC at send (for HW PHC RTT)
-    uint64_t intended_send_ns;    // intended send time (for coordinated omission)
-    int64_t  recv_ns;             // RX timestamp (ns, from HW/SW/userspace)
+    uint64_t send_tsc;            // invariant TSC at send - captured only (reported as
+                                  //   timestamp_tx="tsc"); NOT differenced in the reported RTT
+    int64_t  send_monotonic_ns;   // MISNOMER: actually CLOCK_REALTIME at send (see sender);
+                                  //   this is the TX stamp used in the RTT
+    uint64_t intended_send_ns;    // intended send time (coordinated-omission baseline)
+    int64_t  recv_ns;             // RX timestamp (ns): kernel SW SO_TIMESTAMPING (CLOCK_REALTIME),
+                                  //   else userspace CLOCK_MONOTONIC fallback
     uint8_t  received;            // 1 if response arrived
 };
 
@@ -542,8 +554,9 @@ int main(int argc, char* argv[]) {
     for (uint64_t i = warmup; i < slot_count; ++i) {
         if (!slots[i].received) { ++lost; continue; }
 
-        // RTT = recv timestamp - send timestamp (both in CLOCK_MONOTONIC domain
-        // when using Nitro PHC, since EC2's PHC is synced to system clock)
+        // RTT = RX timestamp - TX timestamp, both in the CLOCK_REALTIME domain
+        // (TX = clock_gettime(CLOCK_REALTIME) before sendto; RX = kernel software
+        // SO_TIMESTAMPING). send_monotonic_ns is a misnomer - it holds REALTIME.
         int64_t rtt = slots[i].recv_ns - slots[i].send_monotonic_ns;
         if (rtt > 0 && rtt < 100000000) {  // sanity: 0 < RTT < 100ms
             service_rtts.push_back(rtt);
@@ -580,7 +593,8 @@ int main(int argc, char* argv[]) {
               << (ts_mode == RxTimestampMode::HW_PHC ? "Nitro PHC (hardware)" :
                   ts_mode == RxTimestampMode::SW_KERNEL ? "kernel software" : "userspace")
               << std::endl;
-    std::cout << "TX timestamp: TSC (calibrated, " << g_tsc.ns_per_tick << " ns/tick)" << std::endl;
+    std::cout << "TX timestamp: CLOCK_REALTIME (used for RTT); invariant TSC also captured, "
+              << g_tsc.ns_per_tick << " ns/tick" << std::endl;
 
     if (!service_rtts.empty()) {
         std::cout << "\nService-time RTT (recv - actual_send):" << std::endl;

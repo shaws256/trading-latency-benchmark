@@ -141,24 +141,29 @@ Two send backends, selected by `rtt --xdp-tx`:
 
 ## How latency is measured
 
-**TX timestamp — invariant TSC.** `rdtsc()` is read at the moment of send. At
-startup the TSC is calibrated against `CLOCK_MONOTONIC` over a ~50 ms spin to
-derive `ns_per_tick` (reported in the JSON as `tsc_ns_per_tick`). ENA provides
-**no TX hardware timestamp**, so the invariant TSC is the best available TX clock
-and avoids `clock_gettime` overhead on the hot path.
+**TX timestamp — `CLOCK_REALTIME` (a TSC is also captured but unused in the RTT).**
+On the send hot path the tool reads `clock_gettime(CLOCK_REALTIME)` immediately
+before `sendto()` — this is the value differenced in the RTT. An invariant `rdtsc()`
+is also read and calibrated against `CLOCK_MONOTONIC` at startup (`ns_per_tick`,
+reported as `tsc_ns_per_tick` and `timestamp_tx:"tsc"`), but it is **not** the value
+used in the reported RTT — it is retained only for optional TSC-only analysis. ENA
+provides **no TX hardware timestamp**.
 
-**RX timestamp — kernel/hardware, taken early.** Preference order:
-1. **Hardware PHC** (`SO_TIMESTAMPING` + `SOF_TIMESTAMPING_RX_HARDWARE`) — the
-   Nitro/ENA timestamping engine (`/dev/ptp0`), ~15 ns resolution.
-2. **Kernel software** (`SO_TIMESTAMPING`, `CLOCK_MONOTONIC`) — stamped at the
-   **NIC driver interrupt, before the socket buffer queue**, so it excludes
-   scheduler/wakeup jitter. `SO_TIMESTAMP` is also enabled as a fallback.
+**RX timestamp — kernel software, stamped early.** Auto-detected at startup:
+1. **Kernel software** (`SO_TIMESTAMPING` + `SOF_TIMESTAMPING_RX_SOFTWARE`) —
+   `CLOCK_REALTIME` (`skb->tstamp = ktime_get_real`), recorded in the **NAPI receive
+   path** (`netif_receive_skb` / `net_timestamp_check`) as the driver hands the packet
+   to the stack, **before the socket receive-queue enqueue**, so it excludes
+   socket-queue + scheduler/wakeup jitter. This is the mode used on ENA.
+2. **Userspace fallback** — `clock_gettime` after `recvmsg` if no cmsg timestamp.
+
+Hardware PHC RX timestamps are **not** used for RTT — they live in a separate
+wall-clock epoch; PHC is only for the one-way multicast path below.
 
 **RTT computation.** Each echo carries its sequence id → index into the lock-free
-slot array → retrieve `send_tsc`/`send_monotonic_ns`. RTT = RX timestamp − send
-timestamp, using a **single consistent clock domain per mode** (TSC↔TSC, or
-MONOTONIC↔MONOTONIC for the PHC path — the code refuses to mix them). Because
-unicast RTT is round-trip on one host, **no clock synchronization is required**.
+slot array → retrieve the send timestamp. RTT = RX timestamp − TX timestamp, both in
+the **`CLOCK_REALTIME`** domain. Because unicast RTT is round-trip on one host,
+**no clock synchronization is required**.
 
 **Aggregation.** A configurable **warmup** count is discarded (cache/JIT/ARP
 warm-up), then min/mean/p50/p90/p95/p99/p99.9/max are computed and written as
@@ -169,7 +174,7 @@ warm-up), then min/mean/p50/p90/p95/p99/p99.9/max are computed and written as
 ## How multicast (one-way) latency is measured
 
 Multicast latency is **one-way** (source → replicator → destination), so — unlike
-the unicast round trip — it cannot use a single host's TSC. Instead the timestamp
+the unicast round trip — it cannot use a single host's clock. Instead the timestamp
 **travels in the packet payload** and both hosts read a **shared, PHC-disciplined
 UTC clock** (`CLOCK_REALTIME`, aligned to UTC to ~µs via the Nitro PHC + chrony).
 
@@ -207,7 +212,7 @@ leading the destination's) as a live skew diagnostic: a nonzero count means the
 clocks aren't tight enough and the one-way figures should be distrusted. This is
 why one-way is used only where the signal (cross-AZ / cross-region, tens of µs–ms)
 is well above the µs-scale sync error; sub-µs same-rack latency stays on the
-unicast round-trip (TSC) path.
+unicast round-trip (single-host `CLOCK_REALTIME`) path.
 
 ## Optimizations
 
@@ -232,10 +237,13 @@ unicast round-trip (TSC) path.
 
 ## Accuracy
 
-- **Resolution:** TSC ~sub-ns tick; effective RTT resolution ≈ tens of ns.
-- **Unicast:** round-trip on a single clock → no sync error. RX stamped at the
-  driver IRQ removes queueing/scheduling jitter from the RX leg. Measured
-  intra-cluster p50 ≈ 24–30 µs; loss driven to 0 after the rmem fix.
+- **Resolution:** bounded by `clock_gettime(CLOCK_REALTIME)` on TX (tens of ns) and
+  the kernel software RX timestamp (~µs); the calibrated TSC is sub-ns but is not
+  differenced in the reported RTT.
+- **Unicast:** round-trip on a single host's clock → no sync error. RX stamped in the
+  NAPI `netif_receive_skb` path (before the socket queue) removes queueing/scheduling
+  jitter from the RX leg. Measured intra-cluster p50 ≈ 24–30 µs; loss driven to 0
+  after the rmem fix.
 - **Multicast:** one-way source→dest, so accuracy is bounded by **clock sync**.
   Nodes sync to the Nitro PHC (`/dev/ptp0`) via chrony refclock (±50–500 ns) plus
   a tight NTP fallback; sub-µs skew was verified before runs.

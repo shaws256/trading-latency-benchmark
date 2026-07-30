@@ -11,7 +11,8 @@ af_xdp/
 ├── tools/          Measurement instruments (rtt, mcast_send/receive, replicator_ctl, udp_send)
 ├── deploy/         Infrastructure (CDK stacks + benchmark/runtime Ansible playbooks)
 │   ├── cdk/        Fleet deployment + AMI builder
-│   └── ansible/    run_ucast / run_mcast / configure_mcast + inventory + report/ (2D & 3D topology generators)
+│   └── ansible/    run_ucast / run_mcast / configure_mcast + inventory
+├── report/         Topology report — gen/ (report.py heatmap + fleet_json.py → fleet.json) + web/ (Vite + Svelte + three.js, 2D/3D)
 ├── dev/            Dev tooling: pytest suite (dev/tests), Docker build harness, sync/provision playbooks
 └── Makefile        Build system (all, kernel-mode, full, mcast targets)
 ```

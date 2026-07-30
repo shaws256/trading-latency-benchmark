@@ -183,9 +183,10 @@
       register: latest_dir
       changed_when: false
 
-    - name: Run report generator
+    - name: Run report generator (heatmap + fleet.json for the web viewer)
       ansible.builtin.shell: |
-        python3 {{ playbook_dir }}/report/generate_matrix_report.py {{ latest_dir.stdout | trim }}
+        python3 {{ playbook_dir }}/../../report/gen/report.py {{ latest_dir.stdout | trim }}
+        python3 {{ playbook_dir }}/../../report/gen/fleet_json.py {{ latest_dir.stdout | trim }}
       register: report_output
       ignore_errors: yes
 
