@@ -26,6 +26,7 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <unistd.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <signal.h>
 #include <poll.h>
@@ -260,6 +261,29 @@ int main(int argc, char *argv[])
 
 	/* ── register socket in xsks_map ─────────────────────────────────── */
 	int xsk_fd = xsk_socket__fd(g_xsk);
+
+	/* ── NAPI busy-poll ───────────────────────────────────────────────
+	 * Drive RX in-app so drain latency does not depend on the NIC's
+	 * gro_flush_timeout. With these set, the poll() in the RX loop busy-polls
+	 * the NAPI for up to busy_us and pulls frames the instant they land,
+	 * instead of waiting for the deferred-NAPI timer. Best paired with a small
+	 * gro_flush_timeout (~20µs) as a safety net. Guards mirror XdpSocket. */
+#ifndef SO_BUSY_POLL
+#define SO_BUSY_POLL 46
+#endif
+#ifndef SO_PREFER_BUSY_POLL
+#define SO_PREFER_BUSY_POLL 69
+#endif
+#ifndef SO_BUSY_POLL_BUDGET
+#define SO_BUSY_POLL_BUDGET 70
+#endif
+	{
+		int on = 1, busy_us = 50, budget = 64;
+		setsockopt(xsk_fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &on, sizeof(on));
+		setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL, &busy_us, sizeof(busy_us));
+		setsockopt(xsk_fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+	}
+
 	if (bpf_map_update_elem(map_fd, &queue, &xsk_fd, BPF_ANY) < 0) {
 		perror("bpf_map_update_elem(xsks_map)");
 		return 1;

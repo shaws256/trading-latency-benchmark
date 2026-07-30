@@ -307,6 +307,9 @@ void Replicator::initialize(bool useZeroCopy) {
     // Cache interface IP and MAC once — createUdpPacket() reads these on every TX packet
     if (!getInterfaceIp(listen_interface_, cached_iface_ip_))
         throw std::runtime_error("Failed to get IP for interface " + listen_interface_);
+    // Parse the source IP once here — createUdpPacket() reused it via inet_aton()
+    // (a string parse) on every TX packet; cache the network-order value instead.
+    inet_aton(cached_iface_ip_.c_str(), reinterpret_cast<struct in_addr*>(&cached_iface_saddr_nbo_));
     if (!getInterfaceMac(listen_interface_, cached_iface_mac_))
         throw std::runtime_error("Failed to get MAC for interface " + listen_interface_);
     std::cout << "Interface " << listen_interface_
@@ -855,6 +858,9 @@ int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int
     }
 
     int sent_count = 0;
+    // Drain TX completions once per batch (frees ring slots for all K destinations)
+    // rather than once per destination inside sendSinglePacketDirect().
+    xdp_sockets_[queueId]->pollTxCompletions();
     for (const auto& dest : current_destinations) {
         if (sendToDestinationWithQueue(dest, payload_data, payload_len, queueId)) {
             sent_count++;
@@ -1023,8 +1029,9 @@ bool Replicator::sendSinglePacketDirect(const Destination& destination, const ui
     DEBUG_TX_PRINT("DEBUG TX: Starting TX for " << destination.ip_address << ":" << destination.port 
               << ", data_len=" << length << ", queue=" << queueId);
     
-    // Drain completions first to free ring slots (ena-xdp pattern)
-    xdp_socket->pollTxCompletions();
+    // Drain completions is done once per batch in replicatePacket(); the retry
+    // path below still polls if this destination happens to hit a full ring.
+    // (was: xdp_socket->pollTxCompletions() here, once per destination)
 
     // Reserve a TX ring slot first; derive the UMEM frame address from the ring index.
     // This guarantees the frame is not still in-flight: a ring slot is only reusable
@@ -1115,7 +1122,7 @@ size_t Replicator::createUdpPacket(const Destination& destination, const uint8_t
     ip->ttl      = 64;
     ip->protocol = IPPROTO_UDP;
     ip->check    = 0;  // must be zero before checksum computation
-    inet_aton(cached_iface_ip_.c_str(), (struct in_addr*)&ip->saddr);
+    ip->saddr    = cached_iface_saddr_nbo_;  // parsed once at initialize() — no per-packet inet_aton
     ip->daddr    = destination.addr.sin_addr.s_addr;
 
     // Calculate IP checksum (RFC 1071)

@@ -8,7 +8,7 @@ Measurement instruments and control utilities.
 |------|--------|-------------|
 | `rtt.cpp` | `rtt` | High-precision RTT measurement client. Subscribes to replicator, sends UDP packets, measures round-trip via kernel-SW `SO_TIMESTAMPING` (CLOCK_REALTIME) RX + `clock_gettime(CLOCK_REALTIME)` TX (single clock domain). Optional `--xdp-tx` (AF_XDP send) and `--xdp-rx` (XDP-stamped RX). Outputs JSON with p50/p90/p95/p99/p999/max. |
 | `mcast_send.cpp` | `mcast_send` | Multicast sender — timestamps packets, sends to the replicator (m2u) or a multicast group. Used as the "exchange" in multicast scenarios. |
-| `mcast_receive.cpp` | `mcast_receive` | Multicast receiver — attaches `mcast.o`, seeds its `config_map` with the target group+port (`-g`/`-p`) so the XDP filter redirects to the AF_XDP socket, captures packets, computes one-way + per-hop latency from sender/replicator timestamps. Requires PHC clock sync between hosts. |
+| `mcast_receive.cpp` | `mcast_receive` | Multicast receiver — attaches `mcast.o`, seeds its `config_map` with the target group+port (`-g`/`-p`) so the XDP filter redirects to the AF_XDP socket, captures packets, computes one-way + per-hop latency from sender/replicator timestamps. Busy-polls NAPI (SO_BUSY_POLL); requires NTP (AWS Time Sync) clock sync between hosts. |
 | `replicator_ctl.cpp` | `replicator_ctl` | Control protocol client. Sends ADD/REMOVE/LIST commands to replicator's control port (12345). |
 | `udp_send.cpp` | `udp_send` | Simple UDP connectivity probe. Sends packets to a target and reports reachability. Supports multicast groups. |
 
@@ -147,12 +147,20 @@ see above.
 sudo ./mcast_receive -I <iface> -g <group> -p <port> -c <count> -t <timeout_s> [-q <queue>]
 
 # Sender (source): m2u-tagged unicast to the replicator, group in the header
-sudo ./mcast_send -I <iface> -D <replicator_ip> -g <group> -p <port> -c <count> -i <interval_us>
+sudo ./mcast_send -I <iface> -D <replicator_ip> -g <group> -p <port> -c <count> -i <interval_us> [-q <tx_queue>]
 ```
 
 Interface flag is `-I` in both tools (`mcast_send` uses `-i` for interval). `mcast_receive`
 seeds `config_map[0] = {group, port}` so `mcast.o` redirects matching packets; without a
 matching entry the filter `XDP_PASS`es everything and the AF_XDP socket sees nothing.
+
+- **`mcast_send -q <tx_queue>` (default 1)** — AF_XDP TX is bound to a **non-RSS queue**.
+  Queue 0 carries all RSS-steered traffic incl. SSH/control; a zero-copy TX bind on queue 0
+  wedges the host NIC. TX egress is independent of RSS, so queue 1 delivers identically.
+- **`mcast_receive` busy-poll** — sets `SO_PREFER_BUSY_POLL`+`SO_BUSY_POLL`+`SO_BUSY_POLL_BUDGET`
+  on the XSK fd; its `poll()` runs NAPI in-app so RX drain doesn't wait on the deferred hard IRQ.
+  Pair with a small `gro_flush_timeout` (10µs) as the busy-poll-gap backstop (set by
+  `run_mcast.yaml` / `ena-rx-lowlat.service`). Uses NTP (AWS Time Sync) clock sync, not PHC.
 
 For the multi-group / multi-destination capability and the orchestration roadmap, see
 [deploy/ansible/README.md → "Multicast: groups & destinations"](../deploy/ansible/README.md).

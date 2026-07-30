@@ -74,6 +74,7 @@ private:
 
     // Interface IP and MAC cached once at initialize() — never re-queried on hot path
     std::string cached_iface_ip_;
+    uint32_t    cached_iface_saddr_nbo_ = 0;  // parsed once at initialize(); createUdpPacket() hot path avoids per-packet inet_aton
     uint8_t     cached_iface_mac_[6]{};
     int num_queues_;
     bool mcast_mode_;         // mcast mode: m2u-tagged unicast UDP carries the multicast group

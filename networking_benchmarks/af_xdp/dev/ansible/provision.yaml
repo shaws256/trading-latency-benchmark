@@ -236,18 +236,22 @@
           WantedBy=multi-user.target
       when: not (rebuild | default(false) | bool)
 
-    - name: Install ena-napi-defer.service (let busy-poll own the queue)
+    - name: Install ena-rx-lowlat.service (deferred-IRQ + small gro backstop for AF_XDP busy-poll RX)
       ansible.builtin.copy:
-        dest: /etc/systemd/system/ena-napi-defer.service
+        dest: /etc/systemd/system/ena-rx-lowlat.service
         content: |
           [Unit]
-          Description=Defer ENA hardirqs so AF_XDP busy-poll owns the RX queue
+          Description=Low-latency NAPI for AF_XDP busy-poll RX (defer hard IRQs + 10us gro backstop)
           After=network-online.target
           Wants=network-online.target
           [Service]
           Type=oneshot
           RemainAfterExit=yes
-          ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | grep -oP "dev \K\S+" | head -1); echo 2 > /sys/class/net/${IFACE:-eth0}/napi_defer_hard_irqs 2>/dev/null || true; echo 200000 > /sys/class/net/${IFACE:-eth0}/gro_flush_timeout 2>/dev/null || true'
+          # Deferred-IRQ + busy-poll regime: napi_defer_hard_irqs hands NAPI to the
+          # app's busy-poll; gro_flush_timeout is the backstop for busy-poll gaps.
+          # 10us — NOT 0 (strands packets in gaps -> multi-second bursts) and NOT the
+          # old 200us (dominates hop latency -> ~200us/hop). See dev/roadmap.md.
+          ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | grep -oP "dev \K\S+" | head -1); echo 2 > /sys/class/net/${IFACE:-eth0}/napi_defer_hard_irqs 2>/dev/null || true; echo 10000 > /sys/class/net/${IFACE:-eth0}/gro_flush_timeout 2>/dev/null || true'
           [Install]
           WantedBy=multi-user.target
       when: not (rebuild | default(false) | bool)
@@ -259,7 +263,7 @@
         daemon_reload: true
       loop:
         - cpu-performance.service
-        - ena-napi-defer.service
+        - ena-rx-lowlat.service
       when: not (rebuild | default(false) | bool)
 
     - name: Reboot to activate PHC

@@ -675,11 +675,16 @@ int XdpSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {
     }
     else
     {
-        // No packets received, check if we need to wake up the fill ring
-        if (xsk_ring_prod__needs_wakeup(&wrapper_->fq))
-        {
-            recvfrom(xsk_socket__fd(wrapper_->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
-        }
+        // App-driven busy-poll: run NAPI in *this* thread's context (the pinned
+        // isolated CPU) so RX delivery does not wait on the deferred ENA hard IRQ
+        // (napi_defer_hard_irqs / gro_flush_timeout) which fires on a different,
+        // often-contended CPU. With SO_PREFER_BUSY_POLL + SO_BUSY_POLL set on this
+        // fd (see openSocket), this recvfrom spins the NAPI poll for up to
+        // SO_BUSY_POLL microseconds, pulling frames the instant the NIC posts them,
+        // and also wakes the fill ring when needed. Issued on every empty peek
+        // (not gated on needs_wakeup) so NAPI is driven regardless of fill state —
+        // this is what makes hop1 (source->replicator) gro-independent.
+        recvfrom(xsk_socket__fd(wrapper_->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
     }
 
     return valid_packets;

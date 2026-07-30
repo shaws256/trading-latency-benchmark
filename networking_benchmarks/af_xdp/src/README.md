@@ -121,6 +121,24 @@ to the replicator, intercepted by XDP. No kernel tunnel device is involved.
    socket. Multicast latency is **one-way** (source→dest), so it requires
    synchronized clocks (see accuracy).
 
+## Latency-critical RX/TX paths
+
+- **In-app NAPI busy-poll** (`XdpSocket::receive`) — on an empty RX peek the loop
+  issues `recvfrom(fd, …, MSG_DONTWAIT)`; with `SO_PREFER_BUSY_POLL`+`SO_BUSY_POLL`
+  set on the XSK fd this runs the NAPI poll in *this* (pinned) thread, so the
+  NIC→ring fill doesn't wait on the deferred hard IRQ. This is what makes hop1
+  (source→replicator) independent of `gro_flush_timeout`. The small gro (10µs) is
+  only the backstop for the windows when the thread is busy fanning-out rather than
+  polling — **not** the primary delivery path. (`gro=0` breaks this → multi-second
+  bursts; `gro=200µs` makes the backstop the primary path → ~200µs/hop.)
+- **Fan-out hot path** (`Replicator::replicatePacket` → `createUdpPacket`) — the
+  source IP is parsed once at `initialize()` (`cached_iface_saddr_nbo_`), not per
+  packet (`inet_aton` was on the hot path); TX completions are drained once per
+  fan-out batch (not per destination); one driver kick covers all K destinations.
+- **CPU layout** — the busy-poll thread is pinned to an isolated CPU and the ENA
+  hard IRQ to a *different* isolated CPU (see `deploy/ansible/run_mcast.yaml` /
+  `ena-irq-affinity.service`), so the IRQ never preempts the poll loop.
+
 ---
 
 ## How packets are sent (`rtt` TX)

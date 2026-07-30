@@ -212,14 +212,14 @@ EOF
 # Pin ENA NIC IRQs to CPU0 so isolated cores 1-3 stay free of interrupt work.
 cat > /etc/systemd/system/ena-irq-affinity.service <<'EOF'
 [Unit]
-Description=Pin ENA NIC IRQs to CPU0 (keep isolated cores quiet)
+Description=Pin ENA NIC IRQs to the first isolated CPU (off contended CPU0; apps run on isolated+1)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); for irq in $(grep "$IFACE" /proc/interrupts | awk -F: "{print \$1}"); do echo 0 > /proc/irq/$irq/smp_affinity_list 2>/dev/null || true; done'
+ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); ISOL=$(cat /sys/devices/system/cpu/isolated 2>/dev/null); CPU=${ISOL%%-*}; CPU=${CPU:-0}; for irq in $(grep "$IFACE" /proc/interrupts | awk -F: "{print \$1}"); do echo "$CPU" > /proc/irq/$irq/smp_affinity_list 2>/dev/null || true; done'
 
 [Install]
 WantedBy=multi-user.target
@@ -240,18 +240,22 @@ ExecStart=/bin/bash -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_go
 WantedBy=multi-user.target
 EOF
 
-# Defer ENA hardirqs so the AF_XDP busy-poll loop owns the RX queue (pairs with
-# SO_PREFER_BUSY_POLL on the XSK fd). Reduces IRQ->wakeup latency.
-cat > /etc/systemd/system/ena-napi-defer.service <<'EOF'
+# Low-latency NAPI for AF_XDP busy-poll RX: the RX consumers (XdpSocket in the
+# replicator, and mcast_receive) now busy-poll NAPI in-app via recvfrom/poll with
+# SO_BUSY_POLL, so we DEFER hard IRQs (napi_defer_hard_irqs) and let busy-poll own
+# the NAPI. gro_flush_timeout is the backstop for busy-poll gaps: 10us — NOT 0
+# (strands packets in gaps -> multi-second bursts) and NOT 200us (dominates hop
+# latency). See dev/roadmap.md for the full mechanics + measurements.
+cat > /etc/systemd/system/ena-rx-lowlat.service <<'EOF'
 [Unit]
-Description=Defer ENA hardirqs so AF_XDP busy-poll owns the RX queue
+Description=Low-latency NAPI for AF_XDP busy-poll RX (defer hard IRQs + 10us gro backstop)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); echo 2 > /sys/class/net/${IFACE:-eth0}/napi_defer_hard_irqs 2>/dev/null || true; echo 200000 > /sys/class/net/${IFACE:-eth0}/gro_flush_timeout 2>/dev/null || true'
+ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"'"' | head -1); echo 2 > /sys/class/net/${IFACE:-eth0}/napi_defer_hard_irqs 2>/dev/null || true; echo 10000 > /sys/class/net/${IFACE:-eth0}/gro_flush_timeout 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -318,7 +322,7 @@ EOF
 systemctl daemon-reload
 # Disable irqbalance so it can't migrate NIC IRQs onto the isolated cores.
 systemctl disable --now irqbalance 2>/dev/null || true
-systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service cpu-performance.service ena-napi-defer.service replicator.service
+systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service cpu-performance.service ena-rx-lowlat.service replicator.service
 
 # ── 6. Cleanup ────────────────────────────────────────────────────────────────
 rm -rf /tmp/build-src /opt/xdp-tools
