@@ -297,6 +297,36 @@ def build_matrix(results_dir: Path, fleet: dict) -> Tuple[List[str], Dict[Tuple[
                 if dst_name not in node_names:
                     node_names.append(dst_name)
 
+    # ── Multicast: render the real datapath as two hops through the relay ──
+    # A measured pair is source->dest end-to-end, but the packet actually travels
+    # source -> replicator -> dest. Replace each such direct edge with two hop
+    # edges — hop1 (src->relay) and hop2 (relay->dst) — so the topology shows the
+    # true path and the replicator becomes a rendered waypoint instead of an
+    # isolated node. Only when exactly one replicator exists (routing is then
+    # unambiguous); otherwise the direct edges are left as-is.
+    replicators = [n["name"] for n in nodes if n.get("role") == "replicator"]
+    if len(replicators) == 1:
+        relay = replicators[0]
+        hop_edges: Dict[Tuple[str, str], dict] = {}
+        drop: List[Tuple[str, str]] = []
+        for (s, d), data in matrix.items():
+            if s == relay or d == relay:
+                continue
+            h1, h2 = data.get("hop1_p50_us"), data.get("hop2_p50_us")
+            if h1 is None and h2 is None:
+                continue
+            msgs, loss = data.get("messages", 0), data.get("loss_pct", 0.0)
+            if h1 is not None:
+                hop_edges[(s, relay)] = {"p50_us": h1, "p99_us": data.get("hop1_p99_us", 0),
+                                         "loss_pct": loss, "messages": msgs, "hop_kind": "hop1"}
+            if h2 is not None:
+                hop_edges[(relay, d)] = {"p50_us": h2, "p99_us": data.get("hop2_p99_us", 0),
+                                         "loss_pct": loss, "messages": msgs, "hop_kind": "hop2"}
+            drop.append((s, d))
+        for k in drop:
+            matrix.pop(k, None)
+        matrix.update(hop_edges)
+
     node_names = sorted(set(node_names))
     return node_names, matrix
 
@@ -477,10 +507,9 @@ def generate_html_report(node_names: List[str], matrix: dict, fleet: dict,
                                    f"p99.9={fmt_lat(data.get('p999_us',0))}  "
                                    f"max={fmt_lat(data.get('max_us',0))}  "
                                    f"loss={data.get('loss_pct',0):.2f}%")
-                        # Multicast: append the two-hop split when present.
-                        if data.get("hop1_p50_us") is not None or data.get("hop2_p50_us") is not None:
-                            tooltip += (f"\\nhop1(src→repl) p50={fmt_lat(data.get('hop1_p50_us') or 0)}  "
-                                        f"hop2(repl→dst) p50={fmt_lat(data.get('hop2_p50_us') or 0)}")
+                        # Multicast: mark which hop of the src->relay->dst path this is.
+                        if data.get("hop_kind"):
+                            tooltip += f"\\n[{data['hop_kind']} of the multicast fan-out path]"
                         cells += (f"<td style='background:{color}' title='{tooltip}'>"
                                   f"<strong>{fmt_lat(val)}</strong></td>")
                     else:
@@ -632,11 +661,10 @@ def _build_topology_fleet_json(node_names: List[str], matrix: dict, fleet: dict)
                         "max": data.get("max_us", 0),
                         "loss": data.get("loss_pct", 0),
                     }
-                    # Multicast two-hop split (source->replicator, replicator->dest);
-                    # present only for mcast results. Lets the viewer show per-hop cost.
-                    if data.get("hop1_p50_us") is not None or data.get("hop2_p50_us") is not None:
-                        cell["hop1"] = {"p50": data.get("hop1_p50_us"), "p99": data.get("hop1_p99_us")}
-                        cell["hop2"] = {"p50": data.get("hop2_p50_us"), "p99": data.get("hop2_p99_us")}
+                    # Multicast hop edges (src->relay / relay->dst) are tagged so
+                    # the viewer can label the link as hop1/hop2.
+                    if data.get("hop_kind"):
+                        cell["hop_kind"] = data["hop_kind"]
                     row.append(cell)
                 else:
                     row.append(None)

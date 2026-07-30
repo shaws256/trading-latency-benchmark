@@ -5,7 +5,7 @@
 // for subsequent hovers. Clicking the node again (or Deselect all) closes it.
 
 import { nodeRadius, getNodeColors } from './palette.js';
-import { buildPeerTable, buildRelayTable } from './tables.js';
+import { buildPeerTable } from './tables.js';
 import { applySel } from './selection.js';
 import { enhancePanel } from './panels.js';
 
@@ -26,10 +26,8 @@ export function renderNodes(ctx) {
     const node = fleet.nodes[i];
     const roleBadge = (node.role && node.role !== 'unknown')
       ? ' <span class="role-badge role-' + node.role + '">' + node.role + '</span>' : '';
-    if (node.role === 'replicator') {
-      return '<h3>' + node.ec2_name + roleBadge + '</h3>'
-        + '<div class="direction">Relayed flows — per-hop split</div>' + buildRelayTable(ctx, i);
-    }
+    // The relay's hops are real edges now (src->relay, relay->dst), so the normal
+    // peer tables show them: Inbound = hop1 (from source), Outbound = hop2 (to dest).
     return '<h3>' + node.ec2_name + roleBadge + '</h3>'
       + '<div class="direction">Outbound</div>' + buildPeerTable(ctx, i, false)
       + '<div class="direction" style="margin-top:6px">Inbound</div>' + buildPeerTable(ctx, i, true);
