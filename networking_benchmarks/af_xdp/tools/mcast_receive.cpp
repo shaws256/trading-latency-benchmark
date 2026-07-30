@@ -1,12 +1,12 @@
 /*
- * AF_XDP GRE multicast receiver.
+ * AF_XDP multicast receiver (light m2u tunnel).
  *
  * Attaches mcast.o to the NIC via XDP, opens an AF_XDP
  * socket on the chosen queue, and polls the RX ring directly — no
  * kernel IP stack involvement after the XDP redirect.
  *
  * Packet layout received (starting from Ethernet header):
- *   Eth | outer IPv4 | GRE (4B) | inner IPv4 | UDP | payload
+ *   Eth | IPv4 | UDP | m2u{ magic(4), group(4) } | payload
  *
  * Requires root (CAP_NET_ADMIN for XDP attach, CAP_NET_RAW for AF_XDP).
  */
@@ -48,6 +48,8 @@ static constexpr uint32_t RX_SIZE     = 2048;
 static constexpr uint32_t BATCH       = 64;
 static constexpr uint16_t ETH_P_IPV4  = 0x0800;
 static constexpr int      HDR_SIZE    = 24;     /* seq(8) + ts_ns(8) + replicator_ns(8) */
+static constexpr uint32_t M2U_MAGIC   = 0x4D324355;  /* "M2CU" — light mcast->ucast tag */
+static constexpr int      M2U_HDR_LEN = 8;           /* magic(4) + group(4) */
 
 struct __attribute__((packed)) pkt_hdr {
 	uint64_t seq;
@@ -365,43 +367,31 @@ int main(int argc, char *argv[])
 			const auto *eth = reinterpret_cast<const struct ethhdr *>(pkt);
 			if (ntohs(eth->h_proto) != ETH_P_IPV4) goto next;
 
-			/* ── Outer IPv4 ─────────────────────────────────────── */
+			/* ── IPv4 ───────────────────────────────────────────── */
 			size_t off = sizeof(struct ethhdr);
 			if (len < off + sizeof(struct iphdr)) goto next;
-			const auto *outer_ip =
+			const auto *ip =
 				reinterpret_cast<const struct iphdr *>(pkt + off);
-			if (outer_ip->protocol != 47) goto next;
-			size_t outer_ip_len = (size_t)outer_ip->ihl * 4;
-			if (outer_ip_len < 20 || len < off + outer_ip_len + 4) goto next;
-			off += outer_ip_len;
+			if (ip->protocol != IPPROTO_UDP) goto next;
+			size_t ip_len = (size_t)ip->ihl * 4;
+			if (ip_len < 20 || len < off + ip_len) goto next;
+			off += ip_len;
 
-			/* ── GRE header ─────────────────────────────────────── */
-			const uint8_t *gre   = pkt + off;
-			uint16_t gre_flags   = (uint16_t)((gre[0] << 8) | gre[1]);
-			uint16_t gre_proto   = (uint16_t)((gre[2] << 8) | gre[3]);
-			if (gre_proto != ETH_P_IPV4) goto next;
-
-			size_t gre_len = 4;
-			if (gre_flags & 0x8000) gre_len += 4;
-			if (gre_flags & 0x2000) gre_len += 4;
-			if (gre_flags & 0x1000) gre_len += 4;
-			off += gre_len;
-
-			/* ── Inner IPv4 ─────────────────────────────────────── */
-			if (len < off + sizeof(struct iphdr)) goto next;
-			const auto *inner_ip =
-				reinterpret_cast<const struct iphdr *>(pkt + off);
-			if (inner_ip->protocol != IPPROTO_UDP) goto next;
-			size_t inner_ip_len = (size_t)inner_ip->ihl * 4;
-			if (inner_ip_len < 20) goto next;
-			off += inner_ip_len;
-
-			/* ── Inner UDP ──────────────────────────────────────── */
+			/* ── UDP ────────────────────────────────────────────── */
 			if (len < off + sizeof(struct udphdr)) goto next;
 			const auto *udp =
 				reinterpret_cast<const struct udphdr *>(pkt + off);
 			if (ntohs(udp->dest) != (uint16_t)port) goto next;
 			off += sizeof(struct udphdr);
+
+			/* ── m2u tunnel header: magic(4) + group(4) ─────────── */
+			if (len < off + (size_t)M2U_HDR_LEN) goto next;
+			{
+				uint32_t magic;
+				memcpy(&magic, pkt + off, 4);
+				if (ntohl(magic) != M2U_MAGIC) goto next;
+			}
+			off += M2U_HDR_LEN;
 
 			/* ── Payload ────────────────────────────────────────── */
 			if (len < off + (size_t)HDR_SIZE) goto next;

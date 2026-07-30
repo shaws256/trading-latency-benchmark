@@ -1,9 +1,9 @@
 ---
 # Run multicast fan-out latency benchmark.
 #
-# Topology: source sends GRE-encapsulated mcast → replicator fans out → destinations measure.
+# Topology: source sends m2u-tagged unicast → replicator fans out → destinations measure.
 # Requires configure_mcast.yaml to have been run first (adapts source/dest nodes,
-# sets up the GRE tunnel + destination registration).
+# adapts roles + destination registration).
 #
 # Usage:
 #   ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
@@ -65,7 +65,7 @@
         seconds: 3
       run_once: true
 
-    # ── Send from source (GRE-encapsulated to replicator) ──────────────────
+    # ── Send from source (m2u unicast to replicator) ──────────────────
     - name: Run mcast_send from source
       ansible.builtin.shell: |
         IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
