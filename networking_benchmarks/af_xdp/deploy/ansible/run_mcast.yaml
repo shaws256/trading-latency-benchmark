@@ -12,8 +12,10 @@
 #     -e replicator_private_ip=10.61.0.5 -e count=10000 -e interval_us=100
 #
 # Results saved to: ./results/<timestamp>/
-#   <hostname>_mcast.log        — receiver stdout (latency stats)
-#   <hostname>_metadata.json    — node info
+#   <src_ip>-<dst_ip>.json          — per-pair one-way latency (service_rtt_us schema)
+#   <hostname>_mcast.log            — receiver stdout (human-readable stats)
+#   <ip>_metadata.json              — node info
+#   fleet.json / matrix_report.html — web-viewer topology + heatmap
 
 - name: Multicast fan-out latency benchmark
   hosts: all
@@ -54,6 +56,7 @@
           -p {{ data_port }} \
           -c {{ count }} \
           -t {{ timeout_sec }} \
+          -j /tmp/mcast_results.json \
           > /tmp/mcast_receive.log 2>&1 &
         echo $!
       register: receiver_pid
@@ -96,6 +99,13 @@
         flat: yes
       when: "'destination' in group_names"
 
+    - name: Fetch receiver JSON (per-pair, <src_ip>-<dst_ip>.json for the report)
+      ansible.builtin.fetch:
+        src: /tmp/mcast_results.json
+        dest: "{{ results_dir }}/{{ hostvars[groups['source'][0]].private_ip_address }}-{{ private_ip_address }}.json"
+        flat: yes
+      when: "'destination' in group_names and (groups['source'] | default([]) | length > 0)"
+
     # ── Metadata ───────────────────────────────────────────────────────────
     - name: Collect node metadata
       ansible.builtin.copy:
@@ -115,10 +125,50 @@
     - name: Fetch metadata
       ansible.builtin.fetch:
         src: /tmp/node_metadata.json
-        dest: "{{ results_dir }}/{{ inventory_hostname }}_metadata.json"
+        dest: "{{ results_dir }}/{{ private_ip_address }}_metadata.json"
         flat: yes
 
     - name: Display results location
       ansible.builtin.debug:
         msg: "Results saved to {{ results_dir }}/"
       run_once: true
+
+
+# ── Generate report (local) — heatmap + fleet.json for the web viewer ─────────
+# Mirrors run_ucast.yaml Play 4: the per-pair <src_ip>-<dst_ip>.json files (one-way
+# source->destination latency in the service_rtt_us schema) + <ip>_metadata.json
+# feed the same gen scripts, so the web app (report/web) renders mcast identically.
+- name: Generate report
+  hosts: localhost
+  become: false
+  gather_facts: false
+
+  tasks:
+    - name: Find most recent results dir
+      ansible.builtin.shell: |
+        find {{ playbook_dir }}/results -mindepth 1 -maxdepth 1 -type d | sort | tail -1
+      register: latest_dir
+      changed_when: false
+
+    - name: Run report generator (heatmap + fleet.json)
+      ansible.builtin.shell: |
+        python3 {{ playbook_dir }}/../../report/gen/report.py {{ latest_dir.stdout | trim }}
+        python3 {{ playbook_dir }}/../../report/gen/fleet_json.py {{ latest_dir.stdout | trim }}
+      register: report_output
+      changed_when: true
+
+    - name: Display report
+      ansible.builtin.debug:
+        msg: "{{ report_output.stdout_lines | default(['No output']) }}"
+
+    - name: Show errors (if any)
+      ansible.builtin.debug:
+        msg: "{{ report_output.stderr_lines }}"
+      when: report_output.rc != 0
+
+    - name: Report artifacts
+      ansible.builtin.debug:
+        msg: >-
+          Wrote matrix_report.html, fleet.json, matrix_summary.json to
+          {{ latest_dir.stdout | trim }} — view fleet.json in report/web (2D/3D)
+      when: report_output.rc == 0

@@ -131,9 +131,10 @@ int main(int argc, char *argv[])
 	int  timeout = DEF_TIMEOUT;
 	int  queue   = DEF_QUEUE;
 	bool raw     = false;
+	const char *json_path = nullptr;
 
 	int opt;
-	while ((opt = getopt(argc, argv, "I:g:p:c:t:q:rh")) != -1) {
+	while ((opt = getopt(argc, argv, "I:g:p:c:t:q:rj:h")) != -1) {
 		switch (opt) {
 		case 'I': iface    = optarg;           break;
 		case 'g': group    = optarg;           break;
@@ -142,6 +143,7 @@ int main(int argc, char *argv[])
 		case 't': timeout  = atoi(optarg);     break;
 		case 'q': queue    = atoi(optarg);     break;
 		case 'r': raw      = true;             break;
+		case 'j': json_path = optarg;          break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
 		}
@@ -515,6 +517,49 @@ next:
 	for (int p : pcts)
 		printf("    P%-3d  %8.1f\n", p, pct(latencies, p) / 1000.0);
 	printf("==================================================\n");
+
+	// Emit a JSON result compatible with report/gen/report.py (service_rtt_us
+	// schema). The primary metric is the one-way source->destination latency;
+	// hop1/hop2 are included as extras (ignored by the matrix builder).
+	if (json_path) {
+		FILE *jf = fopen(json_path, "w");
+		if (!jf) {
+			fprintf(stderr, "warning: cannot open %s: %s\n", json_path, strerror(errno));
+		} else {
+			uint64_t p999 = latencies.empty() ? 0
+			              : latencies[(latencies.size() - 1) * 999 / 1000];
+			int total_pkts = received + lost;
+			double loss_pct = total_pkts > 0 ? 100.0 * lost / total_pkts : 0.0;
+			fprintf(jf, "{\n");
+			fprintf(jf, "  \"messages\": %d,\n", received);
+			fprintf(jf, "  \"lost\": %d,\n", lost);
+			fprintf(jf, "  \"loss_pct\": %.4f,\n", loss_pct);
+			fprintf(jf, "  \"timestamp_rx\": \"xdp_afxdp\",\n");
+			fprintf(jf, "  \"timestamp_tx\": \"clock_realtime\",\n");
+			fprintf(jf, "  \"service_rtt_us\": {\n");
+			fprintf(jf, "    \"min\": %" PRIu64 ",\n", min_lat / 1000);
+			fprintf(jf, "    \"mean\": %" PRIu64 ",\n", avg_lat / 1000);
+			fprintf(jf, "    \"p50\": %" PRIu64 ",\n", pct(latencies, 50) / 1000);
+			fprintf(jf, "    \"p90\": %" PRIu64 ",\n", pct(latencies, 90) / 1000);
+			fprintf(jf, "    \"p95\": %" PRIu64 ",\n", pct(latencies, 95) / 1000);
+			fprintf(jf, "    \"p99\": %" PRIu64 ",\n", pct(latencies, 99) / 1000);
+			fprintf(jf, "    \"p999\": %" PRIu64 ",\n", p999 / 1000);
+			fprintf(jf, "    \"max\": %" PRIu64 "\n", max_lat / 1000);
+			fprintf(jf, "  },\n");
+			if (has_replicator_ts && !latencies_hop1.empty()) {
+				fprintf(jf, "  \"hop1_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
+				        pct(latencies_hop1, 50) / 1000, pct(latencies_hop1, 99) / 1000);
+			}
+			if (has_replicator_ts && !latencies_hop2.empty()) {
+				fprintf(jf, "  \"hop2_us\": { \"p50\": %" PRIu64 ", \"p99\": %" PRIu64 " },\n",
+				        pct(latencies_hop2, 50) / 1000, pct(latencies_hop2, 99) / 1000);
+			}
+			fprintf(jf, "  \"received\": %d\n", received);
+			fprintf(jf, "}\n");
+			fclose(jf);
+			printf("  JSON results: %s\n", json_path);
+		}
+	}
 
 	if (raw) {
 		printf("\nRaw latencies (ns):\n");
