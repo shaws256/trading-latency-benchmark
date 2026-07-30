@@ -17,6 +17,19 @@
 #   <ip>_metadata.json              — node info
 #   fleet.json / matrix_report.html — web-viewer topology + heatmap
 
+- name: Setup — compute one stable results dir for the whole run
+  hosts: localhost
+  become: false
+  gather_facts: true
+  tasks:
+    - name: Compute results_dir (once)
+      ansible.builtin.set_fact:
+        results_dir: "{{ playbook_dir }}/results/{{ ansible_date_time.iso8601_basic_short }}"
+    - name: Create results directory
+      ansible.builtin.file:
+        path: "{{ results_dir }}"
+        state: directory
+
 - name: Multicast fan-out latency benchmark
   hosts: all
   become: yes
@@ -28,7 +41,7 @@
     data_port: "5000"
     mcast_group: "224.0.31.50"
     timeout_sec: "60"
-    results_dir: "{{ playbook_dir }}/results/{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+    results_dir: "{{ hostvars['localhost'].results_dir }}"
 
   tasks:
 
@@ -144,16 +157,14 @@
   gather_facts: false
 
   tasks:
-    - name: Find most recent results dir
-      ansible.builtin.shell: |
-        find {{ playbook_dir }}/results -mindepth 1 -maxdepth 1 -type d | sort | tail -1
-      register: latest_dir
-      changed_when: false
+    - name: Use the run's results dir
+      ansible.builtin.set_fact:
+        latest_dir: "{{ hostvars['localhost'].results_dir }}"
 
     - name: Run report generator (heatmap + fleet.json)
       ansible.builtin.shell: |
-        python3 {{ playbook_dir }}/../../report/gen/report.py {{ latest_dir.stdout | trim }}
-        python3 {{ playbook_dir }}/../../report/gen/fleet_json.py {{ latest_dir.stdout | trim }}
+        python3 {{ playbook_dir }}/../../report/gen/report.py {{ latest_dir }}
+        python3 {{ playbook_dir }}/../../report/gen/fleet_json.py {{ latest_dir }}
       register: report_output
       changed_when: true
 
@@ -170,5 +181,5 @@
       ansible.builtin.debug:
         msg: >-
           Wrote matrix_report.html, fleet.json, matrix_summary.json to
-          {{ latest_dir.stdout | trim }} — view fleet.json in report/web (2D/3D)
+          {{ latest_dir }} — view fleet.json in report/web (2D/3D)
       when: report_output.rc == 0
