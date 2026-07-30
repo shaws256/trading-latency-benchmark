@@ -11,7 +11,7 @@
 #   ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
 #     -e replicator_private_ip=10.61.0.5 -e count=10000 -e interval_us=100
 #
-# Results saved to: ./results/<timestamp>/
+# Results saved to: af_xdp/results/<timestamp>/
 #   <src_ip>-<dst_ip>.json          — per-pair one-way latency (service_rtt_us schema)
 #   <hostname>_mcast.log            — receiver stdout (human-readable stats)
 #   <ip>_metadata.json              — node info
@@ -24,7 +24,7 @@
   tasks:
     - name: Compute results_dir (once)
       ansible.builtin.set_fact:
-        results_dir: "{{ playbook_dir }}/results/{{ ansible_date_time.iso8601_basic_short }}"
+        results_dir: "{{ playbook_dir }}/../../results/{{ ansible_date_time.iso8601_basic_short }}"
     - name: Create results directory
       ansible.builtin.file:
         path: "{{ results_dir }}"
