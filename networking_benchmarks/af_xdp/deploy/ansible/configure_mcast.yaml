@@ -27,6 +27,75 @@
 #   ansible-playbook -i inventory.aws_ec2.yml configure_mcast.yaml \
 #       --extra-vars "replicator_private_ip=10.61.0.5"
 
+# ── Play 0: Clock-sync gate — mcast one-way latency needs cross-host clock ────
+# agreement. The ENA PHC (/dev/ptp0) is Nitro-disciplined to AWS Time Sync
+# (UTC-traceable, ~us, holds across regions), and chrony disciplines the system
+# clock from it. We force a deterministic step and then GATE on the achieved
+# offset so we never measure on an unconverged clock (the 88ms-garbage class of
+# bug). Idempotent: makestep + gate are no-ops once synced. mcast-only — ucast
+# RTT is a single-host round-trip where the offset cancels, so run_ucast never
+# does this.
+- name: Clock-sync convergence gate
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    max_clock_offset_us: 2      # same-AZ hops are ~15us; keep clock error well under signal
+    clock_gate_retries: 20      # x delay(3s) = ~60s budget
+    allow_unsynced: false       # -e allow_unsynced=true to bypass (e.g. cross-region ms runs)
+  tasks:
+    - name: Assert ENA PHC + chronyd are present
+      ansible.builtin.shell: |
+        test -e /dev/ptp0
+        test "$(cat /sys/module/ena/parameters/phc_enable 2>/dev/null)" = "1"
+        systemctl is-active --quiet chronyd
+      changed_when: false
+
+    - name: Force chrony to step to the PHC (deterministic convergence)
+      ansible.builtin.shell: |
+        chronyc -a makestep >/dev/null 2>&1 || true
+        chronyc -a 'burst 4/4' >/dev/null 2>&1 || true
+      changed_when: false
+
+    - name: Gate — wait until |last offset| <= {{ max_clock_offset_us }}us and reference is PHC
+      ansible.builtin.shell: |
+        t=$(chronyc tracking 2>/dev/null)
+        ref=$(printf '%s\n' "$t" | awk -F': *' '/Reference ID/{print $2}')
+        last=$(printf '%s\n' "$t" | awk -F': *' '/Last offset/{print $2}' | awk '{print $1}')
+        awk -v l="$last" -v ref="$ref" 'BEGIN{
+          if (ref !~ /PHC/) exit 2;                 # not disciplined by the PHC yet
+          a = (l < 0) ? -l : l;
+          exit (a*1e6 <= {{ max_clock_offset_us }}) ? 0 : 1
+        }'
+      register: clock_gate
+      until: clock_gate.rc == 0
+      retries: "{{ clock_gate_retries | int }}"
+      delay: 3
+      changed_when: false
+      failed_when: false
+
+    - name: Read achieved offset (microseconds)
+      ansible.builtin.shell: |
+        last=$(chronyc tracking 2>/dev/null | awk -F': *' '/Last offset/{print $2}' | awk '{print $1}')
+        awk -v l="$last" 'BEGIN{a=(l<0)?-l:l; printf "%.3f", a*1e6}'
+      register: clock_offset_us
+      changed_when: false
+
+    - name: Hard-fail if the clock did not converge (unless allow_unsynced)
+      ansible.builtin.assert:
+        that: clock_gate.rc == 0
+        fail_msg: >-
+          Clock not within {{ max_clock_offset_us }}us of the PHC on {{ inventory_hostname }}
+          (achieved {{ clock_offset_us.stdout | trim }}us). One-way mcast latency would be
+          dominated by clock offset. Fix PTP/chrony, or bypass with -e allow_unsynced=true
+          (only sensible for cross-region ms-scale hops).
+      when: not (allow_unsynced | default(false) | bool)
+
+    - name: Report achieved clock offset
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: clock offset {{ clock_offset_us.stdout | trim }}us (gate {{ max_clock_offset_us }}us, ref PHC)"
+
+
 # ── Play 1: Source — free AF_XDP queue (no kernel tunnel; mcast_send builds m2u) ──
 - name: Prepare source (free AF_XDP queue; no kernel tunnel needed)
   hosts: source

@@ -41,6 +41,8 @@
     data_port: "5000"
     mcast_group: "224.0.31.50"
     timeout_sec: "60"
+    max_clock_offset_us: 2
+    allow_unsynced: false
     results_dir: "{{ hostvars['localhost'].results_dir }}"
 
   tasks:
@@ -58,6 +60,26 @@
       delegate_to: localhost
       become: false
       run_once: true
+
+    # Lightweight re-verify of the clock gate (configure_mcast did the makestep +
+    # full convergence). Catches drift between config and run; captures the offset
+    # for the run metadata so results are self-documenting.
+    - name: Re-verify clock sync + capture offset (us)
+      ansible.builtin.shell: |
+        t=$(chronyc tracking 2>/dev/null)
+        last=$(printf '%s\n' "$t" | awk -F': *' '/Last offset/{print $2}' | awk '{print $1}')
+        awk -v l="$last" 'BEGIN{a=(l<0)?-l:l; printf "%.3f", a*1e6}'
+      register: clock_offset_us
+      changed_when: false
+
+    - name: Gate on clock offset (hard-fail unless allow_unsynced)
+      ansible.builtin.assert:
+        that: (clock_offset_us.stdout | float) <= (max_clock_offset_us | float)
+        fail_msg: >-
+          {{ inventory_hostname }} clock offset {{ clock_offset_us.stdout }}us exceeds
+          {{ max_clock_offset_us }}us — one-way latency would be invalid. Re-run
+          configure_mcast, or bypass with -e allow_unsynced=true.
+      when: not (allow_unsynced | default(false) | bool)
 
     # ── Start receivers on destinations (AF_XDP, background) ───────────────
     - name: Start mcast_receive on destinations
@@ -131,7 +153,8 @@
             "az": placement.availability_zone | default('unknown'),
             "region": tags.Region | default(region | default('unknown')),
             "pg_type": tags.PlacementStrategy | default(None),
-            "pg_name": tags.PlacementGroup | default(None)
+            "pg_name": tags.PlacementGroup | default(None),
+            "clock_offset_us": clock_offset_us.stdout | default("unknown")
           } | to_nice_json }}
         dest: "/tmp/node_metadata.json"
 
