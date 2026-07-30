@@ -189,17 +189,21 @@
         ip link set dev "$IFACE" xdpgeneric off 2>/dev/null || true
       changed_when: false
 
-    - name: Compute per-destination multicast group
+    - name: Use the shared fan-out multicast group
+      # All destinations join the SAME group so one source stream fans out to
+      # every destination (1 -> N). run_mcast sends to this same group. (The old
+      # base+index scheme gave each dest a distinct group, so only the index-0
+      # dest received the single-group stream from run_mcast.)
       ansible.builtin.set_fact:
-        mcast_group: >-
-          {{ (base_mcast_group | default('224.0.31.50')).split('.')[:-1] | join('.') }}.{{
-             (base_mcast_group | default('224.0.31.50')).split('.')[-1] | int +
-             groups['destination'].index(inventory_hostname) | int }}
+        mcast_group: "{{ base_mcast_group | default('224.0.31.50') }}"
 
     - name: Join multicast group via replicator control channel
       ansible.builtin.shell: >
         /opt/af-xdp/replicator_ctl {{ replicator_private_ip }} mcast {{ mcast_group }}
       register: join_result
+      retries: 4
+      delay: 3
+      until: join_result.rc == 0
       failed_when: join_result.rc != 0
 
     - name: Seed ARP toward the replicator (so the replicator learns this
