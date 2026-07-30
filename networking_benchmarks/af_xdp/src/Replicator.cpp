@@ -815,6 +815,18 @@ void Replicator::handleControlProtocol() {
 }
 
 int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int queueId) {
+    // Capture RX time at entry — before header parsing — so replicator_ns marks
+    // the dequeue instant, not the post-parse instant. Keeps the hop1/hop2 split
+    // (source->replicator vs replicator->dest) from charging parse cost to hop1.
+    uint64_t replicator_ns_be = 0;
+    if (mcast_mode_) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        uint64_t ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
+                    + static_cast<uint64_t>(ts.tv_nsec);
+        replicator_ns_be = __builtin_bswap64(ns);  // to big-endian (x86 is LE)
+    }
+
     const uint8_t* payload_data = nullptr;
     size_t payload_len = 0;
     uint32_t group_nbo = 0;
@@ -823,20 +835,15 @@ int Replicator::replicatePacket(const uint8_t* packetData, size_t packetLen, int
         return 0; // Not a valid UDP packet
     }
 
-    // m2u mode: stamp replicator RX time into the app payload's replicator_ns
-    // slot (payload[16..23]). payload_data points at the 8-byte m2u header, so
-    // the app payload starts at +8. The sender zeroed the slot; the receiver
-    // uses it to split reported latency into hop1 (source->replicator) and
-    // hop2 (replicator->destination).
+    // m2u mode: write the entry-captured RX time into the app payload's
+    // replicator_ns slot (payload[16..23]). payload_data points at the 8-byte
+    // m2u header, so the app payload starts at +8. The sender zeroed the slot;
+    // the receiver uses it to split reported latency into hop1 (source->replicator)
+    // and hop2 (replicator->destination).
     if (mcast_mode_) {
         static constexpr size_t M2U_HDR = 8;
         if (payload_len >= M2U_HDR + 24) {  // m2u + HDR_SIZE
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            uint64_t replicator_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
-                                 + static_cast<uint64_t>(ts.tv_nsec);
-            replicator_ns = __builtin_bswap64(replicator_ns);  // to big-endian (x86 is LE)
-            memcpy(const_cast<uint8_t*>(payload_data) + M2U_HDR + 16, &replicator_ns, 8);
+            memcpy(const_cast<uint8_t*>(payload_data) + M2U_HDR + 16, &replicator_ns_be, 8);
         }
     }
 
