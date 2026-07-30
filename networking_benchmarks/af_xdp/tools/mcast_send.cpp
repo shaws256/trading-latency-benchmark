@@ -16,8 +16,8 @@
  *   Eth | IPv4 (src=local, dst=replicator) | UDP |
  *   m2u { magic, group } | payload
  *
- * Replaces the previous GRE encapsulation: no outer-IP proto-47, no variable
- * GRE header, no inner IP — the XDP filter parses Eth/IP/UDP + the 8-byte tag.
+ * Flat framing: the XDP filter parses Eth/IP/UDP + the 8-byte m2u tag — no
+ * outer-IP proto-47, no variable tunnel header, no inner IP.
  *
  * Required flag: -D <replicator-ip>  (unicast tunnel destination)
  * Interface (-I) must be the real NIC (e.g. eth0).
@@ -64,7 +64,7 @@ static constexpr int         DEF_SIZE        = 64;
 static constexpr int         HDR_SIZE        = 24;   /* seq(8) + ts_ns(8) + replicator_ns(8) */
 
 /* Light mcast->ucast tunnel tag ("M2CU"): an 8-byte header {magic, group}
- * prepended to the UDP payload, replacing the old GRE encapsulation. Kept in
+ * prepended to the UDP payload. Kept in
  * sync with src/xdp/mcast.c, src/Replicator.cpp and tools/mcast_receive.cpp. */
 static constexpr uint32_t    M2U_MAGIC       = 0x4D324355;
 static constexpr int         M2U_HDR_LEN     = 8;   /* magic(4) + group(4) */
@@ -197,7 +197,7 @@ static bool resolve_mac(const char *dst_ip, const char *iface, uint8_t mac[6])
 }
 
 /*
- * Build the full GRE packet template into buf.
+ * Build the full m2u packet template into buf.
  *
  * outer->id is set to 0: with IP_DF set fragmentation is impossible so the
  * ID field is meaningless (RFC 6864 §4.1).  This makes the outer IP header

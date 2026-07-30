@@ -3,7 +3,7 @@
 Core of the benchmark: an **AF_XDP zero-copy UDP packet replicator** plus a
 kernel-mode fallback echo server. Paired with the `tools/` clients (`rtt`,
 `mcast_send`, `mcast_receive`, `replicator_ctl`) it measures point-to-point
-(unicast) and fan-out (multicast-over-GRE) latency between EC2 instances with
+(unicast) and fan-out (multicast-over-m2u) latency between EC2 instances with
 sub-microsecond timing resolution.
 
 ## Files
@@ -18,7 +18,7 @@ sub-microsecond timing resolution.
 | `NicConfig.cpp/hpp` | NIC helpers: queue count, coalescing, MTU, RSS |
 | `ControlPort.hpp` | Shared control-port resolver (`AFXDP_CONTROL_PORT`, default 12345) |
 | `xdp/ucast.c` | eBPF XDP program — unicast filter (steers matching UDP to the AF_XDP socket) |
-| `xdp/mcast.c` | eBPF XDP program — intercepts GRE-encapsulated multicast, steers inner UDP |
+| `xdp/mcast.c` | eBPF XDP program — intercepts m2u-tagged multicast UDP, steers to AF_XDP |
 
 ## Build modes
 
@@ -49,7 +49,7 @@ into fixed frames shared with the kernel:
 via ARP at registration time** so fan-out frames carry a real unicast dst MAC
 (otherwise ENA drops broadcast-dst frames).
 
-**Per-group BPF state** (GRE/mcast mode), keyed by group IP in network byte
+**Per-group BPF state** (mcast mode), keyed by group IP in network byte
 order, guarded by `group_mutex_`:
 - `group_slots_`  : group → `config_map` slot index
 - `group_ref_counts_` : group → number of joined destinations
@@ -96,24 +96,22 @@ Topology: every node runs `replicator` (AF_XDP) and, to measure a peer, runs the
 6. **Control channel:** a `control_thread_` serves the binary UDP protocol
    (`AFXDP_CONTROL_PORT`, default 12345) for add/remove/list/mcast-join.
 
-## Multicast workflow (GRE-encapsulated, step by step)
+## Multicast workflow (m2u tunnel, step by step)
 
 ENA (see below) has **no native L2 multicast**, so multicast is carried inside a
-**GRE unicast tunnel** to the replicator and intercepted by XDP before the kernel
-decapsulates it.
+plain unicast UDP packet tagged with a light **8-byte m2u header** `{magic, group}`
+to the replicator, intercepted by XDP. No kernel tunnel device is involved.
 
 1. **Node prep** — `configure_mcast.yaml` stops the ucast `replicator.service`
    on source/destination (frees AF_XDP queue 0) and detaches stale XDP.
-2. **GRE tunnel** — on the source, a `gre_feed` tunnel (`ip tunnel … mode gre`)
-   to the replicator's private IP, with a `224.0.0.0/4` route over it. Frame on
-   the wire: `Eth / outer IPv4 (proto 47=GRE) / GRE / inner IPv4 (proto 17=UDP)
-   / UDP / payload`.
-3. **Replicator (mcast mode)** — loads `mcast.o` instead of `ucast.o`. It
-   **intercepts the outer GRE frame on the ENA NIC before `ip_gre` decapsulates
-   it**, preserving zero-copy. It parses down to the inner IPv4/UDP and matches
-   the inner `{multicast group, dst port}` against `config_map`; match →
-   redirect to the AF_XDP socket. Optional GRE checksum/key/sequence fields are
-   handled via the GRE flags word.
+2. **m2u framing** — `mcast_send` builds the frame in userspace and sends it via
+   AF_XDP zero-copy straight to the replicator (`-D <replicator_ip>`). Frame on
+   the wire: `Eth / IPv4 (proto 17=UDP) / UDP / m2u{magic(4), group(4)} / payload`
+   (50 B of headers, vs 66 B for the old encapsulation).
+3. **Replicator (mcast mode)** — loads `mcast.o` instead of `ucast.o`. It parses
+   `Eth/IP/UDP` + the 8-byte m2u tag, reads the group from the header, and matches
+   `{group, dst port}` against `config_map`; match → redirect to the AF_XDP socket
+   (zero-copy). No outer-IP proto-47, no variable-length tunnel header, no inner IP.
 4. **Group registration** — each destination sends `CTRL_MCAST_JOIN` (`[0x04][4B
    group]`) over the control channel; the replicator allocates a `config_map`
    slot (up to `MAX_GROUPS=16`), ref-counts it, ARP-resolves the destination, and
@@ -197,7 +195,7 @@ UTC clock** (`CLOCK_REALTIME`, aligned to UTC to ~µs via the Nitro PHC + chrony
 | 16..23 | `replicator_ns` — replicator RX time | the replicator as it fans the packet out |
 
 **Flow:**
-1. `mcast_send` (AF_XDP TX, zero-copy, over the GRE tunnel) writes `seq` + `ts_ns`
+1. `mcast_send` (AF_XDP TX, zero-copy, m2u-tagged unicast) writes `seq` + `ts_ns`
    in place into each frame on the hot path (16 bytes) and transmits.
 2. The replicator stamps `replicator_ns` into the payload as it receives and fans
    the packet out — this yields a per-hop split.
@@ -285,8 +283,8 @@ unicast round-trip (single-host `CLOCK_REALTIME`) path.
   RX hardware timestamps.
 - **No TX hardware timestamp on ENA** → the TX clock is `CLOCK_REALTIME`
   (`clock_gettime` before the send); no TSC.
-- **No native L2 multicast on ENA** → multicast is tunneled over **GRE** and
-  intercepted by `mcast.o` before `ip_gre` decap (preserving zero-copy).
+- **No native L2 multicast on ENA** → multicast is carried in a plain unicast UDP packet tagged
+  with an 8-byte **m2u** header and intercepted by `mcast.o` (preserving zero-copy).
 - **Zero-copy AF_XDP is supported on ENA** in DRV mode (Nitro v4/v5).
 - **Placement groups** — cluster PGs (single-AZ) minimize intra-cluster latency;
   the benchmark tags/positions nodes by PG/AZ/VPC/Region/Account.
@@ -300,7 +298,7 @@ Binary UDP, identical in AF_XDP and kernel-mode:
 | `0x01` | 4B IP + 2B port | ADD destination (unicast) |
 | `0x02` | 4B IP + 2B port | REMOVE destination |
 | `0x03` | (none) | LIST — replies `[1B count][per dest: 4B IP + 2B port]` |
-| `0x04` | 4B group IP | MCAST_JOIN (GRE mode) — dst inferred from sender |
-| `0x05` | 4B group IP | MCAST_LEAVE (GRE mode) |
+| `0x04` | 4B group IP | MCAST_JOIN (mcast mode) — dst inferred from sender |
+| `0x05` | 4B group IP | MCAST_LEAVE (mcast mode) |
 
 `replicator_ctl` is the CLI client for this protocol.

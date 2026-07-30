@@ -1,4 +1,4 @@
-// mcast.c — XDP program for GRE-encapsulated multicast UDP interception
+// mcast.c — XDP program for m2u-tagged multicast UDP interception
 /*
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -9,10 +9,10 @@
  * intercepts that frame on eth0 and redirects it to AF_XDP, preserving
  * XDP_ZEROCOPY on the ENA physical NIC.
  *
- * Packet layout matched (replaces the previous GRE encapsulation):
+ * Packet layout matched (flat 8-byte m2u tunnel header):
  *   Ethernet / IPv4 (proto=17) / UDP / m2u{ magic(4), group(4) } / payload
  *
- * The flat header removes the outer-IP proto-47, variable-length GRE and inner
+ * The flat header keeps the fast path to Eth/IP/UDP + an 8-byte tag (no outer
  * IP parse — the fast path is Eth/IP/UDP + an 8-byte tag check.
  * Same config_map / xsks_map layout as ucast_filter.c —
  * target_ip is the multicast group (read from the m2u header), target_port is
@@ -32,7 +32,7 @@
 #endif
 
 // Light mcast->ucast tunnel tag ("M2CU"): 8-byte header {magic, group} that
-// replaces GRE. Kept in sync with mcast_send.cpp / Replicator.cpp / mcast_receive.cpp.
+// Kept in sync with mcast_send.cpp / Replicator.cpp / mcast_receive.cpp.
 #define M2U_MAGIC 0x4D324355
 
 // Required for logging in XDP programs

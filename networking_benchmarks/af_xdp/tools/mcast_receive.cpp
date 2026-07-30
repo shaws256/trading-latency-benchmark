@@ -266,7 +266,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* ── configure the mcast.o filter ─────────────────────────────────── */
-	/* mcast.o only redirects GRE-inner-multicast packets whose {group,port}
+	/* mcast.o only redirects m2u-tagged multicast packets whose {group,port}
 	 * match an entry in config_map; otherwise it XDP_PASSes them to the kernel
 	 * (and our AF_XDP socket never sees them). Seed slot 0 with our target. */
 	{
@@ -476,7 +476,7 @@ next:
 
 	printf("\n\n");
 	printf("==================================================\n");
-	printf("  GRE Latency Report (AF_XDP)\n");
+	printf("  Multicast Latency Report (AF_XDP)\n");
 	printf("==================================================\n");
 	printf("  Interface:     %s  queue %d\n", iface, queue);
 	printf("  Received:      %d/%d packets (%.1fs)\n", received, count, elapsed);

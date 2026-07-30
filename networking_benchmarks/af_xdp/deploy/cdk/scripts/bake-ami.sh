@@ -278,7 +278,7 @@ IP=$(ip -4 addr show "$IFACE" | awk '/inet /{print $2}' | cut -d/ -f1)
 case "$MODE" in
   kernel)  exec /opt/af-xdp/replicator --kernel-mode "$IP" "$PORT" ;;
   ucast)   exec /opt/af-xdp/replicator "$IFACE" "$IP" "$PORT" "$ZC" ;;
-  mcast)   exec /opt/af-xdp/replicator "$IFACE" "$MCAST_GROUP" "$PORT" "$ZC" --gre ;;
+  mcast)   exec /opt/af-xdp/replicator "$IFACE" "$MCAST_GROUP" "$PORT" "$ZC" --mcast ;;
   *) echo "Unknown REPLICATOR_MODE=$MODE" >&2; exit 1 ;;
 esac
 EOF

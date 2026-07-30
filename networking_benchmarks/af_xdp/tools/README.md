@@ -7,7 +7,7 @@ Measurement instruments and control utilities.
 | File | Binary | Description |
 |------|--------|-------------|
 | `rtt.cpp` | `rtt` | High-precision RTT measurement client. Subscribes to replicator, sends UDP packets, measures round-trip via kernel-SW `SO_TIMESTAMPING` (CLOCK_REALTIME) RX + `clock_gettime(CLOCK_REALTIME)` TX (single clock domain). Optional `--xdp-tx` (AF_XDP send) and `--xdp-rx` (XDP-stamped RX). Outputs JSON with p50/p90/p95/p99/p999/max. |
-| `mcast_send.cpp` | `mcast_send` | Multicast sender — timestamps packets, sends to GRE tunnel or multicast group. Used as the "exchange" in multicast scenarios. |
+| `mcast_send.cpp` | `mcast_send` | Multicast sender — timestamps packets, sends to the replicator (m2u) or a multicast group. Used as the "exchange" in multicast scenarios. |
 | `mcast_receive.cpp` | `mcast_receive` | Multicast receiver — attaches `mcast.o`, seeds its `config_map` with the target group+port (`-g`/`-p`) so the XDP filter redirects to the AF_XDP socket, captures packets, computes one-way + per-hop latency from sender/replicator timestamps. Requires PHC clock sync between hosts. |
 | `replicator_ctl.cpp` | `replicator_ctl` | Control protocol client. Sends ADD/REMOVE/LIST commands to replicator's control port (12345). |
 | `udp_send.cpp` | `udp_send` | Simple UDP connectivity probe. Sends packets to a target and reports reachability. Supports multicast groups. |
@@ -146,7 +146,7 @@ see above.
 # Receiver (destination): attach mcast.o, listen for group:port fan-out
 sudo ./mcast_receive -I <iface> -g <group> -p <port> -c <count> -t <timeout_s> [-q <queue>]
 
-# Sender (source): GRE-encapsulate to the replicator, inner dst = group
+# Sender (source): m2u-tagged unicast to the replicator, group in the header
 sudo ./mcast_send -I <iface> -D <replicator_ip> -g <group> -p <port> -c <count> -i <interval_us>
 ```
 

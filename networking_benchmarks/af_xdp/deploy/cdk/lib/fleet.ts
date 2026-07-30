@@ -271,7 +271,7 @@ export class FleetStack extends cdk.Stack {
           userData: UserData.forLinux(),
         });
         inst.applyRemovalPolicy(RemovalPolicy.DESTROY);
-        // Disable source/dest check for GRE/replication traffic
+        // Disable source/dest check for replication traffic (fan-out rewrites dst IP/MAC)
         (inst.node.defaultChild as ec2.CfnInstance).sourceDestCheck = false;
 
         if (pgType) {

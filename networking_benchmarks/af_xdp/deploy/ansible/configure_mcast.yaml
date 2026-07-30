@@ -56,7 +56,7 @@
         ip link set dev "$IFACE" xdpgeneric off 2>/dev/null || true
       changed_when: false
 
-    # The light m2u tunnel needs no kernel GRE device: mcast_send builds a plain
+    # The light m2u tunnel needs no kernel tunnel device: mcast_send builds a plain
     # unicast UDP frame (with the 8-byte m2u header) straight to the replicator
     # via AF_XDP, using -D <replicator_private_ip>.
 
