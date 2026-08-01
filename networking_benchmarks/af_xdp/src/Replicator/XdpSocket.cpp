@@ -578,10 +578,29 @@ void XdpSocket::pollTxCompletions() {
     uint32_t completed = xsk_ring_cons__peek(&wrapper_->cq, outstanding_tx_, &idx);
     if (!completed) return;
 
+    // In-place forward (REPLICATOR_FWD_MODE=inplace) submits *RX-range* UMEM frames
+    // to the TX ring. Those must be returned to the fill queue on completion (they
+    // are borrowed RX buffers), whereas TX-pool frames are reused by ring index and
+    // only need counting. Distinguish by UMEM address range — stateless, no tracking.
+    const uint64_t rx_base = (uint64_t)UMEM_RX_FIRST_FRAME_IX * (uint64_t)chunk_size_;
+    uint32_t rx_returned = 0, fq_idx = 0;
+    for (uint32_t c = 0; c < completed; c++) {
+        uint64_t caddr = *xsk_ring_cons__comp_addr(&wrapper_->cq, idx + c);
+        if (caddr >= rx_base) {
+            // Borrowed RX frame — hand it back to the fill queue.
+            if (xsk_ring_prod__reserve(&wrapper_->fq, 1, &fq_idx) == 1) {
+                *xsk_ring_prod__fill_addr(&wrapper_->fq, fq_idx) = caddr;
+                xsk_ring_prod__submit(&wrapper_->fq, 1);
+                rx_returned++;
+            }
+        }
+    }
+
     xsk_ring_cons__release(&wrapper_->cq, completed);
     outstanding_tx_ = (completed <= outstanding_tx_) ? outstanding_tx_ - completed : 0;
 
-    DEBUG_PRINT("Released %u TX completions, %u still outstanding\n", completed, outstanding_tx_);
+    DEBUG_PRINT("Released %u TX completions (%u RX frames recycled), %u still outstanding\n",
+                completed, rx_returned, outstanding_tx_);
 }
 
 void XdpSocket::requestDriverPoll() {
@@ -627,6 +646,32 @@ void XdpSocket::submitTxRing(int count) {
     xsk_ring_prod__submit(&wrapper_->tx, count);
     outstanding_tx_ += count;
     DEBUG_PRINT("Submitted %d TX packets, outstanding_tx=%u\n", count, outstanding_tx_);
+}
+
+bool XdpSocket::forwardFrameInPlace(uint64_t rx_addr, uint32_t len) {
+    // Free TX slots (this also recycles previously-borrowed RX frames back to fill).
+    pollTxCompletions();
+
+    // This RX frame is being handed to TX; make sure recycleFrames() does NOT also
+    // return it to the fill queue (it comes back via the completion ring instead —
+    // otherwise the same UMEM addr would sit in the fill queue twice → corruption).
+    for (auto it = pending_recycle_addrs_.begin(); it != pending_recycle_addrs_.end(); ++it) {
+        if (*it == rx_addr) { pending_recycle_addrs_.erase(it); break; }
+    }
+
+    uint32_t tx_idx = 0;
+    if (xsk_ring_prod__reserve(&wrapper_->tx, 1, &tx_idx) != 1) {
+        requestDriverPoll();
+        pollTxCompletions();
+        if (xsk_ring_prod__reserve(&wrapper_->tx, 1, &tx_idx) != 1)
+            return false;  // ring full — caller may fall back to copy path
+    }
+    struct xdp_desc* d = xsk_ring_prod__tx_desc(&wrapper_->tx, tx_idx);
+    d->addr = rx_addr;
+    d->len  = len;
+    xsk_ring_prod__submit(&wrapper_->tx, 1);
+    outstanding_tx_++;
+    return true;
 }
 
 int XdpSocket::receive(std::vector<int>& offsets, std::vector<int>& lengths) {

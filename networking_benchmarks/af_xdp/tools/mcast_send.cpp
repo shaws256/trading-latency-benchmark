@@ -62,7 +62,7 @@ static constexpr int         DEF_COUNT       = 10000;
 static constexpr int         DEF_INTERVAL_US = 1000;
 static constexpr int         DEF_SIZE        = 64;
 static constexpr int         DEF_TX_QUEUE    = 1;   /* queue 0 is RSS-pinned (carries SSH/ctrl); bind TX off it */
-static constexpr int         HDR_SIZE        = 24;   /* seq(8) + ts_ns(8) + replicator_ns(8) */
+static constexpr int         HDR_SIZE        = 32;   /* seq(8) + ts_ns(8) + replicator_ns(8) + replicator_tx_ns(8) */
 
 /* Light mcast->ucast tunnel tag ("M2CU"): an 8-byte header {magic, group}
  * prepended to the UDP payload. Kept in
@@ -85,11 +85,13 @@ static constexpr int PAYLOAD_OFF    = 14 + 20 + 8 + M2U_HDR_LEN;
 static constexpr int SEQ_OFF        = PAYLOAD_OFF;
 static constexpr int TS_OFF         = PAYLOAD_OFF + 8;
 static constexpr int REPLICATOR_TS_OFF  = PAYLOAD_OFF + 16;  /* written by replicator, not sender */
+static constexpr int REPLICATOR_TX_TS_OFF = PAYLOAD_OFF + 24;  /* written by replicator at TX submit, not sender */
 
 struct __attribute__((packed)) pkt_hdr {
 	uint64_t seq;
 	uint64_t ts_ns;
-	uint64_t replicator_ns;  /* 0 until Replicator overwrites in transit */
+	uint64_t replicator_ns;     /* 0 until Replicator overwrites at RX entry */
+	uint64_t replicator_tx_ns;  /* 0 until Replicator overwrites just before TX submit */
 };
 
 /* ── helpers ──────────────────────────────────────────────────────────── */

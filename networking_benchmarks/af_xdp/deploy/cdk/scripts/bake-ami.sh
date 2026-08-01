@@ -145,10 +145,10 @@ EOF
 #   core 1 : replicator AF_XDP busy-poll thread (queue 0 → core 1)
 #   core 2 : receiver (SCHED_FIFO)
 #   core 3 : sender   (SCHED_FIFO)
-# isolcpus removes 1-3 from the scheduler's load balancer; nohz_full stops the
+# isolcpus removes 1-4 from the scheduler's load balancer; nohz_full stops the
 # scheduler tick on them; rcu_nocbs offloads RCU callbacks; nosmt disables HT
 # siblings so each isolated core is a full physical core (deterministic).
-ISOL="isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 nosmt intel_idle.max_cstate=0 processor.max_cstate=1 default_hugepagesz=2M hugepagesz=2M hugepages=512"
+ISOL="isolcpus=1-4 nohz_full=1-4 rcu_nocbs=1-4 nosmt intel_idle.max_cstate=0 processor.max_cstate=1 default_hugepagesz=2M hugepagesz=2M hugepages=512"
 if ! grep -q "isolcpus=" /etc/default/grub 2>/dev/null; then
   sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"|GRUB_CMDLINE_LINUX_DEFAULT=\"${ISOL} |" /etc/default/grub
   grub2-mkconfig -o /boot/grub2/grub.cfg || true
@@ -209,7 +209,7 @@ ExecStart=/bin/bash -c 'IFACE=$(ip -4 route show default | awk '"'"'{print $5}'"
 WantedBy=multi-user.target
 EOF
 
-# Pin ENA NIC IRQs to CPU0 so isolated cores 1-3 stay free of interrupt work.
+# Pin ENA NIC IRQs to CPU0 so isolated cores 1-4 stay free of interrupt work.
 cat > /etc/systemd/system/ena-irq-affinity.service <<'EOF'
 [Unit]
 Description=Pin ENA NIC IRQs to the first isolated CPU (off contended CPU0; apps run on isolated+1)
@@ -280,7 +280,7 @@ IFACE=$(ip -4 route show default | awk '{print $5}' | head -1)
 IP=$(ip -4 addr show "$IFACE" | awk '/inet /{print $2}' | cut -d/ -f1)
 
 case "$MODE" in
-  kernel)  exec /opt/af-xdp/replicator --kernel-mode "$IP" "$PORT" ;;
+  kernel)  exec /opt/af-xdp/replicator --echo-mode "$IP" "$PORT" ;;
   ucast)   exec /opt/af-xdp/replicator "$IFACE" "$IP" "$PORT" "$ZC" ;;
   mcast)   exec /opt/af-xdp/replicator "$IFACE" "$MCAST_GROUP" "$PORT" "$ZC" --mcast ;;
   *) echo "Unknown REPLICATOR_MODE=$MODE" >&2; exit 1 ;;
@@ -288,7 +288,7 @@ esac
 EOF
 chmod +x /usr/local/bin/start-replicator.sh
 
-# Default config (kernel mode — works everywhere, override at runtime)
+# Default config (echo mode — works everywhere, override at runtime)
 cat > /etc/default/replicator <<'EOF'
 # Replicator configuration — sourced by start-replicator.sh
 # Override via ansible, cloud-init, or manual edit.
