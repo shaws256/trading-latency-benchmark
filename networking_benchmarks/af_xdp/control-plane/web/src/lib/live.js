@@ -86,7 +86,10 @@ export function createLive({ onUpdate, onJob } = {}) {
         if (e.kind !== kind || e.variation !== variation) continue;
         const i = idx.get(e.src), j = idx.get(e.dst);
         if (i == null || j == null) continue;
-        const m = e.metrics.service_rtt_us;
+        // A delta may arrive before its metrics are populated — skip rather than
+        // throw (which would abort the whole re-render).
+        const m = e.metrics && e.metrics.service_rtt_us;
+        if (!m) continue;
         matrix[i][j] = {
           p50: m.p50, p90: m.p90, p99: m.p99, p999: m.p999, max: m.max,
           loss: +(e.metrics.loss_pct || 0).toFixed(3),

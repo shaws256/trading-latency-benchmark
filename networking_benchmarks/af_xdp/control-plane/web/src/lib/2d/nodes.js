@@ -1,81 +1,178 @@
-// 2d/nodes.js — node circles, hover latency tooltip, and click-to-pin.
+// 2d/nodes.js — node circles, hover tooltip, multi-node click-to-pin.
 //
-// Clicking a node freezes the *very* hover window currently shown into a fixed,
-// resizable panel (no duplicate element) and spawns a fresh transient tooltip
-// for subsequent hovers. Clicking the node again (or Deselect all) closes it.
+// Hover   → transient floating tooltip (hidden while any table is pinned).
+// Click   → pin a draggable/foldable latency table for this node.
+//           Multiple nodes can be pinned simultaneously.
+// Click again (or Deselect All) → unpin and remove the table.
 
-import { nodeRadius, getNodeColors } from './palette.js';
+import { nodeRadius, getNodeColors, esc } from './palette.js';
+import { enhancePinned } from './panels.js';
 import { buildPeerTable } from './tables.js';
 import { applySel } from './selection.js';
-import { enhancePanel } from './panels.js';
+
+const ROLE_LABEL = { source: 'src', replicator: 'relay', destination: 'dst' };
+const ROLE_CSS   = { source: 'src', replicator: 'relay', destination: 'dst' };
+
+const PANEL_GAP = 8, PANEL_TOP = 80;
+
+// Build the HTML content of a tooltip/pinned table for node i.
+function tipHTML(ctx, i) {
+  const node = ctx.fleet.nodes[i];
+  const roleBadge = (node.role && ROLE_LABEL[node.role])
+    ? ' <span class="role-badge role-' + esc(ROLE_CSS[node.role] || node.role) + '">' + ROLE_LABEL[node.role] + '</span>' : '';
+  return '<h3>' + esc(node.ec2_name) + roleBadge + '</h3>'
+    + '<div class="direction">Outbound</div>' + buildPeerTable(ctx, i, false)
+    + '<div class="direction" style="margin-top:6px">Inbound</div>' + buildPeerTable(ctx, i, true);
+}
+
 
 export function renderNodes(ctx) {
-  const { fleet, root, positions, selected, nodeEls, N, W, H } = ctx;
+  const { fleet, root, positions, nodeEls, W, H } = ctx;
 
+  // ── Transient hover tooltip ─────────────────────────────────────────────
   const makeTooltip = () => {
     const t = document.createElement('div'); t.className = 'node-tooltip'; root.appendChild(t);
-    // hovering a peer row in the latency table highlights that node in the graph
-    t.addEventListener('mouseover', (e) => { const tr = e.target.closest && e.target.closest('tr[data-peer]'); if (tr && nodeEls[+tr.dataset.peer]) nodeEls[+tr.dataset.peer].classList.add('peer-hover'); });
-    t.addEventListener('mouseout', (e) => { const tr = e.target.closest && e.target.closest('tr[data-peer]'); if (tr && nodeEls[+tr.dataset.peer]) nodeEls[+tr.dataset.peer].classList.remove('peer-hover'); });
+    t.addEventListener('mouseover', (e) => {
+      const tr = e.target.closest && e.target.closest('tr[data-peer]');
+      if (tr && nodeEls[+tr.dataset.peer]) nodeEls[+tr.dataset.peer].classList.add('peer-hover');
+    });
+    t.addEventListener('mouseout', (e) => {
+      const tr = e.target.closest && e.target.closest('tr[data-peer]');
+      if (tr && nodeEls[+tr.dataset.peer]) nodeEls[+tr.dataset.peer].classList.remove('peer-hover');
+    });
     return t;
   };
   let tooltip = makeTooltip();
-  let pinnedEl = null, pinnedDispose = null;
 
-  const tipHTML = (i) => {
-    const node = fleet.nodes[i];
-    const roleBadge = (node.role && node.role !== 'unknown')
-      ? ' <span class="role-badge role-' + node.role + '">' + node.role + '</span>' : '';
-    // The relay's hops are real edges now (src->relay, relay->dst), so the normal
-    // peer tables show them: Inbound = hop1 (from source), Outbound = hop2 (to dest).
-    return '<h3>' + node.ec2_name + roleBadge + '</h3>'
-      + '<div class="direction">Outbound</div>' + buildPeerTable(ctx, i, false)
-      + '<div class="direction" style="margin-top:6px">Inbound</div>' + buildPeerTable(ctx, i, true);
-  };
-  const positionTip = (t, e) => {
-    let tx = e.clientX + 16, ty = e.clientY - 10;
-    const tw = t.offsetWidth || 280, th = t.offsetHeight || 200;
-    if (tx + tw > W - 20) tx = e.clientX - tw - 16;
-    if (ty + th > H - 20) ty = H - th - 20;
-    if (ty < 10) ty = 10;
-    t.style.left = tx + 'px'; t.style.top = ty + 'px';
-  };
-  const unpin = () => {
-    if (pinnedDispose) { pinnedDispose(); pinnedDispose = null; }
-    if (pinnedEl && pinnedEl.parentNode) pinnedEl.parentNode.removeChild(pinnedEl);
-    pinnedEl = null;
-  };
-  const pinCurrent = (i) => {
-    unpin();
-    tooltip.innerHTML = tipHTML(i);          // ensure it shows this node
-    pinnedEl = tooltip;                       // freeze the very hover window
-    pinnedEl.classList.remove('visible'); pinnedEl.classList.add('pinned');
-    pinnedDispose = enhancePanel(ctx, pinnedEl, false);
-    tooltip = makeTooltip();                  // fresh transient for future hovers
-  };
-  ctx.unpinAll = unpin;
-  ctx.disposers.push(unpin);
+  // ── Pinned tables ─────────────────────────────────────────────────────────
+  // Map<nodeIndex → { el: HTMLElement, dispose: fn }>
+  const pinned = new Map();
+  const hoverActive = () => pinned.size === 0;
 
+  const unpin = (i) => {
+    const p = pinned.get(i); if (!p) return;
+    p.dispose();
+    if (p.el.parentNode) p.el.parentNode.removeChild(p.el);
+    pinned.delete(i);
+    if (nodeEls[i]) nodeEls[i].classList.remove('has-panel');
+    // The "Deselect all" button belongs to the pinned-panels feature now that
+    // panels are decoupled from graph selection — hide it when none remain.
+    if (pinned.size === 0) ctx.deselectBtn.style.display = 'none';
+  };
+
+  const unpinAll = () => [...pinned.keys()].forEach(unpin);
+
+  const pinNode = (i, fromRect) => {
+    if (pinned.has(i)) return;
+
+    let left, top;
+
+    if (fromRect) {
+      // First pin (tooltip was visible): freeze at the hover tooltip's exact position.
+      const rootRect = root.getBoundingClientRect();
+      left = fromRect.left - rootRect.left;
+      top  = fromRect.top  - rootRect.top;
+    } else if (pinned.size > 0) {
+      // Subsequent pin: place to the right of the last panel at the same top.
+      const lastEntry = [...pinned.values()].at(-1);
+      const rootRect = root.getBoundingClientRect();
+      const lastR = lastEntry.el.getBoundingClientRect();
+      left = lastR.right - rootRect.left + PANEL_GAP;
+      top  = lastR.top   - rootRect.top;
+    } else {
+      left = PANEL_GAP * 2;
+      top  = PANEL_TOP;
+    }
+
+    // A pinned panel is the hover tooltip frozen in place. It carries ONLY
+    // placement inline; width/height/padding come from the .node-tooltip base
+    // styles, so it auto-sizes to its content exactly like the hover tooltip
+    // (never trimmed) and pinning changes nothing but the frame/edge.
+    const panelEl = document.createElement('div');
+    panelEl.className = 'node-tooltip pinned';
+    panelEl.style.cssText = [
+      'z-index:200',
+      'left:' + left + 'px',
+      'top:' + top + 'px',
+    ].join(';');
+    panelEl.innerHTML = tipHTML(ctx, i);
+    root.appendChild(panelEl);
+
+    const dispose = enhancePinned(panelEl, { left: left + 'px', top: top + 'px' });
+    pinned.set(i, { el: panelEl, dispose });
+    if (nodeEls[i]) nodeEls[i].classList.add('has-panel');
+    ctx.deselectBtn.style.display = 'inline-block';
+  };
+
+  ctx.unpinAll = () => { unpinAll(); applySel(ctx, -1); tooltip.classList.remove('visible'); };
+  ctx.disposers.push(unpinAll);
+
+  // ── Node elements ─────────────────────────────────────────────────────────
   fleet.nodes.forEach((node, i) => {
     const r = nodeRadius(node), colors = getNodeColors(node.type);
-    const el = document.createElement('div'); el.className = 'node' + (node.role && node.role !== 'unknown' ? ' role-' + node.role : '');
+    const el = document.createElement('div');
+    el.className = 'node' + (node.role ? ' role-' + node.role : '') + (node.online === false ? ' offline' : '');
     el.style.width = el.style.height = (r * 2) + 'px';
-    el.style.left = (positions[i].x - r) + 'px'; el.style.top = (positions[i].y - r) + 'px';
-    el.style.background = colors.bg; el.style.borderColor = colors.border;
-    el.innerHTML = '<span class="ip ip-private">' + node.private_ip + '</span>'
-      + '<span class="ip ip-public">' + (node.public_ip || '\u2014') + '</span>'
-      + ((node.cpg_name && node.cpg_name !== 'unknown') ? '<span class="pg-badge" title="Placement group">' + node.cpg_name + '</span>' : '')
-      + (node.role === 'replicator' ? '<span class="role-badge relay" title="Relay / fan-out hop — carries hop1+hop2 of the flows through it">relay</span>' : '');
-    root.appendChild(el); nodeEls[i] = el;
+    el.style.left = (positions[i].x - r) + 'px';
+    el.style.top  = (positions[i].y - r) + 'px';
+    el.style.background = colors.bg;
+    // Border: role colour (solid) overrides the instance-family colour when a role is set.
+    const ROLE_BORDER = { replicator: '#f0883e', source: '#1f6feb', destination: '#2ea043' };
+    el.style.borderColor = ROLE_BORDER[node.role] || colors.border;
+    el.style.borderStyle = 'solid';
 
-    el.addEventListener('mouseenter', () => { tooltip.innerHTML = tipHTML(i); tooltip.classList.add('visible'); if (selected.size === 0) applySel(ctx, i); });
-    el.addEventListener('mousemove', (e) => positionTip(tooltip, e));
-    el.addEventListener('mouseleave', () => { tooltip.classList.remove('visible'); if (selected.size === 0) applySel(ctx, -1); });
-    el.addEventListener('click', () => {
-      if (selected.has(i)) selected.delete(i); else selected.add(i);
+    const pgBadge = (node.cpg_name && node.cpg_name !== 'unknown')
+      ? '<span class="pg-badge">' + esc(node.cpg_name) + '</span>' : '';
+    const roleLabel = node.role && ROLE_LABEL[node.role];
+    const roleBadge = roleLabel
+      ? '<span class="role-badge role-' + esc(ROLE_CSS[node.role] || node.role) + '">' + roleLabel + '</span>' : '';
+    el.innerHTML = '<span class="ip ip-private">' + esc(node.private_ip) + '</span>'
+      + '<span class="ip ip-public">' + (node.public_ip ? esc(node.public_ip) : '\u2014') + '</span>'
+      + pgBadge + roleBadge;
+    root.appendChild(el);
+    nodeEls[i] = el;
+
+    const positionTip = (e) => {
+      let tx = e.clientX + 16, ty = e.clientY - 10;
+      const tw = tooltip.offsetWidth || 280, th = tooltip.offsetHeight || 200;
+      if (tx + tw > W - 20) tx = e.clientX - tw - 16;
+      if (ty + th > H - 20) ty = H - th - 20;
+      if (ty < 10) ty = 10;
+      tooltip.style.left = tx + 'px'; tooltip.style.top = ty + 'px';
+    };
+
+    el.addEventListener('mouseenter', () => {
+      applySel(ctx, i);
+      if (!hoverActive()) return;
+      tooltip.innerHTML = tipHTML(ctx, i);
+      tooltip.classList.add('visible');
+    });
+    el.addEventListener('mousemove', (e) => { if (hoverActive()) positionTip(e); });
+    el.addEventListener('mouseleave', () => {
+      tooltip.classList.remove('visible');
       applySel(ctx, -1);
-      if (selected.has(i)) pinCurrent(i);
-      else unpin();
+    });
+    el.addEventListener('click', () => {
+      // Pin/unpin is tracked ONLY by the `pinned` map — independent of the
+      // graph `selected` set — so opening or closing one node's latency panel
+      // never hides, dims, or otherwise reconfigures the rest of the topology.
+      if (pinned.has(i)) {
+        // Detach this node's own table.
+        unpin(i);
+        if (hoverActive()) {
+          tooltip.innerHTML = tipHTML(ctx, i);
+          tooltip.classList.add('visible');
+          positionTip({ clientX: positions[i].x + r + 16, clientY: positions[i].y });
+          applySel(ctx, i);
+        }
+      } else {
+        // Attach: snapshot tooltip position before hiding it, pin a fresh panel there.
+        const rect = tooltip.classList.contains('visible')
+          ? tooltip.getBoundingClientRect()
+          : null;
+        tooltip.classList.remove('visible');
+        pinNode(i, rect);
+      }
     });
   });
 }

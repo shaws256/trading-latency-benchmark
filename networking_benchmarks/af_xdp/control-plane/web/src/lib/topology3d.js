@@ -67,10 +67,28 @@ export function mountTopology3D(container, fleet) {
   let allP50 = [], allP99 = [], allSig = [];
   for (let i=0;i<N;i++) for (let j=0;j<N;j++) if (mat[i] && mat[i][j]) { allP50.push(mat[i][j].p50); allP99.push(mat[i][j].p99); }
   for (let i=0;i<N;i++) for (let j=i+1;j<N;j++) { if ((mat[i]&&mat[i][j])||(mat[j]&&mat[j][i])) allSig.push(edgeSigma(i,j)); }
-  const minP50 = allP50.length?Math.min(...allP50):0, maxP50 = allP50.length?Math.max(...allP50):100;
-  const minP99 = allP99.length?Math.min(...allP99):0, maxP99 = allP99.length?Math.max(...allP99):100;
-  const minSig = allSig.length?Math.min(...allSig):0, maxSig = allSig.length?Math.max(...allSig):1;
+    const arrMin = (a) => { let m=Infinity; for(let k=0;k<a.length;k++) if(a[k]<m) m=a[k]; return a.length?m:0; };
+  const arrMax = (a) => { let m=-Infinity; for(let k=0;k<a.length;k++) if(a[k]>m) m=a[k]; return a.length?m:0; };
+  allP50.sort((a,b)=>a-b);
+  const minP50=arrMin(allP50), maxP50=arrMax(allP50);
+  const minP99=arrMin(allP99), maxP99=arrMax(allP99);
+  const minSig=arrMin(allSig), maxSig=arrMax(allSig);
   const sigT = (s) => maxSig===minSig ? 0.5 : (s-minSig)/(maxSig-minSig);
+  // Edge colour: p50-based green→red (same as 2D).
+  function latencyColorRGB(p50) {
+    const t = maxP50===minP50 ? 0 : Math.max(0,Math.min(1,(p50-minP50)/(maxP50-minP50)));
+    const stops=[[57,211,83],[240,136,62],[248,81,73]];
+    const seg=t<=0.5?0:1, lt=t<=0.5?t*2:(t-0.5)*2, a=stops[seg], b=stops[seg+1];
+    return [Math.round(a[0]+(b[0]-a[0])*lt), Math.round(a[1]+(b[1]-a[1])*lt), Math.round(a[2]+(b[2]-a[2])*lt)];
+  }
+  // Edge opacity: p50>p60 → 0.07; else lerp 0.6→0.3.
+  const p60 = allP50.length ? allP50[Math.floor(allP50.length*0.6)] : Infinity;
+  const pMin = allP50[0]||0;
+  function edgeOpacity(avg) {
+    if (avg > p60) return 0.07;
+    const t = p60>pMin ? (avg-pMin)/(p60-pMin) : 0;
+    return 0.6 - t*0.3;
+  }
 
   // ── latency -> distance (log-compressed avg p50) ──────────────────────────
   function p50pair(i, j) {
@@ -131,12 +149,23 @@ export function mountTopology3D(container, fleet) {
     const m = new THREE.MeshStandardMaterial({color: col, emissive, roughness: 0.5, metalness: 0.15});
     const mesh = new THREE.Mesh(sphereGeo, m);
     mesh.scale.setScalar(nodeRadius3D(n)); mesh.position.copy(positions[i]);
+    // Role-coloured ring: a slightly larger sphere with wireframe for the border effect.
+    const ROLE_COL3D = {source:0x1f6feb, replicator:0xf0883e, destination:0x2ea043};
+    if (ROLE_COL3D[n.role]) {
+      const ringMat = new THREE.MeshBasicMaterial({color:ROLE_COL3D[n.role], wireframe:true, transparent:true, opacity:0.5});
+      const ring = new THREE.Mesh(sphereGeo, ringMat);
+      ring.scale.setScalar(nodeRadius3D(n)*1.12); ring.position.copy(positions[i]); scene.add(ring);
+    }
     mesh.userData.idx = i; mesh.userData.baseEmissive = emissive.clone();
     scene.add(mesh); nodeMeshes.push(mesh);
     const div = document.createElement('div'); div.className = 'node-label' + (n.role && n.role !== 'unknown' ? ' role-' + n.role : '');
-    div.innerHTML = (n.public_ip ? '<div class="ipp">' + n.public_ip + '</div>' : '')
+    const ROLE3D = {source:'src',replicator:'relay',destination:'dst'};
+    const roleTag = ROLE3D[n.role] ? '<div class="role-badge role-'+ROLE3D[n.role]+'" style="background:'+({replicator:'#f0883e',source:'#1f6feb',destination:'#2ea043'}[n.role]||'#888')+';color:#fff;font-size:8px;font-weight:700;padding:1px 5px;border-radius:6px;text-transform:uppercase;margin-top:2px">'+ROLE3D[n.role]+'</div>' : '';
+    const pgTag = (n.cpg_name && n.cpg_name!=='unknown') ? '<div style="background:#f0883e;color:#0d1117;font-size:8px;font-weight:700;padding:1px 5px;border-radius:6px;margin-bottom:2px">'+n.cpg_name+'</div>' : '';
+    div.innerHTML = pgTag
+      + (n.public_ip ? '<div class="ipp">' + n.public_ip + '</div>' : '')
       + '<div class="ipv">' + n.private_ip + '</div>'
-      + (n.role === 'replicator' ? '<div class="role-badge relay" title="Relay / fan-out hop">relay</div>' : '');
+      + roleTag;
     const lab = new CSS2DObject(div); lab.position.set(0, 0, 0); mesh.add(lab);   // centered on node
   });
 
@@ -144,15 +173,17 @@ export function mountTopology3D(container, fleet) {
   const edges = [], edgeLabelEls = [];
   for (let i=0;i<N;i++) for (let j=i+1;j<N;j++) {
     if (!(mat[i]&&mat[i][j]) && !(mat[j]&&mat[j][i])) continue;
-    const t = sigT(edgeSigma(i, j));
-    const col = new THREE.Color('rgb('+jitterColorRGB(t).join(',')+')');
-    const geo = new THREE.BufferGeometry().setFromPoints([positions[i], positions[j]]);
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({color: col, transparent: true, opacity: 0.5}));
-    scene.add(line); edges.push({line, i, j, baseColor: col});
     const ab = mat[i]&&mat[i][j], ba = mat[j]&&mat[j][i];
-    const avgP50 = Math.round(((ab?ab.p50:0)+(ba?ba.p50:0)) / ((ab?1:0)+(ba?1:0) || 1));
+    const avgP50 = Math.round(((ab?ab.p50:0)+(ba?ba.p50:0))/((ab?1:0)+(ba?1:0)||1));
+    const rgb = latencyColorRGB(avgP50);
+    const col = new THREE.Color('rgb('+rgb.join(',')+')');
+    const op = edgeOpacity(avgP50);
+    const geo = new THREE.BufferGeometry().setFromPoints([positions[i], positions[j]]);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({color: col, transparent: true, opacity: op}));
+    scene.add(line); edges.push({line, i, j, baseColor: col, baseOp: op});
+    // ab, ba, avgP50 already computed above for edge colour.
     const div = document.createElement('div'); div.className = 'edge-label';
-    div.style.color = jitterColorCss(t);
+    div.style.color = 'rgb('+rgb.join(',')+')';
     div.textContent = fmtLat(avgP50) + ' \u00b1' + fmtLat(edgeSigma(i, j));
     const ci = i, cj = j;
     div.addEventListener('mouseenter', () => showEdgeTooltip(ci, cj));
@@ -292,7 +323,7 @@ export function mountTopology3D(container, fleet) {
       const touchSel = hasSel && (selected.has(e.i) || selected.has(e.j));
       const touchHover = hover !== -1 && (e.i === hover || e.j === hover);
       e.line.visible = !hasSel || touchSel;
-      e.line.material.opacity = hasSel ? 0.95 : (hover !== -1 ? (touchHover ? 1.0 : 0.06) : 0.5);
+      e.line.material.opacity = hasSel ? 0.95 : (hover !== -1 ? (touchHover ? 1.0 : 0.06) : (e.baseOp||0.4));
       e.line.material.color.copy(e.baseColor);
     });
     edgeLabelEls.forEach(e => { e.obj.visible = (selected.has(e.i) || selected.has(e.j)) || (hover !== -1 && (e.i === hover || e.j === hover)); });
@@ -340,14 +371,13 @@ export function mountTopology3D(container, fleet) {
     if (accts.length===1) scope += row('Account', accts[0]); else if (accts.length>1) scope += row('Accounts', accts.length);
     statsEl.innerHTML = '<h3>Summary</h3>'
       + row('Nodes', N) + row('Edges', allSig.length)
-      + row('p50 range', fmtLat(minP50)+'\u2013'+fmtLat(maxP50))
-      + row('p99 range', fmtLat(minP99)+'\u2013'+fmtLat(maxP99))
+      + row('p50', fmtLat(minP50)+'\u2013'+fmtLat(maxP50))
+      + row('p99', fmtLat(minP99)+'\u2013'+fmtLat(maxP99))
       + row('Jitter \u03c3', fmtLat(minSig)+'\u2013'+fmtLat(maxSig))
-      + row('Median p50', fmtLat(median(allP50)))
       + '<div class="scope">' + scope + '</div>';
   })();
   legendEl.innerHTML = '<h3>Legend</h3>'
-    + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#39d353,#f0883e,#f85149)"></div><span>Edge colour = jitter \u03c3 ('+fmtLat(minSig)+' \u2192 '+fmtLat(maxSig)+')</span></div>'
+    + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#39d353,#f0883e,#f85149)"></div><span>Edge colour = p50 latency (green=fast, red=slow)</span></div>'
     + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,hsl(210,72%,55%),hsl(300,85%,45%),hsl(0,95%,32%))"></div><span>Node colour = capability (weak \u2192 metal / top-net), size = capability</span></div>'
     + '<div class="row"><span>Distance \u221d log(p50 latency)</span></div>'
     + '<div class="row"><span style="color:#79c0ff;font-weight:700">Public IP</span><span style="color:#8b949e">&nbsp;/&nbsp;Private IP</span><span>&nbsp;on each node</span></div>'

@@ -40,11 +40,16 @@ export function mountTopology2D(container, fleet) {
   const allP50 = [], allP99 = [], allSigma = [];
   for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) if (matrix[i] && matrix[i][j]) { allP50.push(matrix[i][j].p50); allP99.push(matrix[i][j].p99); }
   for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) { const ab = matrix[i] && matrix[i][j], ba = matrix[j] && matrix[j][i]; if (!ab && !ba) continue; allSigma.push(edgeSigma(ab, ba)); }
+  // Loop-based min/max avoids stack overflow from Math.min(...100k+ element array).
+  const arrMin = (a) => { let m = Infinity;  for (let k = 0; k < a.length; k++) if (a[k] < m) m = a[k]; return a.length ? m : 0; };
+  const arrMax = (a) => { let m = -Infinity; for (let k = 0; k < a.length; k++) if (a[k] > m) m = a[k]; return a.length ? m : 0; };
+  // Pre-sort allP50 for percentile computation in edges.js (shared via ctx.ranges).
+  allP50.sort((a, b) => a - b);
   ctx.ranges = {
     allP50,
-    minP50: allP50.length ? Math.min(...allP50) : 0, maxP50: allP50.length ? Math.max(...allP50) : 100,
-    minP99: allP99.length ? Math.min(...allP99) : 0, maxP99: allP99.length ? Math.max(...allP99) : 100,
-    minSigma: allSigma.length ? Math.min(...allSigma) : 0, maxSigma: allSigma.length ? Math.max(...allSigma) : 1,
+    minP50: arrMin(allP50), maxP50: arrMax(allP50),
+    minP99: arrMin(allP99), maxP99: arrMax(allP99),
+    minSigma: arrMin(allSigma), maxSigma: arrMax(allSigma),
   };
 
   const { positions, stress } = computePositions(ctx);

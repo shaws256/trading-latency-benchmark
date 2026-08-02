@@ -1,12 +1,19 @@
 // 2d/contours.js — nested topology contours (AZ ⊂ VPC ⊂ Region ⊂ Account) plus
 // cross-region VPC peering lines. CPG is shown as a per-node badge, not a contour.
 
-import { nodeRadius } from './palette.js';
+import { nodeRadius, esc } from './palette.js';
+
+// Loop/reduce-based min/max — avoids `Math.min(...arr)` spread, which can blow
+// the call stack for large groups (mirrors the guard used in index.js).
+const minOf = (arr) => arr.reduce((m, v) => (v < m ? v : m), Infinity);
+const maxOf = (arr) => arr.reduce((m, v) => (v > m ? v : m), -Infinity);
 
 export function renderContours(ctx) {
   const { fleet, root, svg, positions } = ctx;
   const groupBy = (key) => { const g = {}; fleet.nodes.forEach((node, i) => { const v = node[key] || 'unknown'; (g[v] = g[v] || []).push(i); }); return g; };
-  const PAD_BASE = 12, STEP = 18;
+  const PAD_BASE = 16, STEP = 20;
+  // Extra top padding so the contour label (top:-11px) never clips above the canvas.
+  const LABEL_H = 18;
   const contourDefs = [
     { groups: groupBy('az'),      cls: 'az',      prefix: 'AZ',      pad: PAD_BASE },
     { groups: groupBy('vpc_id'),  cls: 'vpc',     prefix: 'VPC',     pad: PAD_BASE + STEP },
@@ -20,14 +27,16 @@ export function renderContours(ctx) {
       if (key === 'unknown') return;
       const idx = def.groups[key]; if (idx.length === 0) return;
       const xs = idx.map(i => positions[i].x), ys = idx.map(i => positions[i].y), radii = idx.map(i => nodeRadius(fleet.nodes[i]));
-      const left = Math.min(...xs.map((x, k) => x - radii[k])) - def.pad;
-      const right = Math.max(...xs.map((x, k) => x + radii[k])) + def.pad;
-      const top = Math.min(...ys.map((y, k) => y - radii[k])) - def.pad;
-      const bottom = Math.max(...ys.map((y, k) => y + radii[k])) + def.pad;
+      const left = minOf(xs.map((x, k) => x - radii[k])) - def.pad;
+      const right = maxOf(xs.map((x, k) => x + radii[k])) + def.pad;
+      // Pull top down enough that the label is never above the canvas origin.
+      const rawTop = minOf(ys.map((y, k) => y - radii[k])) - def.pad;
+      const top = Math.max(rawTop, LABEL_H);
+      const bottom = maxOf(ys.map((y, k) => y + radii[k])) + def.pad;
       const el = document.createElement('div'); el.className = 'contour ' + def.cls;
       el.style.left = left + 'px'; el.style.top = top + 'px'; el.style.width = (right - left) + 'px'; el.style.height = (bottom - top) + 'px';
       const label = keys.length === 1 ? def.prefix + ': ' + key : key;
-      el.innerHTML = '<span class="label">' + label + '</span>';
+      el.innerHTML = '<span class="label">' + esc(label) + '</span>';
       root.appendChild(el);
       if (def.cls === 'vpc') vpcBoxes.push({ cx: (left + right) / 2, cy: (top + bottom) / 2, hw: (right - left) / 2, hh: (bottom - top) / 2 });
     });
