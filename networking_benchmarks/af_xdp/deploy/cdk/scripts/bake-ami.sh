@@ -78,6 +78,26 @@ fi
 # Ensure ec2-user owns everything for dev iteration (rsync + make as ec2-user)
 chown -R ec2-user:ec2-user /opt/af-xdp /tmp/build-src 2>/dev/null || true
 
+# ── 3b. Control-plane agent (Go) ──────────────────────────────────────────────
+# Build the NATS-driven Go agent from the same checkout so fleet nodes can be
+# driven by the central control plane instead of SSH/ansible. Uses the latest
+# stable Go from go.dev (nats.go needs a recent toolchain; AL2023's dnf golang
+# may lag). Best-effort — a failure here must NOT fail the AMI (ansible still works).
+CP_DIR=/tmp/build-src/networking_benchmarks/af_xdp/control-plane
+if [ -d "$CP_DIR/agent" ]; then
+  echo "=== Step 3b: build control-plane agent ==="
+  GOVER=$(curl -sL "https://go.dev/VERSION?m=text" 2>/dev/null | head -1)
+  if [ -n "$GOVER" ] && curl -fsSL "https://go.dev/dl/${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tgz; then
+    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
+    ( cd "$CP_DIR" && GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/go PATH=/usr/local/go/bin:$PATH \
+        go build -o /opt/af-xdp/afxdp-agent ./agent ) \
+      && echo "afxdp-agent built" || echo "WARN: agent build failed (non-fatal)"
+    chown ec2-user:ec2-user /opt/af-xdp/afxdp-agent 2>/dev/null || true
+  else
+    echo "WARN: go toolchain fetch failed; skipping agent build"
+  fi
+fi
+
 # ── 4. System configs ─────────────────────────────────────────────────────────
 
 # ENA PHC (hardware timestamping)
@@ -319,10 +339,70 @@ Environment=LIBXDP_OBJECT_PATH=/usr/lib64/bpf
 WantedBy=multi-user.target
 EOF
 
+# ── Control-plane agent unit (NATS-driven; inert until AGENT_NATS_URL resolves) ─
+# Reads AGENT_NATS_URL from /etc/default/afxdp-agent, or discovers it from SSM
+# /af-xdp/nats-url at start (written by the ControlPlaneStack). AGENT_ROLE comes
+# from the instance Role tag via IMDS when instance-metadata-tags are enabled.
+cat > /etc/default/afxdp-agent <<'EOF'
+# afxdp-agent config. Set AGENT_NATS_URL to the control plane, e.g.:
+#   AGENT_NATS_URL=nats://bench.example.com:4222
+# AGENT_ROLE (source|replicator|destination) — only if IMDS tags are unavailable.
+# AGENT_BIN_DIR=/opt/af-xdp
+EOF
+
+cat > /usr/local/bin/afxdp-agent-preflight.sh <<'EOF'
+#!/bin/bash
+# Resolve AGENT_NATS_URL + AGENT_NATS_TOKEN from SSM (written by ControlPlaneStack)
+# when not already set in the env file, and enable skip-verify for self-signed TLS.
+set -uo pipefail
+. /etc/default/afxdp-agent 2>/dev/null || true
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+: > /run/afxdp-agent.env
+if [ -z "${AGENT_NATS_URL:-}" ]; then
+  URL=$(aws ssm get-parameter --region "${REGION:-us-east-1}" --name /af-xdp/nats-url --query Parameter.Value --output text 2>/dev/null)
+  [ -n "$URL" ] && [ "$URL" != "None" ] && echo "AGENT_NATS_URL=$URL" >> /run/afxdp-agent.env
+fi
+if [ -z "${AGENT_NATS_TOKEN:-}" ]; then
+  TOK=$(aws ssm get-parameter --region "${REGION:-us-east-1}" --name /af-xdp/nats-token --query Parameter.Value --output text 2>/dev/null)
+  [ -n "$TOK" ] && [ "$TOK" != "None" ] && echo "AGENT_NATS_TOKEN=$TOK" >> /run/afxdp-agent.env
+fi
+# self-signed TLS endpoint -> skip cert verify (encryption without a CA)
+if grep -q 'AGENT_NATS_URL=tls://' /run/afxdp-agent.env 2>/dev/null; then
+  echo "AGENT_NATS_INSECURE=1" >> /run/afxdp-agent.env
+fi
+exit 0
+EOF
+chmod +x /usr/local/bin/afxdp-agent-preflight.sh
+
+cat > /etc/systemd/system/afxdp-agent.service <<'EOF'
+[Unit]
+Description=AF_XDP control-plane agent (NATS-driven)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStartPre=/usr/local/bin/afxdp-agent-preflight.sh
+EnvironmentFile=-/etc/default/afxdp-agent
+EnvironmentFile=-/run/afxdp-agent.env
+Environment=LIBXDP_OBJECT_PATH=/usr/lib64/bpf
+WorkingDirectory=/opt/af-xdp
+ExecStart=/opt/af-xdp/afxdp-agent
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 # Disable irqbalance so it can't migrate NIC IRQs onto the isolated cores.
 systemctl disable --now irqbalance 2>/dev/null || true
 systemctl enable ena-coalescing.service ena-xdp-queues.service ena-mtu.service ena-irq-affinity.service cpu-performance.service ena-rx-lowlat.service replicator.service
+# Enable the control-plane agent only if it built (best-effort in Step 3b).
+[ -x /opt/af-xdp/afxdp-agent ] && systemctl enable afxdp-agent.service || echo "afxdp-agent not built; unit installed but not enabled"
 
 # ── 6. Cleanup ────────────────────────────────────────────────────────────────
 rm -rf /tmp/build-src /opt/xdp-tools

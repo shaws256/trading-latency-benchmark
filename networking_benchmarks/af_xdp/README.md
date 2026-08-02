@@ -111,7 +111,7 @@ ansible-playbook -i inventory.aws_ec2.yml run_mcast.yaml \
 ```
 Outputs land in `results/<date>/<hh-mm-ss>-mcast/`: per-pair `<src_ip>-<dst_ip>.json`,
 `matrix_report.html` (heatmap), `fleet.json` (topology for the web viewer), and
-`matrix_summary.json`. See [`report/`](report/) for the 2D/3D viewer.
+`matrix_summary.json`. See [`control-plane/`](control-plane/) for the 2D/3D viewer.
 
 ## Measured Results (c7i.xlarge CPG, us-east-1)
 

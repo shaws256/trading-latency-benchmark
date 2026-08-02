@@ -7,7 +7,7 @@ Runtime configuration and provisioning playbooks for the AF_XDP benchmark.
 > (`cd ../../dev/ansible`); the shared `inventory.aws_ec2.yml` is symlinked into
 > that folder so `-i inventory.aws_ec2.yml` still works. This directory keeps the
 > benchmark/runtime playbooks (`run_ucast.yaml`, `run_mcast.yaml`,
-> `configure_mcast.yaml`) and the shared inventory. Report generators live in `../../report/`.
+> `configure_mcast.yaml`) and the shared inventory. Report generators live in `../../control-plane/`.
 
 ## Two usage modes
 
@@ -68,7 +68,7 @@ After provisioning, binaries are installed to `/opt/af-xdp/` and the `replicator
 | `run_ucast.yaml` | Run unicast NxN RTT benchmark + generate report | After provisioning — serial pairwise measurement, then local HTML/JSON report |
 | `run_mcast.yaml` | Run multicast fan-out benchmark | After configure_mcast — source→replicator→destinations |
 | `inventory.aws_ec2.yml` | Dynamic EC2 inventory by Role tag | With CDK-deployed or manually-tagged instances |
-| _report generators_ | Moved to `../../report/` | `gen/` (Python: `report.py` — heatmap `matrix_report.html` + shared loaders; `fleet_json.py` — emits `fleet.json`; `run_ucast.yaml` Play 4 runs both) + `web/` (Vite + Svelte + three.js — renders `fleet.json` in 2D/3D) |
+| _report generators_ | Moved to `../../control-plane/` | `gen/` (Python: `report.py` — heatmap `matrix_report.html` + shared loaders; `fleet_json.py` — emits `fleet.json`; `run_ucast.yaml` Play 4 runs both) + `web/` (Vite + Svelte + three.js — renders `fleet.json` in 2D/3D) |
 | **`../../dev/ansible/`** (moved) | | |
 | `provision.yaml` | Full install from scratch | Stock AL2023 — self-hosted or CDK without baked AMI |
 

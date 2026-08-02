@@ -1,14 +1,14 @@
-# report/web — topology frontend (Vite + Svelte + three.js)
+# control-plane/web — topology frontend (Vite + Svelte + three.js)
 
 Renders the shared `fleet.json` topology model (schema `afxdp.topology/v1`, see
 `dev/roadmap.md`). This is **Phase 0** of the real-time roadmap: data is decoupled
-from view — the Python generators (`report/gen/`) emit `fleet.json`, and this app
+from view — the Python generators (`control-plane/gen/`) emit `fleet.json`, and this app
 renders it. Later the same app will consume a live WebSocket stream unchanged.
 
 ## Run (dev)
 
 ```bash
-cd report/web
+cd control-plane/web
 npm install            # svelte, vite, three
 npm run dev            # http://localhost:5173  (loads public/fleet.json)
 ```
