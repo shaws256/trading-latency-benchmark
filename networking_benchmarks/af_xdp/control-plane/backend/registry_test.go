@@ -67,3 +67,32 @@ func TestRegistryRoleScoping(t *testing.T) {
 		t.Fatal("ByRole(missing) should be nil")
 	}
 }
+
+// The "changed" flag gates SSE re-broadcast. It must fire on a replicator-mode
+// change and on an offline->online transition, and stay quiet for an identical
+// heartbeat (otherwise: broadcast storms, or missed live updates).
+func TestRegistryHeartbeatMaterialChange(t *testing.T) {
+	r := NewRegistry(30)
+	r.Upsert(reg1("replicator"))
+	hb := func(state, mode string, unix int64) proto.Heartbeat {
+		return proto.Heartbeat{InstanceID: "i-replicator", Unix: unix, State: state, ReplicatorMode: mode}
+	}
+	now := time.Now().Unix()
+	if _, ch := r.Heartbeat(hb("running", "ucast", now)); !ch {
+		t.Fatal("initial state/mode should be material")
+	}
+	if _, ch := r.Heartbeat(hb("running", "ucast", now)); ch {
+		t.Fatal("identical heartbeat must NOT be material (avoids broadcast storm)")
+	}
+	if _, ch := r.Heartbeat(hb("running", "mcast", now)); !ch {
+		t.Fatal("replicator-mode change must be material")
+	}
+	// Drive stale -> offline, then a fresh heartbeat -> online transition is material.
+	r.Heartbeat(hb("running", "mcast", now-100))
+	if r.List()[0].Online {
+		t.Fatal("node past stale window should be offline")
+	}
+	if _, ch := r.Heartbeat(hb("running", "mcast", time.Now().Unix())); !ch {
+		t.Fatal("offline->online transition must be material")
+	}
+}

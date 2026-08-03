@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 
 	"afxdp-cp/proto"
@@ -74,5 +75,37 @@ func TestScheduleRoundsCoversAllPairsDisjoint(t *testing.T) {
 		if n >= 4 && maxPer < 2 {
 			t.Fatalf("n=%d expected concurrency (>=2 pairs/round), got max %d", n, maxPer)
 		}
+	}
+}
+
+// Cancel must set the flag; a campaign resets it at start (mirrored here).
+func TestOrchestratorCancel(t *testing.T) {
+	o := &Orchestrator{pending: map[string]chan proto.CommandResult{}}
+	if o.cancelled() {
+		t.Fatal("a fresh orchestrator must not be cancelled")
+	}
+	o.Cancel()
+	if !o.cancelled() {
+		t.Fatal("Cancel() must set the cancelled flag")
+	}
+	atomic.StoreInt32(&o.cancel, 0) // Run* clears it at campaign start
+	if o.cancelled() {
+		t.Fatal("resetting cancel must clear the flag")
+	}
+}
+
+// Only one campaign may run at a time — the CAS guard used by RunUcastMatrix /
+// RunMcastMatrix rejects a concurrent start and re-acquires after release.
+func TestOnlyOneCampaignAtATime(t *testing.T) {
+	o := &Orchestrator{pending: map[string]chan proto.CommandResult{}}
+	if !atomic.CompareAndSwapInt32(&o.running, 0, 1) {
+		t.Fatal("first campaign should acquire the guard")
+	}
+	if atomic.CompareAndSwapInt32(&o.running, 0, 1) {
+		t.Fatal("a second concurrent campaign must be rejected")
+	}
+	atomic.StoreInt32(&o.running, 0) // deferred release at campaign end
+	if !atomic.CompareAndSwapInt32(&o.running, 0, 1) {
+		t.Fatal("guard must re-acquire after release")
 	}
 }
