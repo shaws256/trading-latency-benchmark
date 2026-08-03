@@ -62,6 +62,10 @@ export function enhancePanel(ctx, el, track = true) {
     el.style.maxHeight = '';
   };
   const ro = new ResizeObserver(update); ro.observe(el);
+  // Also observe the content wrapper: when the body's height changes (e.g. the
+  // control panel swaps normal↔live sections, or combos populate), recompute so
+  // the panel sticks to its content instead of clipping / leaving empty space.
+  ro.observe(scaler);
   // Only width is user-resizable; height always fits the full content.
   el.style.resize = 'horizontal';
 

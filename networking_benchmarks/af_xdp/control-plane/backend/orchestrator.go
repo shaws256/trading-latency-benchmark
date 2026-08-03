@@ -26,6 +26,8 @@ type Orchestrator struct {
 	seq     uint64
 
 	running int32 // 0/1 — only one campaign at a time
+	lastMcastFwd string // replicator's last-applied mcast fwd mode (skip redundant set_mode)
+	cancel  int32 // set to 1 to request the running campaign abort at the next boundary
 }
 
 // NewOrchestrator creates an orchestrator and subscribes to fleet.result.* so
@@ -60,6 +62,12 @@ func (o *Orchestrator) onResult(m *nats.Msg) {
 func (o *Orchestrator) nextCmdID() string {
 	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), atomic.AddUint64(&o.seq, 1))
 }
+
+// Cancel requests the currently running campaign to abort at the next safe
+// boundary (round for ucast, mode for mcast). In-flight per-pair measurements
+// already dispatched to agents run to completion; no new work is started.
+func (o *Orchestrator) Cancel() { atomic.StoreInt32(&o.cancel, 1) }
+func (o *Orchestrator) cancelled() bool { return atomic.LoadInt32(&o.cancel) == 1 }
 
 // Dispatch publishes a command to a subject and waits for the agent's result.
 func (o *Orchestrator) Dispatch(subject string, c proto.Command, timeout time.Duration) (proto.CommandResult, error) {
@@ -163,6 +171,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 		return
 	}
 	defer atomic.StoreInt32(&o.running, 0)
+	atomic.StoreInt32(&o.cancel, 0)
 
 	xdpTx := p.Variation == "xdp-tx" || p.Variation == "xdp-txrx"
 	xdpRx := p.Variation == "xdp-rx" || p.Variation == "xdp-txrx"
@@ -194,9 +203,41 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 		"pairs": total, "rounds": len(rounds)})
 	log.Printf("campaign ucast/%s over %d nodes (%d pairs, %d parallel rounds)", p.Variation, len(nodes), total, len(rounds))
 
+	// Prepare: only (re)set nodes that aren't already echoing in ucast mode — a
+	// quick check against the last heartbeat state, so a heartbeat re-run is cheap
+	// when the fleet is already prepared.
+	var toPrep []Node
+	for _, n := range nodes {
+		if n.ReplicatorMode != "ucast" || n.ReplicatorSvc != "active" {
+			toPrep = append(toPrep, n)
+		}
+	}
+	if len(toPrep) > 0 {
+		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
+			"phase": "prepare", "msg": fmt.Sprintf("preparing %d/%d node(s) to ucast echo mode", len(toPrep), len(nodes))})
+		var prep sync.WaitGroup
+		for _, n := range toPrep {
+			prep.Add(1)
+			go func(n Node) {
+				defer prep.Done()
+				o.dispatchRetry(n.InstanceID, proto.Command{Type: proto.CmdSetMode, Mode: "ucast"}, 45*time.Second, 2)
+			}(n)
+		}
+		prep.Wait()
+	}
+	o.mu.Lock()
+	o.lastMcastFwd = "" // a ucast run leaves replicators in ucast mode
+	o.mu.Unlock()
+
 	var done int64
 	perPair := 30 * time.Second
 	for ri, round := range rounds {
+		if o.cancelled() {
+			o.hub.Emit("job", map[string]any{"status": "cancelled", "kind": "ucast", "variation": p.Variation,
+				"done": atomic.LoadInt64(&done), "total": total})
+			log.Printf("campaign ucast/%s cancelled after %d/%d", p.Variation, atomic.LoadInt64(&done), total)
+			return
+		}
 		var wg sync.WaitGroup
 		for _, pr := range round { // pairs in a round are node-disjoint -> safe to run concurrently
 			s, d := nodes[pr[0]], nodes[pr[1]]
@@ -257,6 +298,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 		return
 	}
 	defer atomic.StoreInt32(&o.running, 0)
+	atomic.StoreInt32(&o.cancel, 0)
 
 	if len(p.Modes) == 0 {
 		p.Modes = []string{"copy", "inplace", "kernel"}
@@ -293,22 +335,46 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 
 	const svcT, runSetup = 45 * time.Second, 30 * time.Second
 
-	// One-time: free the AF_XDP queue on the transient app nodes (stop their
-	// ucast replicator + detach any stale XDP).
-	o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdReplicatorSvc, SvcAction: "stop"}, svcT)
+	// One-time: free the AF_XDP queue on the transient app nodes. Skip the (slow)
+	// replicator STOP when it's already inactive from a prior run — but always run
+	// the cheap cleanup (detach stale XDP / kill leftover procs) for robustness.
+	if source.ReplicatorSvc == "active" {
+		o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdReplicatorSvc, SvcAction: "stop"}, svcT)
+	}
 	o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 	for _, d := range dests {
-		o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdReplicatorSvc, SvcAction: "stop"}, svcT)
+		if d.ReplicatorSvc == "active" {
+			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdReplicatorSvc, SvcAction: "stop"}, svcT)
+		}
 		o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 	}
+	o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "phase": "prepare",
+		"msg": "freed AF_XDP queues on source + destinations"})
 
 	for _, mode := range p.Modes {
 		// Replicator into mcast fan-out with this fwd mode.
-		if res, err := o.DispatchAgent(replicator.InstanceID,
-			proto.Command{Type: proto.CmdSetMode, Mode: "mcast", FwdMode: mode}, svcT); err != nil || !res.OK {
-			o.hub.Emit("job", map[string]any{"status": "error", "mode": mode, "stage": "set_mode", "err": firstErr(err, res.Err)})
-			continue
+		if o.cancelled() {
+			o.hub.Emit("job", map[string]any{"status": "cancelled", "kind": "mcast", "modes": p.Modes})
+			log.Printf("campaign mcast cancelled")
+			return
 		}
+		// Skip the (costly, replicator-restarting) set_mode when the replicator is
+		// already in mcast/<mode> — a quick check for cheap heartbeat re-runs.
+		o.mu.Lock()
+		skip := replicator.ReplicatorMode == "mcast" && o.lastMcastFwd == mode
+		o.mu.Unlock()
+		if !skip {
+			if res, err := o.DispatchAgent(replicator.InstanceID,
+				proto.Command{Type: proto.CmdSetMode, Mode: "mcast", FwdMode: mode}, svcT); err != nil || !res.OK {
+				o.hub.Emit("job", map[string]any{"status": "error", "mode": mode, "stage": "set_mode", "err": firstErr(err, res.Err)})
+				continue
+			}
+			o.mu.Lock()
+			o.lastMcastFwd = mode
+			o.mu.Unlock()
+		}
+		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
+			"msg": "replicator in mcast/" + mode + " — destinations joining group + clock sync"})
 		// Destinations (re)join the group behind the replicator + clock-gate.
 		for _, d := range dests {
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdJoinGroup,
@@ -316,6 +382,16 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
 		}
 		o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
+		if o.cancelled() {
+			for _, d := range dests {
+				o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
+			}
+			o.hub.Emit("job", map[string]any{"status": "cancelled", "kind": "mcast", "modes": p.Modes})
+			log.Printf("campaign mcast cancelled during %s setup", mode)
+			return
+		}
+		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
+			"msg": fmt.Sprintf("sending %d packets source→replicator→%d dest(s)", p.Count, len(dests))})
 
 		// Run (retryable): start each destination receiver (blocks in-agent until
 		// count/timeout), fire the source send, await. On failure, retry the batch
@@ -329,8 +405,32 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 		ok := false
 		var results []rr
 		for attempt := 1; attempt <= 2 && !ok; attempt++ {
+			if o.cancelled() {
+				break
+			}
 			var wg sync.WaitGroup
 			results = make([]rr, len(dests))
+			// Cancel watcher: if a cancel arrives mid-measurement, kill the in-flight
+			// mcast_receive/mcast_send (cleanup) so the blocking dispatches return.
+			stopWatch := make(chan struct{})
+			go func() {
+				t := time.NewTicker(500 * time.Millisecond)
+				defer t.Stop()
+				for {
+					select {
+					case <-stopWatch:
+						return
+					case <-t.C:
+						if o.cancelled() {
+							o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
+							for _, d := range dests {
+								o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
+							}
+							return
+						}
+					}
+				}
+			}()
 			for i, d := range dests {
 				i, d := i, d
 				wg.Add(1)
@@ -348,6 +448,11 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 				Mcast: &proto.McastParams{Group: p.Group, DataPort: p.DataPort, ReplicatorIP: replicator.PrivateIP,
 					Count: p.Count, IntervalUs: p.IntervalUs}}, recvT)
 			wg.Wait()
+			close(stopWatch)
+			if o.cancelled() {
+				ok = false
+				break
+			}
 			ok = serr == nil && sres.OK
 			for _, r := range results {
 				if r.err != nil || !r.res.OK {
@@ -360,6 +465,14 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 					o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 				}
 			}
+		}
+		if o.cancelled() {
+			for _, d := range dests {
+				o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
+			}
+			o.hub.Emit("job", map[string]any{"status": "cancelled", "kind": "mcast", "modes": p.Modes})
+			log.Printf("campaign mcast cancelled during %s run", mode)
+			return
 		}
 		for _, r := range results {
 			pairOK := r.err == nil && r.res.OK

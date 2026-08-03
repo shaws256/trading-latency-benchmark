@@ -23,6 +23,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/fleet", s.handleFleet)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/run", s.handleRun)
+	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/cmd", s.handleCmd)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	if s.web != "" {
@@ -119,6 +120,16 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		go s.orch.RunUcastMatrix(p)
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "started", "kind": "ucast", "variation": p.Variation})
 	}
+}
+
+// POST /api/cancel — request the running campaign to abort at the next boundary.
+func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	s.orch.Cancel()
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "cancelling"})
 }
 
 // POST /api/cmd — dispatch an ad-hoc command to one agent. Body:

@@ -13,7 +13,7 @@ export function buildPeerTable(ctx, i, inbound) {
   keys.forEach(pg => {
     h += '<tr class="pg-group"><td colspan="7">' + esc(pg) + '</td></tr>';
     groups[pg].sort((a, b) => a.data.p50 - b.data.p50).forEach(r => { const d = r.data;
-      h += '<tr data-peer="' + r.j + '"><td class="peer-name">' + esc(r.peer.ec2_name) + '</td><td class="highlight">' + fmtLat(d.p50) + '</td><td>' + (d.p90 ? fmtLat(d.p90) : '\u2014') + '</td><td>' + fmtLat(d.p99) + '</td><td>' + (d.p999 ? fmtLat(d.p999) : '\u2014') + '</td><td>' + (d.max ? fmtLat(d.max) : '\u2014') + '</td><td>' + (d.loss !== undefined ? esc(d.loss) + '%' : '\u2014') + '</td></tr>'; });
+      h += '<tr data-peer="' + r.j + '"><td class="peer-name">' + esc(r.peer.public_ip || r.peer.private_ip || r.peer.ec2_name) + '</td><td class="highlight">' + fmtLat(d.p50) + '</td><td>' + (d.p90 ? fmtLat(d.p90) : '\u2014') + '</td><td>' + fmtLat(d.p99) + '</td><td>' + (d.p999 ? fmtLat(d.p999) : '\u2014') + '</td><td>' + (d.max ? fmtLat(d.max) : '\u2014') + '</td><td>' + (d.loss !== undefined ? esc(d.loss) + '%' : '\u2014') + '</td></tr>'; });
   });
   return h + '</table>';
 }

@@ -48,7 +48,9 @@ export function computeNodeScore(node) {
   s += (num(node.mem_gb) / 768) * 2;
   return s;
 }
-export const nodeRadius = (node) => 30 + computeNodeScore(node) * 0.6;
+// Base radius raised so the private+public IP lines fit inside the body even for
+// live nodes (whose capability score is 0). Static nodes are dominated by score.
+export const nodeRadius = (node) => 44 + computeNodeScore(node) * 0.6;
 
 const familyColors = {
   'c7i':  { bg: '#1a2a40', border: '#58a6ff' }, 'c6in': { bg: '#261a3d', border: '#a371f7' },

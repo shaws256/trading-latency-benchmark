@@ -20,7 +20,7 @@ function tipHTML(ctx, i) {
   const node = ctx.fleet.nodes[i];
   const roleBadge = (node.role && ROLE_LABEL[node.role])
     ? ' <span class="role-badge role-' + esc(ROLE_CSS[node.role] || node.role) + '">' + ROLE_LABEL[node.role] + '</span>' : '';
-  return '<h3>' + esc(node.ec2_name) + roleBadge + '</h3>'
+  return '<h3>' + esc(node.public_ip || node.private_ip || node.ec2_name) + roleBadge + '</h3>'
     + '<div class="direction">Outbound</div>' + buildPeerTable(ctx, i, false)
     + '<div class="direction" style="margin-top:6px">Inbound</div>' + buildPeerTable(ctx, i, true);
 }
@@ -54,9 +54,8 @@ export function renderNodes(ctx) {
     p.dispose();
     if (p.el.parentNode) p.el.parentNode.removeChild(p.el);
     pinned.delete(i);
-    if (nodeEls[i]) nodeEls[i].classList.remove('has-panel');
-    // The "Deselect all" button belongs to the pinned-panels feature now that
-    // panels are decoupled from graph selection — hide it when none remain.
+    ctx.selected.delete(i);
+    applySel(ctx, -1);                 // drop this node's persisted edge labels
     if (pinned.size === 0) ctx.deselectBtn.style.display = 'none';
   };
 
@@ -100,7 +99,8 @@ export function renderNodes(ctx) {
 
     const dispose = enhancePinned(panelEl, { left: left + 'px', top: top + 'px' });
     pinned.set(i, { el: panelEl, dispose });
-    if (nodeEls[i]) nodeEls[i].classList.add('has-panel');
+    ctx.selected.add(i);               // pinning a node also pins its edge labels
+    applySel(ctx, -1);
     ctx.deselectBtn.style.display = 'inline-block';
   };
 

@@ -54,11 +54,17 @@ export function createLive({ onUpdate, onJob } = {}) {
       return { nodes: nodes.length, online, edges: edges.size };
     },
 
-    // Distinct {kind,variation} combos present in the data (drives the selector).
+    // Distinct {kind,variation} combos present in the data, each tagged with the
+    // latest measurement time (unix), newest first (drives the time-sorted selector).
     combos() {
-      const s = new Set();
-      for (const e of edges.values()) s.add(`${e.kind}|${e.variation}`);
-      return [...s].sort().map((x) => { const [kind, variation] = x.split('|'); return { kind, variation }; });
+      const m = new Map(); // kind|variation -> max unix
+      for (const e of edges.values()) {
+        const k = `${e.kind}|${e.variation}`, u = e.unix || 0;
+        if (!m.has(k) || u > m.get(k)) m.set(k, u);
+      }
+      return [...m.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, unix]) => { const [kind, variation] = k.split('|'); return { kind, variation, unix }; });
     },
 
     // Adapt current state into the fleet.json schema for one kind+variation.
@@ -82,18 +88,28 @@ export function createLive({ onUpdate, onJob } = {}) {
       }));
       const N = order.length;
       const matrix = Array.from({ length: N }, () => Array(N).fill(null));
+      // mcast is a fan-out THROUGH the replicator, so render the physical
+      // source → replicator → destination path (two hops), not a direct
+      // source → destination line. The end-to-end one-way metric is attributed
+      // to the measured last leg (replicator → dest) and mirrored on the shared
+      // first leg (source → replicator) so the path is always honoured.
+      const relayIdx = kind === 'mcast' ? order.findIndex((n) => n.role === 'replicator') : -1;
       for (const e of edges.values()) {
         if (e.kind !== kind || e.variation !== variation) continue;
         const i = idx.get(e.src), j = idx.get(e.dst);
         if (i == null || j == null) continue;
-        // A delta may arrive before its metrics are populated — skip rather than
-        // throw (which would abort the whole re-render).
         const m = e.metrics && e.metrics.service_rtt_us;
         if (!m) continue;
-        matrix[i][j] = {
+        const cell = {
           p50: m.p50, p90: m.p90, p99: m.p99, p999: m.p999, max: m.max,
           loss: +(e.metrics.loss_pct || 0).toFixed(3),
         };
+        if (relayIdx >= 0 && i !== relayIdx && j !== relayIdx) {
+          matrix[i][relayIdx] = matrix[i][relayIdx] || cell;   // source → replicator (shared)
+          matrix[relayIdx][j] = cell;                          // replicator → destination
+        } else {
+          matrix[i][j] = cell;
+        }
       }
       return {
         schema: 'afxdp.topology/v1',
@@ -110,6 +126,11 @@ export async function runCampaign(body) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   return res.json();
+}
+
+// Ask the backend to abort the running campaign at its next safe boundary.
+export async function cancelCampaign() {
+  try { await fetch('/api/cancel', { method: 'POST' }); } catch (_) { /* ignore */ }
 }
 
 export async function sendCommand(instanceId, command) {

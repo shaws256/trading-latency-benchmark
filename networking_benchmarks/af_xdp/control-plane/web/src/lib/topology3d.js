@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 
-export function mountTopology3D(container, fleet) {
+export function mountTopology3D(container, fleet, opts = {}) {
   const N = fleet.nodes.length;
   const region = fleet.region || 'us-east-1';
   const mat = fleet.matrix;
@@ -42,12 +42,16 @@ export function mountTopology3D(container, fleet) {
   const jitterColorCss = (t) => 'rgb(' + jitterColorRGB(t).join(',') + ')';
 
   function nodeScore(n) {
+    // Live-stream nodes lack the static hardware fields (bw_gbps, …); coerce each
+    // to a number so a missing field can't poison the score into NaN (which would
+    // make node radius/colour NaN and the 3D scene render nothing).
+    const num = (v) => (Number.isFinite(+v) ? +v : 0);
     let s = 0;
-    s += n.metal ? 40 : 0; s += (n.bw_gbps/200)*25; s += (n.pps_mpps/30)*20;
-    s += (n.enis/15)*10; s += (n.nitro_gen/6)*15; s += (n.vcpus/192)*8; s += (n.mem_gb/768)*2;
+    s += n.metal ? 40 : 0; s += (num(n.bw_gbps)/200)*25; s += (num(n.pps_mpps)/30)*20;
+    s += (num(n.enis)/15)*10; s += (num(n.nitro_gen)/6)*15; s += (num(n.vcpus)/192)*8; s += (num(n.mem_gb)/768)*2;
     return s;
   }
-  const nodeRadius3D = (n) => 2.6 + nodeScore(n) * 0.045;
+  const nodeRadius3D = (n) => 3.6 + nodeScore(n) * 0.045;
   const SCORE_MIN = 15, SCORE_MAX = 120;
   const capT = (n) => Math.min(1, Math.max(0, (nodeScore(n) - SCORE_MIN) / (SCORE_MAX - SCORE_MIN)));
   function capColor(n) {
@@ -142,7 +146,7 @@ export function mountTopology3D(container, fleet) {
   const dl = new THREE.DirectionalLight(0xffffff, 0.75); dl.position.set(1,1,1); scene.add(dl);
 
   // ── nodes ─────────────────────────────────────────────────────────────────
-  const sphereGeo = new THREE.SphereGeometry(1, 24, 18);
+  const sphereGeo = new THREE.BoxGeometry(2, 2, 2);   // cubic node body (same ±1 extent as the old sphere)
   const nodeMeshes = [];
   fleet.nodes.forEach((n, i) => {
     const col = capColor(n), emissive = col.clone().multiplyScalar(0.3);
@@ -161,9 +165,7 @@ export function mountTopology3D(container, fleet) {
     const div = document.createElement('div'); div.className = 'node-label' + (n.role && n.role !== 'unknown' ? ' role-' + n.role : '');
     const ROLE3D = {source:'src',replicator:'relay',destination:'dst'};
     const roleTag = ROLE3D[n.role] ? '<div class="role-badge role-'+ROLE3D[n.role]+'" style="background:'+({replicator:'#f0883e',source:'#1f6feb',destination:'#2ea043'}[n.role]||'#888')+';color:#fff;font-size:8px;font-weight:700;padding:1px 5px;border-radius:6px;text-transform:uppercase;margin-top:2px">'+ROLE3D[n.role]+'</div>' : '';
-    const pgTag = (n.cpg_name && n.cpg_name!=='unknown') ? '<div style="background:#f0883e;color:#0d1117;font-size:8px;font-weight:700;padding:1px 5px;border-radius:6px;margin-bottom:2px">'+n.cpg_name+'</div>' : '';
-    div.innerHTML = pgTag
-      + (n.public_ip ? '<div class="ipp">' + n.public_ip + '</div>' : '')
+    div.innerHTML = (n.public_ip ? '<div class="ipp">' + n.public_ip + '</div>' : '')
       + '<div class="ipv">' + n.private_ip + '</div>'
       + roleTag;
     const lab = new CSS2DObject(div); lab.position.set(0, 0, 0); mesh.add(lab);   // centered on node
@@ -253,9 +255,17 @@ export function mountTopology3D(container, fleet) {
   // ── camera fit ────────────────────────────────────────────────────────────
   const sphere = outerBox.getBoundingSphere(new THREE.Sphere());
   const R = Math.max(sphere.radius, 20);
-  controls.target.copy(sphere.center);
-  camera.position.copy(sphere.center).add(new THREE.Vector3(R*1.6, R*1.1, R*1.8));
-  camera.near = R/100; camera.far = R*100; camera.updateProjectionMatrix();
+  camera.near = R / 100; camera.far = R * 100; camera.updateProjectionMatrix();
+  // Restore the prior camera view across live-update remounts (continuous UX —
+  // zoom/rotation/pan are preserved); auto-fit only on the first mount.
+  if (opts.view && opts.view.pos && opts.view.target) {
+    camera.position.fromArray(opts.view.pos);
+    controls.target.fromArray(opts.view.target);
+  } else {
+    controls.target.copy(sphere.center);
+    camera.position.copy(sphere.center).add(new THREE.Vector3(R * 1.6, R * 1.1, R * 1.8));
+  }
+  controls.update();
 
   // ── latency table (grouped by PG, sorted by p50) ──────────────────────────
   function buildPeerTable(i, inbound) {
@@ -431,5 +441,8 @@ export function mountTopology3D(container, fleet) {
   (function animate(){ rafId = requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); labelRenderer.render(scene,camera); })();
   render(-1);
 
-  return { dispose() { cancelAnimationFrame(rafId); window.removeEventListener('resize', onResize); panelCleanups.forEach(fn => fn()); } };
+  return {
+    getView() { return { pos: camera.position.toArray(), target: controls.target.toArray() }; },
+    dispose() { cancelAnimationFrame(rafId); window.removeEventListener('resize', onResize); panelCleanups.forEach(fn => fn()); },
+  };
 }
