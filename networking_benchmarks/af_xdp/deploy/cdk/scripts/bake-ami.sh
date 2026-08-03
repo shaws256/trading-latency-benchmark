@@ -80,22 +80,22 @@ chown -R ec2-user:ec2-user /opt/af-xdp /tmp/build-src 2>/dev/null || true
 
 # ── 3b. Control-plane agent (Go) ──────────────────────────────────────────────
 # Build the NATS-driven Go agent from the same checkout so fleet nodes can be
-# driven by the central control plane instead of SSH/ansible. Uses the latest
-# stable Go from go.dev (nats.go needs a recent toolchain; AL2023's dnf golang
-# may lag). Best-effort — a failure here must NOT fail the AMI (ansible still works).
+# driven by the central control plane. Uses the latest stable Go from go.dev.
+# FATAL on failure: a baked AMI without a working agent silently breaks the
+# control plane, so we fail the bake (CFN gets a FAILURE signal) instead.
 CP_DIR=/tmp/build-src/networking_benchmarks/af_xdp/control-plane
 if [ -d "$CP_DIR/agent" ]; then
   echo "=== Step 3b: build control-plane agent ==="
+  [ -f "$CP_DIR/go.mod" ] || { echo "FATAL: $CP_DIR/go.mod missing (gitignored?) — cannot build agent"; exit 1; }
   GOVER=$(curl -sL "https://go.dev/VERSION?m=text" 2>/dev/null | head -1)
-  if [ -n "$GOVER" ] && curl -fsSL "https://go.dev/dl/${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tgz; then
-    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
-    ( cd "$CP_DIR" && GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/go PATH=/usr/local/go/bin:$PATH \
-        go build -o /opt/af-xdp/afxdp-agent ./agent ) \
-      && echo "afxdp-agent built" || echo "WARN: agent build failed (non-fatal)"
-    chown ec2-user:ec2-user /opt/af-xdp/afxdp-agent 2>/dev/null || true
-  else
-    echo "WARN: go toolchain fetch failed; skipping agent build"
-  fi
+  [ -n "$GOVER" ] || { echo "FATAL: could not resolve Go version from go.dev"; exit 1; }
+  curl -fsSL "https://go.dev/dl/${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tgz || { echo "FATAL: Go toolchain download failed"; exit 1; }
+  rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
+  ( cd "$CP_DIR" && GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/go PATH=/usr/local/go/bin:$PATH \
+      go build -o /opt/af-xdp/afxdp-agent ./agent )
+  [ -x /opt/af-xdp/afxdp-agent ] || { echo "FATAL: afxdp-agent did not build"; exit 1; }
+  echo "afxdp-agent built"
+  chown ec2-user:ec2-user /opt/af-xdp/afxdp-agent 2>/dev/null || true
 fi
 
 # ── 4. System configs ─────────────────────────────────────────────────────────
@@ -353,24 +353,27 @@ EOF
 cat > /usr/local/bin/afxdp-agent-preflight.sh <<'EOF'
 #!/bin/bash
 # Resolve AGENT_NATS_URL + AGENT_NATS_TOKEN from SSM (written by ControlPlaneStack)
-# when not already set in the env file, and enable skip-verify for self-signed TLS.
+# when not already set in the env file. Retries until BOTH resolve (the control
+# plane may still be booting), then REQUIRES them — so the agent never starts
+# half-configured (which manifested as 'no servers' / 'Authorization Violation').
 set -uo pipefail
 . /etc/default/afxdp-agent 2>/dev/null || true
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
 REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+ssm_get() { aws ssm get-parameter --region "${REGION:-us-east-1}" --name "$1" --query Parameter.Value --output text 2>/dev/null; }
 : > /run/afxdp-agent.env
-if [ -z "${AGENT_NATS_URL:-}" ]; then
-  URL=$(aws ssm get-parameter --region "${REGION:-us-east-1}" --name /af-xdp/nats-url --query Parameter.Value --output text 2>/dev/null)
-  [ -n "$URL" ] && [ "$URL" != "None" ] && echo "AGENT_NATS_URL=$URL" >> /run/afxdp-agent.env
-fi
-if [ -z "${AGENT_NATS_TOKEN:-}" ]; then
-  TOK=$(aws ssm get-parameter --region "${REGION:-us-east-1}" --name /af-xdp/nats-token --query Parameter.Value --output text 2>/dev/null)
-  [ -n "$TOK" ] && [ "$TOK" != "None" ] && echo "AGENT_NATS_TOKEN=$TOK" >> /run/afxdp-agent.env
-fi
-# self-signed TLS endpoint -> skip cert verify (encryption without a CA)
-if grep -q 'AGENT_NATS_URL=tls://' /run/afxdp-agent.env 2>/dev/null; then
-  echo "AGENT_NATS_INSECURE=1" >> /run/afxdp-agent.env
-fi
+URL="${AGENT_NATS_URL:-}"; TOK="${AGENT_NATS_TOKEN:-}"
+for i in $(seq 1 30); do
+  [ -z "$URL" ] && { v=$(ssm_get /af-xdp/nats-url);   [ -n "$v" ] && [ "$v" != "None" ] && URL="$v"; }
+  [ -z "$TOK" ] && { v=$(ssm_get /af-xdp/nats-token); [ -n "$v" ] && [ "$v" != "None" ] && TOK="$v"; }
+  { [ -n "$URL" ] && [ -n "$TOK" ]; } && break
+  sleep 2
+done
+[ -n "$URL" ] && echo "AGENT_NATS_URL=$URL" >> /run/afxdp-agent.env
+[ -n "$TOK" ] && echo "AGENT_NATS_TOKEN=$TOK" >> /run/afxdp-agent.env
+case "$URL" in tls://*) echo "AGENT_NATS_INSECURE=1" >> /run/afxdp-agent.env;; esac
+# Require both before the agent starts; systemd (Restart=always) retries this.
+{ [ -n "$URL" ] && [ -n "$TOK" ]; } || { echo "preflight: NATS url/token not resolved yet (control plane up?)" >&2; exit 1; }
 exit 0
 EOF
 chmod +x /usr/local/bin/afxdp-agent-preflight.sh

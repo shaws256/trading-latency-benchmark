@@ -66,7 +66,21 @@ function resultsBrowser() {
 }
 
 // base: './' so a built bundle works when opened from any path.
+// Dev proxy: forward the LIVE control-plane endpoints to a running backend so
+// `npm run dev` gets live data/streaming without rebuilding + copying the
+// bundle to the host. Point it with CP_URL (default localhost:8080). The
+// results-browser middleware keeps /api/results and /api/fleet?path= local.
+const CP = process.env.CP_URL || 'http://localhost:8080';
+
 export default defineConfig({
   base: './',
   plugins: [svelte(), resultsBrowser()],
+  server: {
+    proxy: {
+      '/api/events': { target: CP, changeOrigin: true },
+      '/api/run':    { target: CP, changeOrigin: true },
+      '/api/cancel': { target: CP, changeOrigin: true },
+      '/api/cmd':    { target: CP, changeOrigin: true },
+    },
+  },
 });
