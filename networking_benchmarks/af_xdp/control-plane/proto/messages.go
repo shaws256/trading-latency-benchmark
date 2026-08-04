@@ -14,6 +14,7 @@ type NodeInfo struct {
 	Region         string `json:"region"`
 	InstanceType   string `json:"instance_type"`
 	PlacementGroup string `json:"placement_group,omitempty"` // "" = no PG
+	VpcID          string `json:"vpc_id,omitempty"`
 	Role           string `json:"role,omitempty"`            // source|replicator|destination
 	Stack          string `json:"stack,omitempty"`           // CFN stack name, if tagged
 	Hostname       string `json:"hostname,omitempty"`

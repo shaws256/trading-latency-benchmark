@@ -1,0 +1,6 @@
+[
+  {"role": "source", "az": "c", "pgName": "cpg-euc-c", "pgType": "cluster", "region": "eu-central-1"},
+  {"role": "replicator", "az": "c", "pgName": "cpg-euc-c", "pgType": "cluster", "region": "eu-central-1"},
+
+  {"count": 20, "role": "destination", "az": "c", "pgName": "cpg-euc-c", "pgType": "cluster", "region": "eu-central-1"}
+]

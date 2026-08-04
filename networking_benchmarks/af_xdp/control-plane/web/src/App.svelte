@@ -82,9 +82,18 @@
       const res = await fetch(url);
       if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
       fleet = validateFleet(await res.json());
+      // Infer kind from the data: if nodes have source+replicator+destination roles → mcast.
+      const roles = new Set((fleet.nodes || []).map(n => n.role).filter(Boolean));
+      if (roles.has('source') && roles.has('replicator') && roles.has('destination')) {
+        kind = 'mcast';
+      } else if ((label || url).includes('mcast')) {
+        kind = 'mcast';
+      } else {
+        kind = 'ucast';
+      }
       loading = false; remount();
       panel?.setStats(statsFromFleet(fleet));
-      panel?.setStatus(`loaded ${label || url}`);
+      panel?.setStatus(`loaded ${label || url} (${kind})`);
     } catch (e) { loading = false; error = e.message || String(e); panel?.setStatus('load failed: ' + error); }
   }
 

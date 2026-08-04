@@ -33,7 +33,8 @@ export const CSS = `
 .t2d-root .node .pg-badge { position: absolute; top: -9px; left: 50%; transform: none;
   background: #f0883e; color: #0d1117; font-size: 10px; font-weight: 700;
   padding: 1px 6px; border-radius: 10px; border: 2px solid #0d1117;
-  white-space: nowrap; letter-spacing: 0.2px; pointer-events: none; }
+  white-space: nowrap; letter-spacing: 0.2px; pointer-events: auto; cursor: default;
+  width: auto; max-width: none; overflow: visible; }
 
 /* Role badge at the bottom-centre — colour by role, same tint family as the legend. */
 .t2d-root .node .role-badge { position: absolute; bottom: -9px; left: 50%; transform: translateX(-50%);

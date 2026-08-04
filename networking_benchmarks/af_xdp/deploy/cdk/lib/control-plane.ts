@@ -78,7 +78,7 @@ export class ControlPlaneStack extends cdk.Stack {
       'dnf install -y git nodejs npm || dnf install -y git',
       'GOVER=$(curl -sL "https://go.dev/VERSION?m=text" | head -1)',
       'curl -fsSL "https://go.dev/dl/${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tgz && rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz',
-      'export PATH=/usr/local/go/bin:$PATH GOFLAGS=-mod=mod GOCACHE=/tmp/gocache GOPATH=/tmp/go',
+      'export PATH=/usr/local/go/bin:$PATH GOFLAGS="-mod=mod -buildvcs=false" GOCACHE=/tmp/gocache GOPATH=/tmp/go',
       'mkdir -p /opt/af-xdp-cp',
       `git clone --depth 1 --branch ${gitRef} ${gitRepo} /opt/cp-src`,
       'CP=/opt/cp-src/networking_benchmarks/af_xdp/control-plane',
