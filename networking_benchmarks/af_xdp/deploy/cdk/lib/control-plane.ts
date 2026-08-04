@@ -83,7 +83,7 @@ export class ControlPlaneStack extends cdk.Stack {
       `git clone --depth 1 --branch ${gitRef} ${gitRepo} /opt/cp-src`,
       'CP=/opt/cp-src/networking_benchmarks/af_xdp/control-plane',
       '( cd "$CP" && go build -o /opt/af-xdp-cp/afxdp-backend ./backend ) && echo "backend built"',
-      '( cd "$CP/web" && npm ci && npm run build && cp -r dist /opt/af-xdp-cp/web-dist ) || echo "web build skipped (install npm manually or use afxdpctl sync)"',
+      '( cd "$CP/web" && npm install && npm run build && cp -r dist /opt/af-xdp-cp/web-dist ) || echo "web build failed (check /var/log/cp-setup.log)"',
       'NATSVER=v2.10.22',
       'curl -fsSL "https://github.com/nats-io/nats-server/releases/download/${NATSVER}/nats-server-${NATSVER}-linux-amd64.tar.gz" -o /tmp/nats.tgz && tar xzf /tmp/nats.tgz -C /tmp && cp /tmp/nats-server-*/nats-server /opt/af-xdp-cp/nats-server && chmod +x /opt/af-xdp-cp/nats-server',
       // Auth token (provided or generated) + TLS flag.
