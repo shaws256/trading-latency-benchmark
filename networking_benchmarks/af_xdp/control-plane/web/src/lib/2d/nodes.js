@@ -119,7 +119,7 @@ export function renderNodes(ctx) {
     el.style.borderStyle = 'solid';
 
     const pgBadge = (node.cpg_name && node.cpg_name !== 'unknown')
-      ? '<span class="pg-badge" title="' + esc(node.cpg_name) + '">' + esc(node.cpg_name.slice(0, 7)) + '</span>' : '';
+      ? '<span class="pg-badge" title="' + esc(node.cpg_name) + '">' + esc(node.cpg_name.slice(0, 8)) + '</span>' : '';
     const roleLabel = node.role && ROLE_LABEL[node.role];
     const roleBadge = roleLabel
       ? '<span class="role-badge role-' + esc(ROLE_CSS[node.role] || node.role) + '">' + roleLabel + '</span>' : '';

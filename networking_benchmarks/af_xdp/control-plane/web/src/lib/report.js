@@ -133,21 +133,63 @@ export function buildReportHTML(fleet, kind, variation) {
   .path-info{margin:8px 0;padding:8px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;font-size:12px}
   table{border-collapse:collapse;margin-top:8px}
   td,th{border:1px solid #30363d;padding:4px 9px;text-align:center;font-size:12px}
-  th{background:#161b22;color:#8b949e}
+  th{background:#161b22;color:#8b949e;cursor:pointer;user-select:none}
+  th:hover{background:#21262d}
+  th.sorted-asc::after{content:' ▲';font-size:10px}
+  th.sorted-desc::after{content:' ▼';font-size:10px}
   .heat td{font-family:'SF Mono',monospace;color:#0d1117;font-weight:700}
   .heat .diag,.heat .na{background:#161b22;color:#6e7681;font-weight:400}
   .inv td,.inv th{text-align:left;padding:3px 8px}
   td{font-family:'SF Mono',monospace}
   .role-source{color:#1f6feb} .role-replicator{color:#f0883e} .role-destination{color:#2ea043}
   .role{font-size:11px;padding:1px 5px;border-radius:8px;margin-left:4px}
+  .coverage{font-size:12px;margin:6px 0 12px;padding:7px 10px;border-left:3px solid #d29922;background:#fff8e1;line-height:1.5}
 </style></head><body>
   <h1>AF_XDP latency report — ${esc(kind)} / ${esc(variation)}</h1>
   <div class="meta">Region: ${esc(fleet.region || '?')} · Nodes: ${N} · Pairs: ${pairs} · Generated: ${gen}</div>
+  ${isMcast ? '' : `<div class="coverage">Coverage: <b>${pairs}</b> of <b>${N * (N - 1)}</b> possible ordered pairs measured.${pairs < N * (N - 1) ? ` <b>${N * (N - 1) - pairs} missing.</b> A blank cell is either a pair that never ran, or one <b>rejected by the loss gate</b> — rtt derives percentiles only from datagrams that returned, so a lossy run describes its surviving subset and is not comparable to a clean run. Rejected pairs are recorded as failures rather than published as results; check the run log / error list for the reason.` : ''}</div>`}
   <h2>Fleet inventory</h2>
   ${inventory}
   <h2>${isMcast ? 'Fan-out latency — source → replicator → destinations' : 'Heatmap — p50 (green = fast, red = slow)'}</h2>
   ${heat}
   <h2>All measured latencies</h2>
-  <table>${tableHeader}${rows}</table>
+  <table id="lat-table">${tableHeader}${rows}</table>
+  <script>
+  // Column sorting for the latency table
+  (function(){
+    const table = document.getElementById('lat-table');
+    if (!table) return;
+    const headers = table.querySelectorAll('th');
+    let sortCol = -1, sortDir = 1;
+    // Parse a formatted latency cell ("34 µs", "0.2 ms", "1.5 s") into µs for
+    // numeric comparison. Returns NaN for non-latency cells (sorted lexically).
+    function parseLatUs(s) {
+      const m = s.match(/^([\\d.]+)\\s*(s|ms|µs|%?)$/);
+      if (!m) return NaN;
+      const v = parseFloat(m[1]);
+      if (m[2] === 's') return v * 1000000;
+      if (m[2] === 'ms') return v * 1000;
+      return v; // µs or bare number (loss %)
+    }
+    headers.forEach((th, col) => {
+      th.addEventListener('click', () => {
+        if (sortCol === col) sortDir *= -1;
+        else { sortCol = col; sortDir = 1; }
+        headers.forEach(h => h.classList.remove('sorted-asc','sorted-desc'));
+        th.classList.add(sortDir === 1 ? 'sorted-asc' : 'sorted-desc');
+        const tbody = table.querySelector('tbody') || table;
+        const rows = Array.from(tbody.querySelectorAll('tr')).slice(1);
+        rows.sort((a, b) => {
+          const av = a.cells[col]?.textContent?.trim() || '';
+          const bv = b.cells[col]?.textContent?.trim() || '';
+          const an = parseLatUs(av), bn = parseLatUs(bv);
+          if (!isNaN(an) && !isNaN(bn)) return (an - bn) * sortDir;
+          return av.localeCompare(bv) * sortDir;
+        });
+        rows.forEach(r => tbody.appendChild(r));
+      });
+    });
+  })();
+  </script>
 </body></html>`;
 }

@@ -13,7 +13,7 @@ import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 // Shared, single-source-of-truth helpers (identical maths as the 2D map): number
 // formatting, per-edge jitter, latency→colour, capability→colour, fixed node size.
 import { fmtLat, edgeSigma, latencyColor, capabilityColor, buildCapabilityScale, nodeRadius3D, CAP_GRADIENT_CSS } from './2d/palette.js';
-import { enhancePanel, placePanel, enhancePinned, buildBoundaryToggles } from './2d/panels.js';
+import { enhancePanel, placePanel, enhancePinned, buildBoundaryToggles, buildSummaryHTML, buildInstanceTypesHTML } from './2d/panels.js';
 import { nodeTipHTML } from './2d/tables.js';
 import { HIER, pathKeyOf, separateHierarchy } from './grouplayout.js';
 
@@ -476,24 +476,11 @@ export function mountTopology3D(container, fleet, opts = {}) {
   });
   deselectBtn.addEventListener('click', () => { [...selected].forEach(unpinPanel); selected.clear(); render(hoverIdx); });
 
-  // ── panels ────────────────────────────────────────────────────────────────
-  function median(a){ if(!a.length) return 0; const s=[...a].sort((x,y)=>x-y); return s[Math.floor(s.length/2)]; }
-  const uniq = (k) => [...new Set(fleet.nodes.map(n=>n[k]))].filter(v=>v && v!=='unknown');
-  (function buildStats(){
-    const regs=uniq('region'), azs=uniq('az'), pgs=uniq('cpg_name'), accts=uniq('account');
-    const row = (k,v) => '<div class="stat"><span>'+k+'</span><span class="val">'+v+'</span></div>';
-    let scope = '';
-    if (pgs.length===1) scope += row('Placement Group', pgs[0]); else if (pgs.length>1) scope += row('Placement Groups', pgs.length);
-    if (azs.length===1) scope += row('AZ', azs[0]); else if (azs.length>1) scope += row('AZs', azs.join(', '));
-    if (regs.length===1) scope += row('Region', regs[0]); else if (regs.length>1) scope += row('Regions', regs.join(', '));
-    if (accts.length===1) scope += row('Account', accts[0]); else if (accts.length>1) scope += row('Accounts', accts.length);
-    statsEl.innerHTML = '<h3>Summary</h3>'
-      + row('Nodes', N) + row('Edges', allSig.length)
-      + row('p50', fmtLat(minP50)+'\u2013'+fmtLat(maxP50))
-      + row('p99', fmtLat(minP99)+'\u2013'+fmtLat(maxP99))
-      + row('Jitter \u03c3', fmtLat(minSig)+'\u2013'+fmtLat(maxSig))
-      + '<div class="scope">' + scope + '</div>';
-  })();
+  // ── panels (shared content builders from 2d/panels.js) ─────────────────────
+  statsEl.innerHTML = buildSummaryHTML({
+    N, pairs: allSig.length, minP50, maxP50, minP99: arrMin(allP99), maxP99: arrMax(allP99),
+    minSigma: minSig, maxSigma: maxSig, nodes: fleet.nodes,
+  });
   legendEl.innerHTML = '<h3>Legend</h3>'
     + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#39d353,#f0883e,#f85149)"></div><span>Edge colour = p50 latency (green=fast, red=slow)</span></div>'
     + '<div class="row"><div class="swatch" style="background:' + CAP_GRADIENT_CSS + '"></div><span>Node colour = capability (blue=basic \u2192 green=metal/top-net)</span></div>'
@@ -505,18 +492,8 @@ export function mountTopology3D(container, fleet, opts = {}) {
     (boundaryObjs[key] || []).forEach((o) => { o.visible = on; });
     setBoundaryHover(null);   // drop any active hover contour when visibility changes
   }, {}, [{ label: 'Links', checked: true, onChange: (on) => { linksHidden = !on; render(hoverIdx); } }]));
-  (function buildITypes(){
-    const seen = new Map(); fleet.nodes.forEach(n => { if(!seen.has(n.type)) seen.set(n.type, n); });
-    let rows = '';
-    for (const [type, n] of seen) {
-      const css = capabilityColor(n, capScale).border, r = 13, fam = type.split('.')[0];
-      rows += '<div class="type-row"><div class="type-dot" style="width:'+(r*2)+'px;height:'+(r*2)+'px;background:'+css+';border:2px solid '+css+'"></div>'
-        + '<div style="flex:1"><div class="type-name">'+type+'</div><div class="type-specs">'+n.vcpus+'vCPU \u00b7 '+n.mem_gb+'GB \u00b7 '+n.bw_gbps+'Gbps \u00b7 '+n.pps_mpps+'Mpps \u00b7 '+n.enis+' ENIs \u00b7 Nitro '+n.nitro_gen+'</div></div>'
-        + '<a href="https://instances.vantage.sh/?selected='+type+'&region='+region+'" target="_blank">specs\u2197</a>'
-        + '<a href="https://aws.amazon.com/ec2/instance-types/'+fam+'/" target="_blank">family\u2197</a></div>';
-    }
-    itypesEl.innerHTML = '<h3>Instance Types</h3>' + rows;
-  })();
+  const itHtml = buildInstanceTypesHTML(fleet.nodes, region, capScale);
+  if (itHtml) itypesEl.innerHTML = '<h3>Instance Types</h3>' + itHtml;
 
   // Panels use the SHARED enhancer (2d/panels.js): identical drag/fold/resize to
   // 2D, and — crucially — they register in the same module-level foldables set,

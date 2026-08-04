@@ -4,7 +4,7 @@
 // On fold: panel shrinks to header text width, resize disabled.
 // On unfold: restores original position and size.
 
-import { fmtLat, capabilityColor, buildCapabilityScale, CAP_GRADIENT_CSS, esc } from './palette.js';
+import { fmtLat, fmtRange, capabilityColor, buildCapabilityScale, CAP_GRADIENT_CSS, esc } from './palette.js';
 import { applySel } from './selection.js';
 
 // Resize floor is the panel's ORIGINAL size (1.0×) — a panel may grow up to
@@ -255,26 +255,68 @@ export function enhancePinned(el, def) {
   return () => { foldables.delete(entry); window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); };
 }
 
+// ── Shared panel content builders (used by both 2D and 3D renderers) ─────────
+
+// Build the Summary panel's inner HTML. `opts`: { N, pairs, minP50, maxP50,
+// minP99, maxP99, minSigma, maxSigma, nodes[], stress? }.
+export function buildSummaryHTML(opts) {
+  const { N, pairs, minP50, maxP50, minP99, maxP99, minSigma, maxSigma, nodes, stress } = opts;
+  const stat = (label, val) => '<div class="stat"><span>' + label + '</span><span class="val">' + esc(val) + '</span></div>';
+  const statList = (label, arr) => '<div class="stat"><span>' + label + '</span><span class="val val-list">' + arr.map(esc).join('<br>') + '</span></div>';
+
+  const uniq = (k) => [...new Set((nodes || []).map(n => n[k]))].filter(v => v && v !== 'unknown');
+  const uRegions = uniq('region'), uAZs = uniq('az'), uCPGs = uniq('cpg_name'), uAccounts = uniq('account');
+  let scopeHtml = '';
+  if (uCPGs.length === 1) scopeHtml += stat('Placement Group', uCPGs[0]); else if (uCPGs.length > 1) scopeHtml += statList('PGs', uCPGs);
+  if (uAZs.length === 1) scopeHtml += stat('AZ', uAZs[0]); else if (uAZs.length > 1) scopeHtml += stat('AZs', uAZs.length);
+  if (uRegions.length === 1) scopeHtml += stat('Region', uRegions[0]); else if (uRegions.length > 1) scopeHtml += statList('Regions', uRegions);
+  if (uAccounts.length === 1) scopeHtml += stat('Account', uAccounts[0]); else if (uAccounts.length > 1) scopeHtml += stat('Accounts', uAccounts.length);
+
+  let html = '<h3>Summary</h3>'
+    + stat('Nodes', N) + stat('Pairs', pairs)
+    + stat('p50', fmtRange(minP50, maxP50))
+    + stat('p99', fmtRange(minP99, maxP99))
+    + stat('Jitter \u03c3', fmtRange(minSigma, maxSigma));
+  if (scopeHtml) html += '<div style="margin-top:8px;border-top:1px solid #30363d;padding-top:6px">' + scopeHtml + '</div>';
+  if (stress != null) html += '<div class="stress">Layout fidelity: <span class="val">' + (100 - stress * 100).toFixed(1) + '%</span></div>';
+  return html;
+}
+
+// Build Instance Types panel rows HTML. Returns '' if no known types.
+export function buildInstanceTypesHTML(nodes, region, capScale) {
+  const seen = new Map(); (nodes || []).forEach(n => { if (!seen.has(n.type)) seen.set(n.type, n); });
+  let rows = '';
+  for (const [type, node] of seen) {
+    if (type === 'unknown') continue;
+    const colors = capabilityColor(node, capScale), r = 13, family = type.split('.')[0];
+    const eType = esc(type);
+    const specs = [];
+    if (node.vcpus) specs.push(esc(node.vcpus) + 'vCPU');
+    if (node.mem_gb) specs.push(esc(node.mem_gb) + 'GB');
+    if (node.bw_gbps) specs.push(esc(node.bw_gbps) + 'Gbps');
+    if (node.pps_mpps) specs.push(esc(node.pps_mpps) + 'Mpps');
+    if (node.enis) specs.push(esc(node.enis) + ' ENIs');
+    if (node.nitro_gen) specs.push('Nitro ' + esc(node.nitro_gen));
+    const specsHtml = specs.length ? '<div class="type-specs">' + specs.join(' \u00b7 ') + '</div>' : '';
+    rows += '<div class="type-row"><div class="type-dot" style="width:' + (r*2) + 'px;height:' + (r*2) + 'px;background:' + colors.bg + ';border:2px solid ' + colors.border + '"></div>'
+      + '<div class="type-info"><div class="type-name">' + eType + '</div>' + specsHtml + '</div>'
+      + '<a href="https://instances.vantage.sh/?selected=' + encodeURIComponent(type) + '&region=' + encodeURIComponent(region) + '" target="_blank" rel="noopener noreferrer">specs\u2197</a>'
+      + '<a href="https://aws.amazon.com/ec2/instance-types/' + encodeURIComponent(family) + '/" target="_blank" rel="noopener noreferrer">family\u2197</a></div>';
+  }
+  return rows;
+}
+
 export function renderPanels(ctx) {
   const { fleet, root, statsEl, N, region, stress } = ctx;
   const { minP50, maxP50, minP99, maxP99, minSigma, maxSigma, allP50 } = ctx.ranges;
   const capScale = buildCapabilityScale(fleet.nodes);   // uniform blue→green over present types
 
-  (function () {
-    const seen = new Map(); fleet.nodes.forEach(n => { if (!seen.has(n.type)) seen.set(n.type, n); });
-    let rows = '';
-    for (const [type, node] of seen) {
-      // Fixed-size swatch tinted by capability (blue→green) — matches the nodes.
-      const colors = capabilityColor(node, capScale), r = 13, family = type.split('.')[0];
-      const eType = esc(type);
-      rows += '<div class="type-row"><div class="type-dot" style="width:' + (r*2) + 'px;height:' + (r*2) + 'px;background:' + colors.bg + ';border:2px solid ' + colors.border + '"></div>'
-        + '<div class="type-info"><div class="type-name">' + eType + '</div><div class="type-specs">' + esc(node.vcpus) + 'vCPU \u00b7 ' + esc(node.mem_gb) + 'GB \u00b7 ' + esc(node.bw_gbps) + 'Gbps \u00b7 ' + esc(node.pps_mpps) + 'Mpps \u00b7 ' + esc(node.enis) + ' ENIs \u00b7 Nitro ' + esc(node.nitro_gen) + '</div></div>'
-        + '<a href="https://instances.vantage.sh/?selected=' + encodeURIComponent(type) + '&region=' + encodeURIComponent(region) + '" target="_blank" rel="noopener noreferrer">specs\u2197</a>'
-        + '<a href="https://aws.amazon.com/ec2/instance-types/' + encodeURIComponent(family) + '/" target="_blank" rel="noopener noreferrer">family\u2197</a></div>';
-    }
+  // Instance Types panel (shared logic via buildInstanceTypesHTML).
+  const itHtml = buildInstanceTypesHTML(fleet.nodes, region, capScale);
+  if (itHtml) {
     const el = document.createElement('div'); el.className = 'instance-legend';
-    el.innerHTML = '<h3>Instance Types</h3>' + rows; root.appendChild(el);
-  })();
+    el.innerHTML = '<h3>Instance Types</h3>' + itHtml; root.appendChild(el);
+  }
 
   (function () {
     const el = document.createElement('div'); el.className = 'vis-legend';
@@ -303,24 +345,11 @@ export function renderPanels(ctx) {
     root.appendChild(el);
   })();
 
-  const uniq = (k) => [...new Set(fleet.nodes.map(n => n[k]))].filter(v => v && v !== 'unknown');
-  const uRegions = uniq('region'), uAZs = uniq('az'), uCPGs = uniq('cpg_name'), uAccounts = uniq('account');
-  const stat = (label, val) => '<div class="stat"><span>' + label + '</span><span class="val">' + esc(val) + '</span></div>';
-  // Multi-value scope (PGs/Regions): stack each name on its own row so long
-  // names wrap as whole titles instead of breaking mid-spelling.
-  const statList = (label, arr) => '<div class="stat"><span>' + label + '</span><span class="val val-list">' + arr.map(esc).join('<br>') + '</span></div>';
-  let scopeHtml = '';
-  if (uCPGs.length === 1) scopeHtml += stat('Placement Group', uCPGs[0]); else if (uCPGs.length > 1) scopeHtml += statList('PGs', uCPGs);
-  if (uAZs.length === 1) scopeHtml += stat('AZ', uAZs[0]); else if (uAZs.length > 1) scopeHtml += stat('AZs', uAZs.length);
-  if (uRegions.length === 1) scopeHtml += stat('Region', uRegions[0]); else if (uRegions.length > 1) scopeHtml += statList('Regions', uRegions);
-  if (uAccounts.length === 1) scopeHtml += stat('Account', uAccounts[0]); else if (uAccounts.length > 1) scopeHtml += stat('Accounts', uAccounts.length);
-  statsEl.innerHTML = '<h3>Summary</h3>'
-    + stat('Nodes', N) + stat('Pairs', allP50.length)
-    + stat('p50', fmtLat(minP50) + '\u2013' + fmtLat(maxP50))
-    + stat('p99', fmtLat(minP99) + '\u2013' + fmtLat(maxP99))
-    + stat('Jitter \u03c3', fmtLat(minSigma) + '\u2013' + fmtLat(maxSigma))
-    + (scopeHtml ? '<div style="margin-top:8px;border-top:1px solid #30363d;padding-top:6px">' + scopeHtml + '</div>' : '')
-    + '<div class="stress">Layout fidelity: <span class="val">' + (100 - stress * 100).toFixed(1) + '%</span></div>';
+  // Summary panel (shared logic via buildSummaryHTML).
+  statsEl.innerHTML = buildSummaryHTML({
+    N, pairs: allP50.length, minP50, maxP50, minP99, maxP99, minSigma, maxSigma,
+    nodes: fleet.nodes, stress,
+  });
 
   // Scatter the info panels across the corners (shared placement): summary
   // top-right, instance types bottom-left, legend bottom-right (control panel

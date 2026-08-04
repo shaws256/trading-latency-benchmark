@@ -292,6 +292,10 @@ export class FleetStack extends cdk.Stack {
           actions: ['ssm:GetParameter'],
           resources: [cdk.Arn.format({ service: 'ssm', resource: 'parameter', resourceName: 'af-xdp/*' }, this)],
         }));
+        inst.role.addToPrincipalPolicy(new iam.PolicyStatement({
+          actions: ['ec2:DescribeInstanceTypes'],
+          resources: ['*'],
+        }));
 
         if (pgType) {
           const pg = getOrCreatePG(pgType, az, entry.pgName);

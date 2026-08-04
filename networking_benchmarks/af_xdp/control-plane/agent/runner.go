@@ -132,6 +132,28 @@ func (r *Runner) JoinGroup(replicatorIP, group string) error {
 	return err
 }
 
+// PurgeDests removes every destination currently registered on the LOCAL replicator.
+//
+// Why this exists: `rtt` self-registers with the remote replicator
+// (CTRL_ADD_DESTINATION) and deregisters on exit — but a SIGKILLed / crashed rtt
+// leaves a stale entry behind. In UNICAST mode the replicator fans out each echo
+// to EVERY registered destination, so one stale entry makes every subsequent
+// measurement against this node cost 2 sends per packet, two entries 3 sends, etc.
+// That shows up as a CONSTANT ms-scale p50 shift with a normal spread. Purging
+// before a campaign makes each run start from a known-clean registry.
+func (r *Runner) PurgeDests() error {
+	// `list` prints one "ip:port" per registered destination; feed each back to `remove`.
+	script := fmt.Sprintf(`
+		CTL=%s
+		OUT=$(sudo $CTL 127.0.0.1 list 2>/dev/null) || exit 0
+		echo "$OUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | sort -u | while IFS=: read -r ip port; do
+			sudo $CTL 127.0.0.1 remove "$ip" "$port" >/dev/null 2>&1 || true
+		done
+		exit 0`, r.bin("replicator_ctl"))
+	_, err := sh(script)
+	return err
+}
+
 // ReplicatorMode returns the REPLICATOR_MODE value from /etc/default/replicator (ucast|mcast|kernel).
 func (r *Runner) ReplicatorMode() string {
 	out, _ := sh(`grep -o 'REPLICATOR_MODE=[a-z]*' /etc/default/replicator 2>/dev/null | cut -d= -f2`)
@@ -212,6 +234,36 @@ func (r *Runner) RunRTT(p proto.RTTParams) (proto.Metrics, string, error) {
 	var j rttJSON
 	if err := json.Unmarshal(b, &j); err != nil {
 		return proto.Metrics{}, txMode, fmt.Errorf("rtt json: %w", err)
+	}
+	// NO-SAMPLES GATE — rtt omits service_rtt_us entirely when every sample was
+	// discarded, and an all-zero struct unmarshals silently into p50=0. A 0 µs
+	// RTT is physically impossible, so publishing it would put a plausible-looking
+	// number in the report. The common trigger is --xdp-rx with no XDP program
+	// attached on the client: the stamp slot stays zero, every sample fails the
+	// 0 < rtt < 100ms sanity filter, and the run still reports "Lost: 0".
+	if j.Service.P50 <= 0 || j.Service.Max <= 0 {
+		hint := ""
+		if p.XdpRx {
+			hint = " (--xdp-rx requires the XDP program attached on this interface " +
+				"to stamp the RX time; verify with `ip -d link show`)"
+		}
+		return proto.Metrics{}, txMode, fmt.Errorf(
+			"rtt produced no valid latency samples: p50=%d max=%d over %d messages%s",
+			j.Service.P50, j.Service.Max, j.Messages, hint)
+	}
+	// LOSS GATE — fail the measurement outright rather than publishing biased
+	// percentiles. rtt derives its percentiles only from datagrams that actually
+	// returned, so a run that loses X% reports the latency distribution of the
+	// (100-X)% that survived. That subset is not a random sample, so its p50 is
+	// not comparable to a clean run's p50 and silently understates or overstates
+	// the true figure. Returning an error here means the orchestrator marks the
+	// pair failed and the collector stores nothing — a visible gap instead of a
+	// plausible-looking wrong number.
+	if p.MaxLossPct > 0 && j.LossPct > p.MaxLossPct {
+		return proto.Metrics{}, txMode, fmt.Errorf(
+			"loss gate: %.2f%% loss exceeds max %.2f%% (%d/%d datagrams lost) — "+
+				"percentiles would be computed over a survivorship-biased subset, measurement rejected",
+			j.LossPct, p.MaxLossPct, j.Lost, j.Messages)
 	}
 	return toMetrics(j), txMode, nil
 }
