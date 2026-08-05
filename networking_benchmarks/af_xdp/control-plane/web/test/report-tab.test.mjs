@@ -36,15 +36,18 @@ test('every render path ensures the CSS first', () => {
     'the render function itself must guarantee the stylesheet, whoever calls it');
 });
 
-test('view buttons are stateless: no selected class, no tracked kind', () => {
+test('view controls carry no selected state', () => {
   const block = controls.slice(controls.indexOf('const renderViewButtons'),
     controls.indexOf('tzSel.addEventListener'));
   assert.ok(!/classList\.toggle\('on'/.test(block),
-    'a button that only opens a tab must not paint itself as active');
+    'a control that only opens a tab must not paint itself as active');
   assert.ok(!/activeViewKind\s*=/.test(block),
     'no state to track: the panel does not "have" a chosen kind');
-  assert.match(block, /window\.open\('\?report='/, 'it must still open the report tab');
+  // Statefulness is limited to enabled/disabled, which reflects DATA not selection.
+  assert.match(block, /class="disabled"/, 'a kind without data must be disabled');
+  assert.match(block, /target="_blank"/, 'and an enabled one opens a tab');
 });
+
 
 test('Targets folds like Test Latency', () => {
   assert.match(controls, /data-fold-targets/, 'Targets needs a fold caret');

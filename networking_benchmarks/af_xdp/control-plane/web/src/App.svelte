@@ -4,7 +4,7 @@
   import { mountTopology3D } from './lib/topology3d.js';
   import { createLive, runCampaign, cancelCampaign } from './lib/live.js';
   import { mountControls } from './lib/controls.js';
-  import { buildCombinedReportBody, REPORT_CSS, reportInteractions } from './lib/report-combined.js';
+  import { buildCombinedReportBody, buildCombinedReportHTML, REPORT_CSS, reportInteractions } from './lib/report-combined.js';
   import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT, resolvePreset } from './lib/pairs.js';
 
   let container;        // viz host (wiped on remount)
@@ -71,13 +71,45 @@
   // not stamped with "AF_XDP topology". The URL half of that header is a print
   // dialog setting and cannot be suppressed from CSS.
   function printReport() {
-    const prev = document.title;
-    document.title = '';
-    const restore = () => { document.title = prev; window.removeEventListener('afterprint', restore); };
-    window.addEventListener('afterprint', restore);
-    window.print();
-    setTimeout(restore, 1000);   // afterprint is unreliable in some browsers
+    const views = getReportViews();
+    if (!views.length) return;
+    const doc = buildCombinedReportHTML(views, panel?.timezone?.() || '')
+      .replace('</head>', `<style>
+        @page { size: landscape; margin: 0; }
+        @media print {
+          html, body { background: #fff !important; color: #111 !important; }
+          /* @page margin is 0 so browsers drop their header/footer; put the
+             page margin back on the content instead. */
+          body { padding: 12mm 10mm !important; }
+          table { break-inside: auto; page-break-inside: auto; }
+          tr, th, td { break-inside: avoid; page-break-inside: avoid; }
+          thead { display: table-header-group; }
+          details { display: block; }
+          details > * { display: block; }
+          .heat td, .heat th, td, th { border-color: #bbb !important; }
+          th { background: #f1f5f9 !important; color: #334155 !important; }
+          td { color: #111 !important; }
+          .method, .coverage, .selbar { background: #f8fafc !important; color: #1e293b !important;
+            border-color: #ddd !important; }
+          .mode-badge { background: #e5e7eb !important; color: #1f2937 !important; }
+        }
+      </style></head>`);
+    const f = document.createElement('iframe');
+    f.setAttribute('aria-hidden', 'true');
+    f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+    document.body.appendChild(f);
+    f.contentDocument.open();
+    f.contentDocument.write(doc);
+    f.contentDocument.close();
+    const go = () => {
+      f.contentWindow.focus();
+      f.contentWindow.print();
+      setTimeout(() => f.remove(), 1000);
+    };
+    if (f.contentDocument.readyState === 'complete') go();
+    else f.contentWindow.addEventListener('load', go, { once: true });
   }
+
 
   function closeReportOverlay() {
     reportOverlayOpen = false;
@@ -387,7 +419,6 @@
 {#if reportOverlayOpen}
 <div class="report-overlay" data-report-overlay>
   <div class="report-toolbar">
-    <button class="report-toolbar-btn" on:click={closeReportOverlay}>✕ Close</button>
     <button class="report-toolbar-btn" on:click={printReport}>Save as PDF</button>
   </div>
   <div class="report-body" bind:this={reportOverlayEl}></div>

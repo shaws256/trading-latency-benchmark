@@ -253,6 +253,11 @@ export const REPORT_CSS = `
   .method dt{color:#e6edf3;font-weight:600;margin-top:6px}.method dd{margin:0 0 0 14px}
   .method code{background:#0d1117;padding:1px 4px;border-radius:3px;color:#79c0ff}
   .metric-kind{font-size:13px;color:#e6edf3;margin:2px 0 6px}.metric-kind b{color:#f0883e}
+  #lat-table th{position:relative;user-select:none}
+  #lat-table th .rsz{position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize}
+  #lat-table th .rsz:hover{background:#58a6ff}
+  #lat-table th.dragging{opacity:.55}
+  #lat-table th.drop-target{box-shadow:inset 3px 0 0 #58a6ff}
   .selbar{font-size:12px;color:#8b949e;margin:10px 0 2px}
   .selbar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;
     padding:1px 7px;font-size:11px;cursor:pointer;margin-left:6px}
@@ -352,6 +357,64 @@ export function reportInteractions(root) {
   });
 
   // Cross-table selection by instance IP, spanning every mode section.
+  // All measurements: resizable + reorderable columns, both driven from the
+  // header cells. Resize uses a grip on the right edge so it never competes with
+  // the sort click; reorder is a drag of the header itself.
+  var lat = root.querySelector('#lat-table');
+  if (lat) {
+    var headRow = lat.querySelector('tr');
+    var moveColumn = function (from, to) {
+      if (from === to) return;
+      var rows = lat.querySelectorAll('tr');
+      for (var r = 0; r < rows.length; r++) {
+        var cells = [].slice.call(rows[r].children);
+        if (!cells[from] || !cells[to]) continue;
+        rows[r].insertBefore(cells[from], to > from ? cells[to].nextSibling : cells[to]);
+      }
+    };
+    [].slice.call(headRow.querySelectorAll('th')).forEach(function (th) {
+      var grip = document.createElement('span');
+      grip.className = 'rsz';
+      grip.title = 'Drag to resize';
+      th.appendChild(grip);
+      grip.addEventListener('click', function (e) { e.stopPropagation(); });
+      grip.addEventListener('mousedown', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        var x0 = e.clientX, w0 = th.getBoundingClientRect().width;
+        var move = function (ev) {
+          var w = Math.max(28, w0 + ev.clientX - x0);
+          th.style.width = w + 'px'; th.style.minWidth = w + 'px'; th.style.maxWidth = w + 'px';
+        };
+        var up = function () {
+          document.removeEventListener('mousemove', move);
+          document.removeEventListener('mouseup', up);
+        };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+      });
+
+      th.draggable = true;
+      th.addEventListener('dragstart', function (e) {
+        e.dataTransfer.setData('text/plain', String([].slice.call(headRow.children).indexOf(th)));
+        e.dataTransfer.effectAllowed = 'move';
+        th.classList.add('dragging');
+      });
+      th.addEventListener('dragend', function () {
+        th.classList.remove('dragging');
+        [].slice.call(headRow.children).forEach(function (h) { h.classList.remove('drop-target'); });
+      });
+      th.addEventListener('dragover', function (e) { e.preventDefault(); th.classList.add('drop-target'); });
+      th.addEventListener('dragleave', function () { th.classList.remove('drop-target'); });
+      th.addEventListener('drop', function (e) {
+        e.preventDefault();
+        th.classList.remove('drop-target');
+        var from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        var to = [].slice.call(headRow.children).indexOf(th);
+        if (!isNaN(from)) moveColumn(from, to);
+      });
+    });
+  }
+
   var sel = new Set();
   function paint() {
     root.querySelectorAll('#inv-table tr[data-ip]').forEach(function(tr) {

@@ -38,28 +38,43 @@ function freshHost() {
 }
 
 // ─── Test 1: View buttons call window.open with correct URL and target ─────
-test('view buttons open a new tab with ?report=<kind> instead of overlay', () => {
+test('view controls are real links that open a tab, never navigating this page', () => {
+  // window.open from a button can be redirected into the current tab by the
+  // browser's popup settings, which rewrote this page's URL. A real anchor with
+  // target=_blank cannot do that.
   const host = freshHost();
-  let overlayOpened = false;
-  const panel = mountControls(host, {
-    onSelectView: () => { overlayOpened = true; },
-  });
-  // Simulate that we have ucast + mcast kinds available
-  panel.setCombos([{ kind: 'ucast' }, { kind: 'mcast' }], { kind: 'ucast' });
-
-  const viewBtns = host.querySelectorAll('[data-view-btn]');
-  assert.ok(viewBtns.length >= 1, 'should have view buttons');
-
-  // Click the ucast view button
-  viewBtns[0].click();
-
-  assert.equal(openCalls.length, 1, 'window.open should be called once');
-  assert.equal(openCalls[0][0], '?report=ucast', 'URL should be ?report=ucast');
-  assert.equal(openCalls[0][1], '_blank', 'target should be _blank');
-  assert.equal(overlayOpened, false, 'onSelectView should NOT be called (no overlay)');
-
-  panel.dispose();
+  const panel = mountControls(host, {});
+  panel.setCombos([{ kind: 'ucast', unix: 1 }], { kind: 'ucast' });
+  const a = host.querySelector('[data-view-btn="ucast"]');
+  assert.ok(a, 'a ucast control must exist');
+  assert.equal(a.tagName, 'A', 'must be an anchor, not a button');
+  assert.equal(a.getAttribute('href'), '?report=ucast');
+  assert.equal(a.getAttribute('target'), '_blank');
+  assert.match(a.getAttribute('rel') || '', /noopener/);
 });
+
+test('a kind with no data is present but disabled', () => {
+  const host = freshHost();
+  const panel = mountControls(host, {});
+  panel.setCombos([{ kind: 'ucast', unix: 1 }], { kind: 'ucast' });
+  const mcast = host.querySelector('[data-view-btn="mcast"]');
+  assert.ok(mcast, 'the other kind stays visible so the panel states what exists');
+  assert.ok(mcast.classList.contains('disabled'));
+  assert.equal(mcast.getAttribute('href'), null, 'a disabled control must not be followable');
+  assert.equal(mcast.getAttribute('aria-disabled'), 'true');
+});
+
+test('both kinds are disabled before any test has run', () => {
+  const host = freshHost();
+  const panel = mountControls(host, {});
+  panel.setCombos([], null);
+  for (const k of ['ucast', 'mcast']) {
+    const a = host.querySelector(`[data-view-btn="${k}"]`);
+    assert.ok(a, `${k} control must still render`);
+    assert.ok(a.classList.contains('disabled'), `${k} must be disabled with no data`);
+  }
+});
+
 
 // ─── Test 2: [data-report] download icon is gone ────────────────────────────
 test('[data-report] download icon button does not exist', () => {

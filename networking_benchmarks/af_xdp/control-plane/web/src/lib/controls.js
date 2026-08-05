@@ -29,6 +29,10 @@ const CSS = `
 .cp-seg{display:flex;border:1px solid #30363d;border-radius:7px;overflow:hidden}
 .cp-seg button{background:transparent;color:#8b949e;border:none;padding:5px 12px;cursor:pointer;font:600 12px inherit}
 .cp-seg button.on{background:rgba(88,166,255,.18);color:#58a6ff}
+.cp-seg a{background:transparent;color:#8b949e;border:none;padding:5px 12px;cursor:pointer;font:600 12px inherit;text-decoration:none;display:inline-block}
+.cp-seg a:hover{color:#e6edf3;background:rgba(88,166,255,.12)}
+.cp-seg a.disabled{opacity:.4;cursor:not-allowed;color:#6e7681}
+.cp-seg a.disabled:hover{background:transparent;color:#6e7681}
 .cp-live{background:transparent;color:#8b949e;border:1px solid #30363d;border-radius:7px;
   padding:5px 12px;cursor:pointer;font:600 12px inherit}
 .cp-live.on{background:rgba(248,81,73,.16);color:#f85149;border-color:#da3633}
@@ -215,18 +219,25 @@ export function mountControls(host, opts = {}) {
   let activeViewKind = null;
   const renderViewButtons = (kinds, sel) => {
     lastCombos = kinds; lastSel = sel;
-    if (!kinds || !kinds.length) { viewSeg.innerHTML = ''; return; }
-    // Stateless: each button only opens a report tab, so it carries no selected
-    // state - there is nothing in this panel that "is" the chosen kind.
-    viewSeg.innerHTML = kinds.map((c) =>
-      `<button data-view-btn="${esc(c.kind)}">${c.kind}</button>`
-    ).join('');
-    viewSeg.querySelectorAll('[data-view-btn]').forEach((b) => {
-      b.addEventListener('click', () => {
-        window.open('?report=' + encodeURIComponent(b.dataset.viewBtn), '_blank');
-      });
+    // Anchors, not buttons: a button plus window.open can be redirected into the
+    // CURRENT tab by the browser's popup settings, which rewrote this page's URL.
+    // target=_blank on a real link always opens a tab and never navigates here.
+    // Both kinds are always rendered; one without data is disabled, so the panel
+    // states what exists rather than hiding it.
+    const have = new Set((kinds || []).map((c) => c.kind));
+    viewSeg.innerHTML = ['ucast', 'mcast'].map((k) => {
+      const on = have.has(k);
+      return on
+        ? `<a data-view-btn="${esc(k)}" href="?report=${esc(k)}" target="_blank" rel="noopener"`
+          + ` title="Open the ${esc(k)} report in a new tab">${esc(k)}</a>`
+        : `<a data-view-btn="${esc(k)}" class="disabled" aria-disabled="true"`
+          + ` title="No ${esc(k)} results yet">${esc(k)}</a>`;
+    }).join('');
+    viewSeg.querySelectorAll('a.disabled').forEach((a) => {
+      a.addEventListener('click', (ev) => ev.preventDefault());
     });
   };
+
   tzSel.addEventListener('change', () => { selectedTz = tzSel.value; if (lastCombos) renderViewButtons(lastCombos, lastSel); });
 
   let mode = opts.initialMode || '2d';
