@@ -76,25 +76,37 @@ echo "standalone=$([ -f ` + standaloneMarker + ` ] && echo 1 || echo 0)"`)
 	return st
 }
 
+// controlPort is the replicator's UDP control protocol port (Replicator::CONTROL_PORT).
+const controlPort = 12345
+
 // waitReplicator polls until replicator.service reaches the wanted state, up to
-// timeout. Polling beats a fixed `sleep 6`: the common case returns in well under
-// a second, while a genuinely slow start still gets its full budget.
-func waitReplicator(wantActive bool, timeout time.Duration) error {
+// timeout. When waiting for active it then waits for the control port to be bound,
+// which is the point the replicator can serve traffic (it binds the control socket
+// last, ~90ms after exec). The bound check reads /proc via `ss` and costs ~2ms, so
+// a poll that arrives early is cheap; probing with replicator_ctl instead would
+// pay that tool's 5s receive timeout on every miss.
+func (r *Runner) waitReplicator(wantActive bool, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		out, _ := sh(`systemctl is-active replicator 2>/dev/null`)
 		if (strings.TrimSpace(out) == "active") == wantActive {
-			if wantActive {
-				// A freshly started replicator needs a moment to bind its AF_XDP
-				// sockets and attach its program before it will echo.
-				time.Sleep(1500 * time.Millisecond)
+			if !wantActive {
+				return nil
 			}
-			return nil
+			for time.Now().Before(deadline) {
+				bound, _ := sh(fmt.Sprintf(
+					`ss -lunH 'sport = :%d' 2>/dev/null | grep -c . || true`, controlPort))
+				if strings.TrimSpace(bound) != "0" && strings.TrimSpace(bound) != "" {
+					return nil
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			return fmt.Errorf("replicator started but control port %d not bound within %s", controlPort, timeout)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("replicator did not reach active=%v within %s", wantActive, timeout)
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -110,7 +122,7 @@ func (r *Runner) EnsureHostState(p proto.HostStateParams) (string, error) {
 	}
 	switch p.Profile {
 	case proto.HostClient:
-		return r.ensureClient(st)
+		return r.ensureClient(st, p.NeedXdpStamp)
 	case proto.HostEchoUcast:
 		return r.ensureReplicator(st, "ucast", "")
 	case proto.HostMcastReplicator:
@@ -122,25 +134,42 @@ func (r *Runner) EnsureHostState(p proto.HostStateParams) (string, error) {
 	}
 }
 
-// ensureClient: replicator stopped + XDP attached standalone.
+// ensureClient: replicator stopped, plus the standalone XDP program attached only
+// when the measurement needs XDP ingress stamping.
 //
 // Order matters. The replicator detaches its XDP program when it exits, so the
 // standalone attach must come AFTER the stop or it is torn down with the service.
-// The standalone program is what keeps xdp mode (--xdp-rx) working: with no program attached
-// rtt's RX stamp slot stays zero, every sample fails the 0 < rtt < 100ms sanity
-// filter, and the run reports "Lost: 0" with no percentiles at all — which
-// unmarshals to a silent and impossible p50=0.
-func (r *Runner) ensureClient(st hostState) (string, error) {
+// The standalone program is what keeps xdp mode (--xdp-rx) working: with no program
+// attached rtt's RX stamp slot stays zero, every sample fails the 0 < rtt < 100ms
+// sanity filter, and the run reports "Lost: 0" with no percentiles at all - which
+// unmarshals to a silent and impossible p50=0. The kernel variation stamps via
+// SO_TIMESTAMPING and needs no program, so it skips the attach and clears any
+// program left behind by an earlier xdp run.
+func (r *Runner) ensureClient(st hostState, needXdpStamp bool) (string, error) {
 	var did []string
 
 	if st.svcActive {
 		if _, err := sh(`sudo systemctl stop replicator`); err != nil {
 			return "", fmt.Errorf("stop replicator: %w", err)
 		}
-		if err := waitReplicator(false, 15*time.Second); err != nil {
+		if err := r.waitReplicator(false, 15*time.Second); err != nil {
 			return "", err
 		}
 		did = append(did, "stopped replicator")
+	}
+
+	if !needXdpStamp {
+		// No ingress stamping required. Clear a standalone program if one is
+		// present so a stale attach from an earlier xdp run cannot interfere.
+		if st.standalone {
+			_, _ = sh(fmt.Sprintf(`sudo ip link set dev %s xdp off 2>/dev/null || true; sudo rm -f %s`,
+				st.iface, standaloneMarker))
+			did = append(did, "detached standalone xdp (not stamping)")
+		}
+		if len(did) == 0 {
+			return "no-op (already client)", nil
+		}
+		return strings.Join(did, " + "), nil
 	}
 
 	// Attach only when there is no standalone program already. If the replicator
@@ -206,7 +235,7 @@ sudo sed -i '/^REPLICATOR_FWD_MODE=/d' /etc/default/replicator`, mode)
 	if _, err := sh(`sudo systemctl ` + action + ` replicator`); err != nil {
 		return "", fmt.Errorf("%s replicator: %w", action, err)
 	}
-	if err := waitReplicator(true, 30*time.Second); err != nil {
+	if err := r.waitReplicator(true, 30*time.Second); err != nil {
 		return "", err
 	}
 	did = append(did, action+"ed replicator")
@@ -222,7 +251,7 @@ func (r *Runner) ensureEndpoint(st hostState) (string, error) {
 		if _, err := sh(`sudo systemctl stop replicator`); err != nil {
 			return "", fmt.Errorf("stop replicator: %w", err)
 		}
-		if err := waitReplicator(false, 15*time.Second); err != nil {
+		if err := r.waitReplicator(false, 15*time.Second); err != nil {
 			return "", err
 		}
 		did = append(did, "stopped replicator")

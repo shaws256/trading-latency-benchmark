@@ -1051,10 +1051,23 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Wait for stragglers (up to 3 seconds)
+    // Wait for stragglers, capped at 3 seconds. Exits as soon as every sent
+    // datagram is accounted for, which is the normal 0%-loss case and makes the
+    // wait ~1ms instead of 3s. When responses are genuinely missing the full cap
+    // is used, so loss accounting is unchanged: the early exit can only trigger
+    // once nothing is outstanding.
     const int64_t send_loop_end_ns = now_mono_ns();   // before the straggler wait
     std::cout << "Sending complete. Waiting for responses..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    {
+        const int64_t cap_ns = 3000000000LL;
+        const int64_t wait_start = now_mono_ns();
+        while (now_mono_ns() - wait_start < cap_ns) {
+            if (total_received.load(std::memory_order_relaxed) >= slot_count) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::cout << "  straggler wait: " << (now_mono_ns() - wait_start) / 1000000
+                  << " ms (received=" << total_received.load() << "/" << slot_count << ")" << std::endl;
+    }
     g_running = false;
     receiver.join();
     close(send_fd);

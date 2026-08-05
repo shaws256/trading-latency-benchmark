@@ -191,10 +191,18 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	log.Printf("campaign ucast/%s over %d nodes (%d pairs, source-grouped, max %d concurrent per source)",
 		p.Variation, len(nodes), total, p.MaxParallel)
 
+	// Phase timers. Each accumulates wall-clock across the campaign so the `done`
+	// event carries a breakdown of where the run actually spent its time.
+	campaignStart := time.Now()
+	var msPrepare, msClientTransition, msMeasure, msRestore int64
+	// Restores run in goroutines, so their wall time is accumulated atomically.
+	var msRestoreWall int64
+
 	// Prepare: converge every node to the ucast echo profile. EnsureHostState is
 	// idempotent, so nodes already correct cost one cheap state read and no
 	// restart — we can therefore dispatch to all of them unconditionally instead
 	// of guessing from a possibly-stale heartbeat.
+	tPrepare := time.Now()
 	o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
 		"phase": "prepare", "msg": fmt.Sprintf("converging %d node(s) to ucast echo profile", len(nodes))})
 	var prep sync.WaitGroup
@@ -225,6 +233,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 		}(n)
 	}
 	purge.Wait()
+	msPrepare = time.Since(tPrepare).Milliseconds()
 	o.mu.Lock()
 	o.lastMcastFwd = "" // a ucast run leaves replicators in ucast mode
 	o.mu.Unlock()
@@ -232,11 +241,38 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	var done int64
 	var rejected int64 // pairs refused by the loss gate (ran fine, numbers unusable)
 	perPair := 30 * time.Second
-	// MaxParallel caps concurrent pairs per round. 0 or negative = unlimited (legacy).
-	// For correctness, use 1 (serial) or low values (2-4) to avoid NIC/softirq contention.
+	// MaxParallel caps concurrent pairs per source. 0 or negative = unlimited.
 	maxPar := p.MaxParallel
 	if maxPar <= 0 {
 		maxPar = len(nodes) // effectively unlimited (more than any round can have)
+	}
+	// AF_XDP TX binds a socket on a single TX queue, and every pair from a source
+	// would bind the SAME queue. Concurrent binds contend and fall into rtt's
+	// bind-retry backoff, which measured 2.2x SLOWER end-to-end than running them
+	// serially (17.3s vs 7.8s over 6 pairs). Serialise instead.
+	if xdpTx && maxPar > 1 {
+		log.Printf("ucast/%s: forcing max_parallel 1 (was %d) — AF_XDP TX pairs share one queue and contend",
+			p.Variation, maxPar)
+		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
+			"phase": "prepare", "msg": "AF_XDP TX shares one queue: running pairs serially (faster than concurrent)"})
+		maxPar = 1
+	}
+
+	// Restores run asynchronously so a node's replicator startup (seconds of
+	// AF_XDP bind + XDP attach) overlaps the next source's transition and
+	// measurements instead of stalling the loop. restoreDone[instanceID] is
+	// closed once that node can echo again; any source that needs it as a
+	// destination waits on the channel first, so a measurement can never be
+	// dispatched to a node that is still starting up.
+	restoreDone := map[string]chan struct{}{}
+	var restoreMu sync.Mutex
+	awaitRestore := func(id string) {
+		restoreMu.Lock()
+		ch := restoreDone[id]
+		restoreMu.Unlock()
+		if ch != nil {
+			<-ch
+		}
 	}
 
 	for si, s := range nodes {
@@ -249,14 +285,20 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 			return
 		}
 
+		// This node is about to measure, so any outstanding restore of it must
+		// finish first: it has to be fully stopped before we stop it again.
+		awaitRestore(s.InstanceID)
+
 		// This node becomes the measurer: stop its replicator so no AF_XDP
 		// zero-copy socket owns the RX queue its echoes return on, and attach the
 		// XDP program standalone so xdp mode still stamps. Grouping the matrix by
 		// SOURCE keeps this to exactly TWO transitions per node for the whole
 		// campaign; flipping per node-disjoint round would cost O(rounds x nodes)
 		// systemctl operations instead.
+		tClient := time.Now()
 		hres, herr := o.dispatchRetry(s.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
-			Host: &proto.HostStateParams{Profile: proto.HostClient}}, 60*time.Second, 2)
+			Host: &proto.HostStateParams{Profile: proto.HostClient, NeedXdpStamp: xdpRx}}, 60*time.Second, 2)
+		msClientTransition += time.Since(tClient).Milliseconds()
 		if herr != nil || !hres.OK {
 			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
 				"phase": "prepare", "ok": false, "src": s.PrivateIP,
@@ -266,15 +308,36 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, maxPar)
+		tMeasure := time.Now()
+
+		// Order destinations so nodes with an outstanding restore are measured
+		// LAST, giving their replicator the maximum time to finish starting while
+		// the other pairs run.
+		dests := make([]Node, 0, len(nodes)-1)
+		var restoring []Node
 		for _, d := range nodes {
 			if d.InstanceID == s.InstanceID {
 				continue
 			}
+			restoreMu.Lock()
+			pending := restoreDone[d.InstanceID] != nil
+			restoreMu.Unlock()
+			if pending {
+				restoring = append(restoring, d)
+			} else {
+				dests = append(dests, d)
+			}
+		}
+		dests = append(dests, restoring...)
+
+		for _, d := range dests {
 			wg.Add(1)
 			sem <- struct{}{} // block if maxPar measurements already in flight
 			go func(s, d Node) {
 				defer wg.Done()
 				defer func() { <-sem }()
+				// Never measure to a node that is still starting its replicator.
+				awaitRestore(d.InstanceID)
 				cmd := proto.Command{Type: proto.CmdRunRTT, RTT: &proto.RTTParams{
 					TargetIP: d.PrivateIP, DataPort: p.DataPort, ListenIP: s.PrivateIP, ListenPort: p.ListenPort,
 					Count: p.Count, Rate: p.Rate, Warmup: p.Warmup, SendCPU: -1, RecvCPU: -1,
@@ -301,16 +364,62 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 			}(s, d)
 		}
 		wg.Wait() // all of this source's measurements are done
+		msMeasure += time.Since(tMeasure).Milliseconds()
 
 		// Restore this node to the echo profile so it can serve as a destination
-		// for the remaining sources. Second and final transition for this node.
-		o.dispatchRetry(s.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
-			Host: &proto.HostStateParams{Profile: proto.HostEchoUcast}}, 60*time.Second, 2)
+		// for the remaining sources. Fired asynchronously: the replicator's
+		// startup overlaps the next source's transition and measurements. The
+		// channel is what later sources wait on before measuring to this node.
+		ch := make(chan struct{})
+		restoreMu.Lock()
+		restoreDone[s.InstanceID] = ch
+		restoreMu.Unlock()
+		tRestore := time.Now()
+		go func(n Node, ch chan struct{}, started time.Time) {
+			o.dispatchRetry(n.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
+				Host: &proto.HostStateParams{Profile: proto.HostEchoUcast}}, 60*time.Second, 2)
+			atomic.AddInt64(&msRestoreWall, time.Since(started).Milliseconds())
+			restoreMu.Lock()
+			delete(restoreDone, n.InstanceID)
+			restoreMu.Unlock()
+			close(ch)
+		}(s, ch, tRestore)
 	}
+
+	// Drain any restore still in flight so the campaign does not report done
+	// while a node is mid-restart.
+	tDrain := time.Now()
+	for {
+		restoreMu.Lock()
+		var ch chan struct{}
+		for _, c := range restoreDone {
+			ch = c
+			break
+		}
+		restoreMu.Unlock()
+		if ch == nil {
+			break
+		}
+		<-ch
+	}
+	msRestore = atomic.LoadInt64(&msRestoreWall)
+	msRestoreDrain := time.Since(tDrain).Milliseconds()
 	rej := atomic.LoadInt64(&rejected)
+	msTotal := time.Since(campaignStart).Milliseconds()
+	timing := map[string]any{
+		"total_ms":             msTotal,
+		"prepare_ms":           msPrepare,
+		"client_transition_ms": msClientTransition,
+		"measure_ms":           msMeasure,
+		"restore_ms":           msRestore,
+		"restore_drain_ms":     msRestoreDrain,
+	}
 	o.hub.Emit("job", map[string]any{"status": "done", "kind": "ucast", "variation": p.Variation,
 		"done": atomic.LoadInt64(&done), "total": total,
-		"rejected_loss": rej, "max_loss_pct": p.MaxLossPct})
+		"rejected_loss": rej, "max_loss_pct": p.MaxLossPct, "timing": timing})
+	log.Printf("TIMING ucast/%s total=%dms prepare=%dms client_transition=%dms measure=%dms restore=%dms drain=%dms overhead=%.1f%%",
+		p.Variation, msTotal, msPrepare, msClientTransition, msMeasure, msRestore, msRestoreDrain,
+		100*float64(msPrepare+msClientTransition+msRestore)/float64(max64(msTotal, 1)))
 	if rej > 0 {
 		log.Printf("campaign ucast/%s complete (%d/%d) — %d pair(s) REJECTED by the loss gate (>%.2f%% loss); "+
 			"their percentiles were discarded, not recorded",
@@ -325,6 +434,14 @@ func firstErr(err error, s string) string {
 		return err.Error()
 	}
 	return s
+}
+
+// max64 guards a division by zero in the timing percentage.
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // McastMatrixParams configures a multicast fan-out campaign across fwd modes.

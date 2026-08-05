@@ -27,9 +27,11 @@ func NewRunner(binDir string) *Runner { return &Runner{binDir: binDir} }
 
 func (r *Runner) bin(name string) string { return r.binDir + "/" + name }
 
-// sh runs a bash snippet, returning combined output.
+// sh runs a bash snippet, returning combined output. Uses a non-login shell:
+// the scripts reference absolute paths, so sourcing /etc/profile and every
+// profile.d entry on each of the ~hundreds of calls per campaign is pure cost.
 func sh(script string) (string, error) {
-	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
+	out, err := exec.Command("bash", "-c", script).CombinedOutput()
 	return string(out), err
 }
 
@@ -210,19 +212,14 @@ func (r *Runner) RunRTT(p proto.RTTParams) (proto.Metrics, string, error) {
 		flags += " --xdp-rx"
 	}
 
-	// ── Readiness probe: verify the target replicator responds to a control
-	// message before launching the full measurement. A replicator that just
-	// (re)started needs 1-3s for AF_XDP socket bind + XDP attach; subscribing
-	// too early gives rtt a timeout or "connection refused" exit. The probe
-	// sends a lightweight UDP `list` command (same control channel rtt uses to
-	// subscribe) and retries up to 4× with 600ms sleeps — total worst-case
-	// 2.4s, which covers the longest observed replicator startup. Zero-cost on
-	// the happy path (~1ms single UDP round-trip).
-	probeScript := fmt.Sprintf(
-		`for i in 1 2 3 4; do sudo %s %s list >/dev/null 2>&1 && exit 0; sleep 0.6; done; exit 1`,
-		r.bin("replicator_ctl"), p.TargetIP)
-	if _, err := sh(probeScript); err != nil {
-		return proto.Metrics{}, "", fmt.Errorf("target %s replicator not ready after 2.4s (not running?)", p.TargetIP)
+	// Readiness confirm: one control round-trip to the target so a measurement is
+	// never launched against a replicator that cannot echo. The orchestrator
+	// already waits for the target's restore to finish, so this is a backstop.
+	// replicator_ctl carries its own multi-second receive timeout, so retrying
+	// here would cost seconds per miss.
+	probe := fmt.Sprintf(`sudo %s %s list >/dev/null 2>&1`, r.bin("replicator_ctl"), p.TargetIP)
+	if _, err := sh(probe); err != nil {
+		return proto.Metrics{}, "", fmt.Errorf("target %s replicator did not answer its control port", p.TargetIP)
 	}
 
 	_ = os.Remove("/tmp/rtt_results.json")
