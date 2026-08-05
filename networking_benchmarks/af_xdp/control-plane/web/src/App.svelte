@@ -4,7 +4,7 @@
   import { mountTopology3D } from './lib/topology3d.js';
   import { createLive, runCampaign, cancelCampaign } from './lib/live.js';
   import { mountControls } from './lib/controls.js';
-  import { buildCombinedReportHTML, buildCombinedReportBody, REPORT_CSS, reportInteractions } from './lib/report-combined.js';
+  import { buildCombinedReportBody, REPORT_CSS, reportInteractions } from './lib/report-combined.js';
   import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT, resolvePreset } from './lib/pairs.js';
 
   let container;        // viz host (wiped on remount)
@@ -67,6 +67,18 @@
     rerenderReportOverlay();
   }
 
+  // The browser's print header prints document.title; blank it so the page is
+  // not stamped with "AF_XDP topology". The URL half of that header is a print
+  // dialog setting and cannot be suppressed from CSS.
+  function printReport() {
+    const prev = document.title;
+    document.title = '';
+    const restore = () => { document.title = prev; window.removeEventListener('afterprint', restore); };
+    window.addEventListener('afterprint', restore);
+    window.print();
+    setTimeout(restore, 1000);   // afterprint is unreliable in some browsers
+  }
+
   function closeReportOverlay() {
     reportOverlayOpen = false;
     if (reportOverlayEl) reportOverlayEl.innerHTML = '';
@@ -83,7 +95,7 @@
       if (tr.dataset.ip) selectedIPs.add(tr.dataset.ip);
     });
 
-    const body = buildCombinedReportBody(views);
+    const body = buildCombinedReportBody(views, panel?.timezone?.() || '');
     const contentEl = reportOverlayEl.querySelector('.report-content');
     if (contentEl) {
       contentEl.innerHTML = body;
@@ -304,26 +316,8 @@
       onToggleLive: (on) => { heartbeatOn = on; if (!on) { stopHeartbeat(); panel?.setStatus('live monitoring off'); } },
       // A heartbeat mode was chosen (or cleared) in the live panel.
       onHeartbeat: (sel) => { if (!sel) { stopHeartbeat(); panel?.setStatus('heartbeat stopped'); } else { startHeartbeat(sel); } },
-      onSelectView: ({ kind: k }) => { kind = k; variation = null; liveRerender(); openReportOverlay(); },
+      onSelectView: ({ kind: k }) => { kind = k; variation = null; liveRerender(); },
       onPickResult: (p) => { if (p) load(`/api/fleet?path=${encodeURIComponent(p)}`, p); },
-      onReport: () => {
-        // One report per KIND: every variation of the shown kind in a single
-        // document, so at most two exist at any time (ucast and mcast).
-        // combos() lists what has been measured; toFleet() reduces to one mode.
-        const combos = (conn ? conn.combos() : []).filter((c) => c.kind === kind);
-        const views = combos.length
-          ? combos.map((c) => ({ ...c, fleet: conn.toFleet(c.kind, c.variation) }))
-          : (fleet ? [{ kind, variation, fleet }] : []);   // static ?data= fallback
-        if (!views.length) { panel?.setStatus('no data to report yet'); return; }
-        const html = buildCombinedReportHTML(views);
-        const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-        const a = Object.assign(document.createElement('a'), {
-          href: url, download: `afxdp-report-${kind}-${Date.now()}.html`,
-        });
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-        panel?.setStatus(`downloaded ${kind} report (${views.length} mode(s))`);
-      },
       onRun: doRun,
       onClearTargets: () => {
         targetIds = new Set(); activePreset = null; targetAnchor = null; scope = SCOPE_AMONG;
@@ -351,6 +345,17 @@
     });
 
     const params = new URLSearchParams(location.search);
+
+    // If opened as a report tab (?report=<kind>), render only the live report
+    // overlay. The tab opens its own SSE connection (fresh app instance) so it
+    // stays live. No topology is rendered.
+    if (params.get('report')) {
+      kind = params.get('report');
+      connect();
+      reportOverlayOpen = true;
+      return;
+    }
+
     // Default: connect to the live backend (shows recent test or a blank map).
     // Only load a static fleet.json when explicitly requested via ?data=.
     if (params.get('data')) await load(params.get('data'), params.get('data'));
@@ -381,7 +386,7 @@
 <div class="report-overlay" data-report-overlay>
   <div class="report-toolbar">
     <button class="report-toolbar-btn" on:click={closeReportOverlay}>✕ Close</button>
-    <button class="report-toolbar-btn" on:click={() => window.print()}>Save as PDF</button>
+    <button class="report-toolbar-btn" on:click={printReport}>Save as PDF</button>
   </div>
   <div class="report-body" bind:this={reportOverlayEl}></div>
 </div>
@@ -410,9 +415,19 @@
     font-family: system-ui, -apple-system, sans-serif; color: #e6edf3; }
 
   @media print {
+    /* Landscape: the measurements table is wide. */
+    @page { size: landscape; margin: 10mm; }
     .controls-host, .root, .report-toolbar, .msg { display: none !important; }
-    .report-overlay { position: static; background: #fff; }
-    .report-body { overflow: visible; padding: 0; color: #111; background: #fff; }
+    /* Undo the whole screen layout. While the overlay is fixed + flex with an
+       overflow:auto body, printing captures only the visible viewport, which is
+       why just the first page came out. */
+    :global(html), :global(body) { height: auto !important; overflow: visible !important;
+      background: #fff !important; }
+    .report-overlay { position: static !important; inset: auto !important; display: block !important;
+      height: auto !important; overflow: visible !important; z-index: auto !important;
+      background: #fff; }
+    .report-body { flex: none !important; height: auto !important; max-height: none !important;
+      overflow: visible !important; padding: 0; color: #111; background: #fff; }
     .report-body :global(table) { break-inside: avoid; page-break-inside: avoid; }
     .report-body :global(details) { display: block; }
     .report-body :global(details[open]), .report-body :global(details) { open: true; }

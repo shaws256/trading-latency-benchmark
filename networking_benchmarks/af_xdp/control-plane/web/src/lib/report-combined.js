@@ -29,12 +29,23 @@ const badgeOf = (key) => MODE_BADGE[key] || key.split('/')[1].slice(0, 2).toUppe
 const label = (n) => esc(n.private_ip || n.ec2_name || '#' + n.index);
 const p2 = (v) => String(v).padStart(2, '0');
 /** hh:mm, dd-mm-yyyy. A saved report outlives any relative age. */
-const stamp = (unix) => {
+const stampTz = (unix, tz) => {
   if (!unix) return 'unknown';
   const d = new Date(unix * 1000);
-  return `${p2(d.getHours())}:${p2(d.getMinutes())}-`
-    + `${p2(d.getDate())}.${p2(d.getMonth() + 1)}.${d.getFullYear()}`;
+  if (!tz) {
+    return `${p2(d.getHours())}:${p2(d.getMinutes())}-`
+      + `${p2(d.getDate())}.${p2(d.getMonth() + 1)}.${d.getFullYear()}`;
+  }
+  // Same hh:mm-dd.mm.yyyy shape, rendered in the chosen zone.
+  const f = new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz, hour: '2-digit', minute: '2-digit',
+    day: '2-digit', month: '2-digit', year: 'numeric', hour12: false,
+  }).formatToParts(d).reduce((a, x) => (a[x.type] = x.value, a), {});
+  return `${f.hour}:${f.minute}-${f.day}.${f.month}.${f.year}`;
 };
+
+/** Zone label for the report header: the chosen zone, or the browser's. */
+const tzLabel = (tz) => tz || Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
 
 /**
  * Flatten every view into one measurement list plus a per-cell freshest index.
@@ -63,7 +74,7 @@ function collate(views) {
 }
 
 /** Mode-annotated overview: freshest value per cell, badged with its mode. */
-function overviewGrid(nodes, best, scale) {
+function overviewGrid(nodes, best, scale, tz) {
   const { mn, mx } = scale;
   let h = '<table class="heat" id="overview-table"><tr><th>src \\ dst</th>'
     + nodes.map((n) => `<th data-col-ip="${esc(n.private_ip || '')}">${label(n)}</th>`).join('')
@@ -77,7 +88,7 @@ function overviewGrid(nodes, best, scale) {
       if (rn === cn) { h += `<td class="na"${dat}>\u00b7</td>`; return; }
       const b = best.get(`${rn.private_ip}|${cn.private_ip}`);
       if (!b) { h += `<td class="na"${dat}>\u00b7</td>`; return; }
-      const tip = `${fmtLat(b.cell.p50)} \u00b7 ${b.key} \u00b7 ${stamp(b.unix)}`;
+      const tip = `${fmtLat(b.cell.p50)} \u00b7 ${b.key} \u00b7 ${stampTz(b.unix, tz)}`;
       h += `<td${dat} style="color:${latencyColor(b.cell.p50, mn, mx)};font-weight:700"`
         + ` title="${esc(tip)}">${fmtLat(b.cell.p50)}`
         + `<span class="mode-badge">${badgeOf(b.key)}</span></td>`;
@@ -131,26 +142,55 @@ function methodology(v) {
 }
 
 /** Combined latency table: every mode, one table, with a mode column. */
-function latencyTable(rows) {
-  const head = '<tr><th>mode</th><th>src IP</th><th>src role</th><th>dst IP</th><th>dst role</th>'
-    + '<th>dst AZ</th><th>src PG</th><th>dst PG</th><th>p50</th><th>p90</th><th>p99</th>'
-    + '<th>p99.9</th><th>max</th><th>loss</th><th>measured</th></tr>';
+function latencyTable(rows, tz) {
+  const head = '<tr><th>mode</th><th>src IP</th><th>dst IP</th><th>src VPC</th><th>dst VPC</th>'
+    + '<th>src role</th><th>dst role</th><th>src AZ</th><th>dst AZ</th><th>src PG</th><th>dst PG</th>'
+    + '<th>p50</th><th>p90</th><th>p99</th><th>p99.9</th><th>max</th><th>loss</th><th>measured</th></tr>';
   const pg = (n) => esc(n.cpg_name && n.cpg_name !== 'unknown' ? n.cpg_name : '\u2014');
-  const body = rows
+  const vpc = (n) => esc(n.vpc_id && n.vpc_id !== 'unknown' ? n.vpc_id : '\u2014');
+  const sorted = rows
     .slice()
     .sort((a, b) => a.key.localeCompare(b.key)
-      || (a.src.private_ip || '').localeCompare(b.src.private_ip || ''))
+      || (a.src.private_ip || '').localeCompare(b.src.private_ip || ''));
+
+  // Compute best/worst per measurement column for colouring
+  const measCols = ['p50', 'p90', 'p99', 'p999', 'max', 'loss'];
+  const extremes = {};
+  if (sorted.length > 1) {
+    for (const col of measCols) {
+      const vals = sorted.map((r) => col === 'loss' ? (r.cell.loss ?? 0) : r.cell[col]);
+      const mn = Math.min(...vals);
+      const mx = Math.max(...vals);
+      if (mn !== mx) extremes[col] = { mn, mx };
+    }
+  }
+
+  const colourCell = (col, val) => {
+    const e = extremes[col];
+    if (!e) return '';
+    if (val === e.mn) return ' style="color:green"';
+    if (val === e.mx) return ' style="color:red"';
+    return '';
+  };
+
+  const body = sorted
     .map((r) => {
       const c = r.cell;
       return `<tr data-src="${esc(r.src.private_ip || '')}" data-dst="${esc(r.dst.private_ip || '')}"`
         + ` data-mode="${esc(r.key)}">`
         + `<td>${esc(r.key)}</td>`
-        + `<td>${label(r.src)}</td><td>${esc(r.src.role || '\u2014')}</td>`
-        + `<td>${label(r.dst)}</td><td>${esc(r.dst.role || '\u2014')}</td>`
-        + `<td>${esc(r.dst.az || '\u2014')}</td><td>${pg(r.src)}</td><td>${pg(r.dst)}</td>`
-        + `<td>${fmtLat(c.p50)}</td><td>${fmtLat(c.p90)}</td><td>${fmtLat(c.p99)}</td>`
-        + `<td>${fmtLat(c.p999)}</td><td>${fmtLat(c.max)}</td><td>${esc(c.loss ?? 0)}%</td>`
-        + `<td>${esc(stamp(r.unix))}</td></tr>`;
+        + `<td>${label(r.src)}</td><td>${label(r.dst)}</td>`
+        + `<td>${vpc(r.src)}</td><td>${vpc(r.dst)}</td>`
+        + `<td>${esc(r.src.role || '\u2014')}</td><td>${esc(r.dst.role || '\u2014')}</td>`
+        + `<td>${esc(r.src.az || '\u2014')}</td><td>${esc(r.dst.az || '\u2014')}</td>`
+        + `<td>${pg(r.src)}</td><td>${pg(r.dst)}</td>`
+        + `<td${colourCell('p50', c.p50)}>${fmtLat(c.p50)}</td>`
+        + `<td${colourCell('p90', c.p90)}>${fmtLat(c.p90)}</td>`
+        + `<td${colourCell('p99', c.p99)}>${fmtLat(c.p99)}</td>`
+        + `<td${colourCell('p999', c.p999)}>${fmtLat(c.p999)}</td>`
+        + `<td${colourCell('max', c.max)}>${fmtLat(c.max)}</td>`
+        + `<td${colourCell('loss', c.loss ?? 0)}>${esc(c.loss ?? 0)}%</td>`
+        + `<td>${esc(stampTz(r.unix, tz))}</td></tr>`;
     })
     .join('');
   return `<table class="sortable" id="lat-table">${head}${body}</table>`;
@@ -170,14 +210,14 @@ function inventory(nodes) {
   return t + '</table>';
 }
 
-function ages(rows) {
+function ages(rows, tz) {
   if (!rows.length) return '';
   const us = rows.map((r) => r.unix).filter(Boolean);
   if (!us.length) return '';
   const newest = Math.max(...us), oldest = Math.min(...us);
   const stale = rows.filter((r) => r.unix && newest - r.unix > 300).length;
   return '<div class="coverage"><h3 style="margin:0 0 4px;font-size:13px;color:#58a6ff">Measurement ages</h3>'
-    + `newest ${esc(stamp(newest))} \u00b7 oldest ${esc(stamp(oldest))}`
+    + `newest ${esc(stampTz(newest, tz))} \u00b7 oldest ${esc(stampTz(oldest, tz))}`
     + (stale ? ` \u00b7 <b>${stale}</b> measurement(s) more than 5 min older than the newest` : '')
     + '</div>';
 }
@@ -228,7 +268,7 @@ export const REPORT_CSS = `
  * Reusable both in the standalone document and the in-app overlay.
  * @param {Array<{kind:string,variation:string,unix?:number,fleet:object}>} views
  */
-export function buildCombinedReportBody(views) {
+export function buildCombinedReportBody(views, tz) {
   const vs = (views || []).filter((v) => v && v.fleet && (v.fleet.nodes || []).length);
   const gen = new Date().toISOString();
   if (!vs.length) {
@@ -245,7 +285,7 @@ export function buildCombinedReportBody(views) {
   };
 
   const sections = vs.map((v) => `
-  <h2>${esc(modeKey(v))} \u2014 ${v.kind === 'mcast' ? 'one-way' : 'round-trip (RTT)'}</h2>
+  <h2>${esc(modeKey(v))}</h2>
   ${methodology(v)}
   ${modeHeatmap(v, scale)}`).join('\n');
 
@@ -259,21 +299,23 @@ export function buildCombinedReportBody(views) {
   ${buildCompareHTML(nodes, a.fleet.matrix, b.fleet.matrix)}`;
   })() : '';
 
-  return `<h1>Latency Report \u2014 all modes</h1>
-  <div class="meta">Region: ${esc(region)} \u00b7 Nodes: ${nodes.length} \u00b7 Modes: ${esc(modeList.join(', '))} \u00b7 Measurements: ${rows.length} \u00b7 Generated: ${esc(gen)}</div>
-  ${ages(rows)}
+  const kindLabel = vs[0].kind === 'mcast' ? 'multicast' : 'unicast';
+  const title = `Latency Report - ${kindLabel}`;
+  return `<h1>${esc(title)}</h1>
+  <div class="meta">Region: ${esc(region)} \u00b7 Nodes: ${nodes.length} \u00b7 Modes: ${esc(modeList.join(', '))} \u00b7 Measurements: ${rows.length} \u00b7 Timezone: ${esc(tzLabel(tz))} \u00b7 Generated: ${esc(gen)}</div>
+  ${ages(rows, tz)}
 
   <div class="selbar"><span id="selinfo">Click an IP anywhere to highlight that instance everywhere.</span><button id="selclear">Clear</button></div>
   <h2>Overview \u2014 freshest measurement per pair, badged by mode</h2>
-  ${overviewGrid(nodes, best, scale)}
+  ${overviewGrid(nodes, best, scale, tz)}
 
   <h2>Fleet inventory</h2>
   ${inventory(nodes)}
   ${sections}
   ${delta}
 
-  <h2>All measured latencies \u2014 every mode</h2>
-  ${latencyTable(rows)}`;
+  <h2>All measurements</h2>
+  ${latencyTable(rows, tz)}`;
 }
 
 /**
@@ -344,7 +386,7 @@ export function reportInteractions(root) {
   root.querySelectorAll('#lat-table tr[data-src]').forEach(function(tr) {
     tr.style.cursor = 'pointer';
     tr.addEventListener('click', function(ev) {
-      toggle(ev.target.cellIndex === 3 ? tr.dataset.dst : tr.dataset.src);
+      toggle(ev.target.cellIndex === 2 ? tr.dataset.dst : tr.dataset.src);
     });
   });
   var clearBtn = root.querySelector('#selclear');
@@ -356,7 +398,7 @@ export function reportInteractions(root) {
  * Build the combined report as a self-contained HTML document.
  * @param {Array<{kind:string,variation:string,unix?:number,fleet:object}>} views
  */
-export function buildCombinedReportHTML(views) {
+export function buildCombinedReportHTML(views, tz) {
   const vs = (views || []).filter((v) => v && v.fleet && (v.fleet.nodes || []).length);
   if (!vs.length) {
     return `<!doctype html><html><head><meta charset="utf-8"><title>Latency Report</title></head>`
@@ -364,10 +406,12 @@ export function buildCombinedReportHTML(views) {
       + `<h1>Latency Report</h1><p>No measurements yet \u2014 run a campaign first.</p></body></html>`;
   }
 
-  const body = buildCombinedReportBody(views);
+  const body = buildCombinedReportBody(views, tz);
+  const kindLabel = vs[0].kind === 'mcast' ? 'multicast' : 'unicast';
+  const docTitle = `Latency Report - ${kindLabel}`;
 
   return `<!doctype html><html><head><meta charset="utf-8">
-  <title>Latency Report \u2014 all modes</title>
+  <title>${docTitle}</title>
   <style>${REPORT_CSS}</style></head><body>
   ${body}
   <script>(${reportInteractions.toString()})(document);</script></body></html>`;

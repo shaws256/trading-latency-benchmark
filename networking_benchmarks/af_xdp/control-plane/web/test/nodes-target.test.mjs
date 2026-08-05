@@ -123,23 +123,25 @@ test('a targeted node is marked, and distinctly from a table-pinned one', () => 
   assert.ok(!boxes[0].classList.contains('checked'));
 });
 
-test('checkboxes are visible once anything is selected, per D1', () => {
-  // Empty set: hover-only (no .visible). Non-empty: always visible, so the
-  // resting map stays clean but an active selection is never hidden.
+test('the checkbox contour is visible at rest, not hover-gated', () => {
+  // An affordance that only appears on hover has to be discovered first, which
+  // defeats the reason a checkbox was chosen over a modifier key.
   const a = fresh();
   const ctxA = makeCtx(a, { targetIds: new Set() });
   renderNodes(ctxA.ctx);
   for (const b of ctxA.doc.querySelectorAll('[data-target-box]')) {
-    assert.ok(!b.classList.contains('visible'), 'empty selection: checkbox is hover-only');
+    assert.ok(!b.classList.contains('visible'),
+      'no .visible gate: the stylesheet shows the contour unconditionally');
   }
-
+  // Selecting one marks it checked without changing the others' visibility.
   const b2 = fresh();
   const ctxB = makeCtx(b2, { targetIds: new Set(['i-1']) });
   renderNodes(ctxB.ctx);
-  for (const b of ctxB.doc.querySelectorAll('[data-target-box]')) {
-    assert.ok(b.classList.contains('visible'), 'non-empty selection: all checkboxes visible');
-  }
+  const boxes = [...ctxB.doc.querySelectorAll('[data-target-box]')];
+  assert.ok(boxes[0].classList.contains('checked'));
+  assert.ok(!boxes[1].classList.contains('checked'));
 });
+
 
 test('a preset selection ticks the real checkboxes', async () => {
   // The reported symptom: pressing a preset changed nothing on the map. The ids
