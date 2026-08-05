@@ -22,6 +22,7 @@
 
   // ── Live report overlay state ──
   let reportOverlayOpen = false;
+  let reportRetry = null;
   let reportOverlayEl = null;
 
   // ── Target set — scopes the next run to a subset of nodes ──
@@ -102,6 +103,9 @@
     f.contentDocument.write(doc);
     f.contentDocument.close();
     const go = () => {
+      // A print stylesheet cannot force a <details> open - the UA hides the
+      // contents until the attribute is present - so set it on the printed copy.
+      f.contentDocument.querySelectorAll('details').forEach((d) => d.setAttribute('open', ''));
       f.contentWindow.focus();
       f.contentWindow.print();
       setTimeout(() => f.remove(), 1000);
@@ -125,10 +129,19 @@
   }
 
   function rerenderReportOverlay() {
-    if (!reportOverlayOpen || !reportOverlayEl) return;
+    if (!reportOverlayOpen) return;
+    // The element is bound by Svelte only after the {#if} flushes, and the first
+    // SSE event can arrive before that. Returning silently left the tab blank
+    // until a manual reload happened to order those two the other way round, so
+    // retry on the next tick and let whichever arrives last trigger the render.
+    if (!reportOverlayEl || !getReportViews().length) {
+      if (!reportRetry) {
+        reportRetry = setTimeout(function () { reportRetry = null; rerenderReportOverlay(); }, 120);
+      }
+      return;
+    }
     ensureReportCss();
     const views = getReportViews();
-    if (!views.length) return;
     // Preserve scroll position and IP selection across re-renders
     const scrollTop = reportOverlayEl.scrollTop;
     const selectedIPs = new Set();
@@ -222,10 +235,13 @@
     const pruned = prunedTargets(targetIds, fleet.nodes);
     if (pruned.size !== targetIds.size) targetIds = pruned;
     updateTargetPanel();
-    loading = false; error = ''; remount();
+    loading = false; error = '';
+    // A report tab renders no map, so skip the mount, and render the report
+    // before anything optional so it cannot be starved by a later failure.
+    if (reportOverlayOpen) rerenderReportOverlay();
+    else remount();
     const s = conn.stats();
     panel?.setStats({ ...s, updated: Date.now() });
-    rerenderReportOverlay();
   }
   function scheduleRerender() {
     if (rerenderTimer) return;
