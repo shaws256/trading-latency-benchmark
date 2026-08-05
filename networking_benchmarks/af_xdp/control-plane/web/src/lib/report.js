@@ -39,9 +39,9 @@ export function buildReportHTML(fleet, kind, variation) {
   const isMcast = kind === 'mcast';
 
   // ── Node inventory table (always shown) ─────────────────────────────────────
-  let inventory = '<table class="inv"><tr><th>#</th><th>Private IP</th><th>Public IP</th><th>Role</th><th>AZ</th><th>PG</th><th>Type</th></tr>';
+  let inventory = '<table class="inv sortable" id="inv-table"><tr><th>#</th><th>Private IP</th><th>Public IP</th><th>Role</th><th>AZ</th><th>PG</th><th>Type</th></tr>';
   nodes.forEach((n, i) => {
-    inventory += `<tr><td>${i}</td><td>${label(n)}</td><td>${esc(n.public_ip || '—')}</td><td class="role-${esc(n.role || '')}">${esc(n.role || '—')}</td>`
+    inventory += `<tr data-ip="${esc(n.private_ip || '')}"><td>${i}</td><td>${label(n)}</td><td>${esc(n.public_ip || '—')}</td><td class="role-${esc(n.role || '')}">${esc(n.role || '—')}</td>`
       + `<td>${esc(n.az || '—')}</td><td>${esc(n.cpg_name && n.cpg_name !== 'unknown' ? n.cpg_name : '—')}</td>`
       + `<td>${esc(n.type || '—')}</td></tr>`;
   });
@@ -57,7 +57,7 @@ export function buildReportHTML(fleet, kind, variation) {
     const dstIdxs = nodes.map((n, i) => n.role === 'destination' ? i : -1).filter(i => i >= 0);
 
     // Mcast heatmap: single-column (source → each destination via replicator)
-    heat = '<table class="heat"><tr><th>Destination</th><th>Role</th><th>AZ</th><th>PG</th><th>p50</th><th>p99</th><th>loss</th></tr>';
+    heat = '<table class="heat sortable" id="fanout-table"><tr><th>Destination</th><th>Role</th><th>AZ</th><th>PG</th><th>p50</th><th>p99</th><th>loss</th></tr>';
     dstIdxs.forEach(di => {
       // The live model renders mcast as two physical hops and attributes the
       // end-to-end one-way metric to the measured last leg (replicator → dest),
@@ -69,11 +69,11 @@ export function buildReportHTML(fleet, kind, variation) {
       const n = nodes[di];
       const pg = n.cpg_name && n.cpg_name !== 'unknown' ? n.cpg_name : '—';
       if (c) {
-        heat += `<tr><td>${label(n)}</td><td>${esc(n.role || '')}</td><td>${esc(n.az || '')}</td><td>${esc(pg)}</td>`
+        heat += `<tr data-ip="${esc(n.private_ip || '')}"><td>${label(n)}</td><td>${esc(n.role || '')}</td><td>${esc(n.az || '')}</td><td>${esc(pg)}</td>`
           + `<td style="background:${latencyColor(c.p50, mn, mx)};color:#0d1117;font-weight:700">${fmtLat(c.p50)}</td>`
           + `<td>${fmtLat(c.p99)}</td><td>${esc(c.loss ?? 0)}%</td></tr>`;
       } else {
-        heat += `<tr><td>${label(n)}</td><td>${esc(n.role || '')}</td><td>${esc(n.az || '')}</td><td>${esc(pg)}</td><td class="na">·</td><td class="na">·</td><td class="na">·</td></tr>`;
+        heat += `<tr data-ip="${esc(n.private_ip || '')}"><td>${label(n)}</td><td>${esc(n.role || '')}</td><td>${esc(n.az || '')}</td><td>${esc(pg)}</td><td class="na">·</td><td class="na">·</td><td class="na">·</td></tr>`;
       }
     });
     heat += '</table>';
@@ -91,7 +91,7 @@ export function buildReportHTML(fleet, kind, variation) {
       const sn = nodes[i], dn = nodes[j];
       const sPg = sn.cpg_name && sn.cpg_name !== 'unknown' ? sn.cpg_name : '—';
       const dPg = dn.cpg_name && dn.cpg_name !== 'unknown' ? dn.cpg_name : '—';
-      rows += `<tr><td>${label(sn)}</td><td>${esc(sn.role || '—')}</td><td>${esc(sPg)}</td>`
+      rows += `<tr data-src="${esc(sn.private_ip || '')}" data-dst="${esc(dn.private_ip || '')}"><td>${label(sn)}</td><td>${esc(sn.role || '—')}</td><td>${esc(sPg)}</td>`
         + `<td>${label(dn)}</td><td>${esc(dn.role || '—')}</td>`
         + `<td>${esc(dn.az || '—')}</td><td>${esc(dPg)}</td>`
         + `<td>${fmtLat(c.p50)}</td><td>${fmtLat(c.p90)}</td><td>${fmtLat(c.p99)}</td><td>${fmtLat(c.p999)}</td><td>${fmtLat(c.max)}</td><td>${esc(c.loss ?? 0)}%</td></tr>`;
@@ -99,14 +99,17 @@ export function buildReportHTML(fleet, kind, variation) {
 
   } else {
     // ── Ucast: NxN heatmap (rows = src, cols = dst), cell colour = p50 ─────────
-    heat = '<table class="heat"><tr><th>src \\ dst</th>' + nodes.map((n) => `<th title="${nodeInfo(n)}">${label(n)}</th>`).join('') + '</tr>';
+    heat = '<table class="heat" id="heat-table"><tr><th>src \\ dst</th>'
+      + nodes.map((n) => `<th data-col-ip="${esc(n.private_ip || '')}" title="${nodeInfo(n)}">${label(n)}</th>`).join('') + '</tr>';
     for (let i = 0; i < N; i++) {
-      heat += `<tr><th title="${nodeInfo(nodes[i])}">${label(nodes[i])}</th>`;
+      const rip = esc(nodes[i].private_ip || '');
+      heat += `<tr data-ip="${rip}"><th data-row-ip="${rip}" title="${nodeInfo(nodes[i])}">${label(nodes[i])}</th>`;
       for (let j = 0; j < N; j++) {
         const c = matrix[i] && matrix[i][j];
-        if (i === j) heat += '<td class="diag">—</td>';
-        else if (!c) heat += '<td class="na">·</td>';
-        else heat += `<td style="background:${latencyColor(c.p50, mn, mx)}" title="p99 ${fmtLat(c.p99)} · loss ${c.loss ?? 0}%">${fmtLat(c.p50)}</td>`;
+        const dat = ` data-row-ip="${rip}" data-col-ip="${esc(nodes[j].private_ip || '')}"`;
+        if (i === j) heat += `<td class="diag"${dat}>—</td>`;
+        else if (!c) heat += `<td class="na"${dat}>·</td>`;
+        else heat += `<td${dat} style="background:${latencyColor(c.p50, mn, mx)}" title="p99 ${fmtLat(c.p99)} · loss ${c.loss ?? 0}%">${fmtLat(c.p50)}</td>`;
       }
       heat += '</tr>';
     }
@@ -120,7 +123,7 @@ export function buildReportHTML(fleet, kind, variation) {
       const sn = nodes[i], dn = nodes[j];
       const sPg = sn.cpg_name && sn.cpg_name !== 'unknown' ? sn.cpg_name : '—';
       const dPg = dn.cpg_name && dn.cpg_name !== 'unknown' ? dn.cpg_name : '—';
-      rows += `<tr><td>${label(sn)}</td><td>${esc(sn.role || '—')}</td><td>${esc(sPg)}</td>`
+      rows += `<tr data-src="${esc(sn.private_ip || '')}" data-dst="${esc(dn.private_ip || '')}"><td>${label(sn)}</td><td>${esc(sn.role || '—')}</td><td>${esc(sPg)}</td>`
         + `<td>${label(dn)}</td><td>${esc(dn.role || '—')}</td>`
         + `<td>${esc(dn.az || '—')}</td><td>${esc(dPg)}</td>`
         + `<td>${fmtLat(c.p50)}</td><td>${fmtLat(c.p90)}</td><td>${fmtLat(c.p99)}</td><td>${fmtLat(c.p999)}</td><td>${fmtLat(c.max)}</td><td>${esc(c.loss ?? 0)}%</td></tr>`;
@@ -151,51 +154,135 @@ export function buildReportHTML(fleet, kind, variation) {
   .coverage{font-size:12px;margin:6px 0 12px;padding:7px 10px;border-left:3px solid #d29922;
     background:#1c1810;color:#e3b341;line-height:1.5}
   .coverage b{color:#f0c674}
+  /* Cross-table instance selection */
+  .selbar{display:flex;align-items:center;gap:10px;font-size:12px;margin:10px 0;padding:7px 10px;
+    border:1px solid #30363d;border-radius:6px;background:#161b22;color:#8b949e}
+  .selbar.active{border-color:#d29922;color:#e3b341}
+  .selbar button{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:5px;
+    padding:3px 9px;cursor:pointer;font:600 11px inherit;margin-left:auto;flex:0 0 auto}
+  .selbar button:hover{background:#30363d;color:#fff}
+  .inv tr.sel td, .heat tr.sel td{background:#243b53 !important;color:#e6edf3 !important}
+  .inv tr.sel td:first-child{box-shadow:inset 3px 0 0 #d29922}
+  /* Heatmap: a selected instance lights its whole row and column. */
+  #heat-table td.sel-row, #heat-table td.sel-col{outline:2px solid #d29922;outline-offset:-2px}
+  #heat-table th.sel-row, #heat-table th.sel-col{background:#243b53;color:#e6edf3}
+  /* Latency rows: source match, destination match, or both. */
+  #lat-table tr.sel-src td{background:#1f3350 !important;box-shadow:inset 3px 0 0 #58a6ff}
+  #lat-table tr.sel-dst td{background:#1d3326 !important;box-shadow:inset 3px 0 0 #3fb950}
+  #lat-table tr.sel-both td{background:#3a2f14 !important;box-shadow:inset 3px 0 0 #d29922}
 </style></head><body>
   <h1>AF_XDP latency report — ${esc(kind)} / ${esc(variation)}</h1>
   <div class="meta">Region: ${esc(fleet.region || '?')} · Nodes: ${N} · Pairs: ${pairs} · Generated: ${gen}</div>
   ${isMcast ? '' : `<div class="coverage">Coverage: <b>${pairs}</b> of <b>${N * (N - 1)}</b> possible ordered pairs measured.${pairs < N * (N - 1) ? ` <b>${N * (N - 1) - pairs} missing.</b> A blank cell is either a pair that never ran, or one <b>rejected by the loss gate</b> — rtt derives percentiles only from datagrams that returned, so a lossy run describes its surviving subset and is not comparable to a clean run. Rejected pairs are recorded as failures rather than published as results; check the run log / error list for the reason.` : ''}</div>`}
+  <div class="selbar" id="selbar-wrap"><span id="selbar"></span><button id="selclear">Clear</button></div>
   <h2>Fleet inventory</h2>
   ${inventory}
   <h2>${isMcast ? 'Fan-out latency — source → replicator → destinations' : 'Heatmap — p50 (green = fast, red = slow)'}</h2>
   ${heat}
   <h2>All measured latencies</h2>
-  <table id="lat-table">${tableHeader}${rows}</table>
+  <table id="lat-table" class="sortable">${tableHeader}${rows}</table>
   <script>
-  // Column sorting for the latency table
   (function(){
-    const table = document.getElementById('lat-table');
-    if (!table) return;
-    const headers = table.querySelectorAll('th');
-    let sortCol = -1, sortDir = 1;
-    // Parse a formatted latency cell ("34 µs", "0.2 ms", "1.5 s") into µs for
-    // numeric comparison. Returns NaN for non-latency cells (sorted lexically).
+    // ── Column sorting: every table marked .sortable. The NxN heatmap is
+    // excluded because its rows and columns are the same node axis, so
+    // reordering rows would break its correspondence with the header row.
     function parseLatUs(s) {
-      const m = s.match(/^([\\d.]+)\\s*(s|ms|µs|%?)$/);
-      if (!m) return NaN;
-      const v = parseFloat(m[1]);
-      if (m[2] === 's') return v * 1000000;
-      if (m[2] === 'ms') return v * 1000;
-      return v; // µs or bare number (loss %)
+      // Backslashes are doubled: this lives inside a JS template literal, so a
+      // single \\d would be eaten by escape processing and the match would
+      // silently always fail, falling back to lexical order.
+      //
+      // A unit is REQUIRED for the numeric path. Without that, a dotted IP like
+      // 10.0.0.10 parses as 10 (parseFloat stops at the second dot) and every
+      // address in a subnet compares equal, so the IP columns never sorted.
+      const u = s.match(/^([\\d.]+)\\s*(ms|s|\u00b5s|\u03bcs)$/);
+      if (u) {
+        const v = parseFloat(u[1]);
+        return u[2] === 's' ? v * 1000000 : u[2] === 'ms' ? v * 1000 : v;
+      }
+      const pct = s.match(/^([\\d.]+)%$/);
+      if (pct) return parseFloat(pct[1]);
+      // Plain integer/decimal (row index, vCPU counts). Multi-dot strings such as
+      // IPs fall through to NaN and are compared with numeric-aware collation.
+      if (/^\\d+(\\.\\d+)?$/.test(s)) return parseFloat(s);
+      return NaN;
     }
-    headers.forEach((th, col) => {
-      th.addEventListener('click', () => {
-        if (sortCol === col) sortDir *= -1;
-        else { sortCol = col; sortDir = 1; }
-        headers.forEach(h => h.classList.remove('sorted-asc','sorted-desc'));
-        th.classList.add(sortDir === 1 ? 'sorted-asc' : 'sorted-desc');
-        const tbody = table.querySelector('tbody') || table;
-        const rows = Array.from(tbody.querySelectorAll('tr')).slice(1);
-        rows.sort((a, b) => {
-          const av = a.cells[col]?.textContent?.trim() || '';
-          const bv = b.cells[col]?.textContent?.trim() || '';
-          const an = parseLatUs(av), bn = parseLatUs(bv);
-          if (!isNaN(an) && !isNaN(bn)) return (an - bn) * sortDir;
-          return av.localeCompare(bv) * sortDir;
+    document.querySelectorAll('table.sortable').forEach((table) => {
+      const headers = table.querySelectorAll('tr:first-child th');
+      let sortCol = -1, sortDir = 1;
+      headers.forEach((th, col) => {
+        th.addEventListener('click', () => {
+          if (sortCol === col) sortDir *= -1;
+          else { sortCol = col; sortDir = 1; }
+          headers.forEach(h => h.classList.remove('sorted-asc','sorted-desc'));
+          th.classList.add(sortDir === 1 ? 'sorted-asc' : 'sorted-desc');
+          const tbody = table.querySelector('tbody') || table;
+          const rows = Array.from(tbody.querySelectorAll('tr')).slice(1);
+          rows.sort((a, b) => {
+            const av = a.cells[col]?.textContent?.trim() || '';
+            const bv = b.cells[col]?.textContent?.trim() || '';
+            const an = parseLatUs(av), bn = parseLatUs(bv);
+            if (!isNaN(an) && !isNaN(bn)) return (an - bn) * sortDir;
+            return av.localeCompare(bv, undefined, { numeric: true }) * sortDir;
+          });
+          rows.forEach(r => tbody.appendChild(r));
         });
-        rows.forEach(r => tbody.appendChild(r));
       });
     });
+
+    // ── Cross-table instance selection ────────────────────────────────────
+    // Selection is a SET of instances, so several can be highlighted at once.
+    // Clicking a row in the inventory, fan-out, or latency table toggles that
+    // row's instance. A selected instance lights up: its inventory row, its
+    // row AND column in the heatmap, and every latency row where it appears as
+    // source or destination.
+    const sel = new Set();
+
+    function paint() {
+      document.querySelectorAll('#inv-table tr[data-ip], #fanout-table tr[data-ip]').forEach((tr) => {
+        tr.classList.toggle('sel', sel.has(tr.dataset.ip));
+      });
+      document.querySelectorAll('#heat-table [data-row-ip]').forEach((el) => {
+        el.classList.toggle('sel-row', sel.has(el.dataset.rowIp));
+      });
+      document.querySelectorAll('#heat-table [data-col-ip]').forEach((el) => {
+        el.classList.toggle('sel-col', sel.has(el.dataset.colIp));
+      });
+      document.querySelectorAll('#lat-table tr[data-src]').forEach((tr) => {
+        const s1 = sel.has(tr.dataset.src), s2 = sel.has(tr.dataset.dst);
+        tr.classList.toggle('sel-src', s1);
+        tr.classList.toggle('sel-dst', s2 && !s1);
+        tr.classList.toggle('sel-both', s1 && s2);
+      });
+      const n = sel.size;
+      const bar = document.getElementById('selbar');
+      bar.textContent = n
+        ? n + ' instance' + (n > 1 ? 's' : '') + ' selected: ' + [...sel].join(', ') + '  (click a row to toggle)'
+        : 'Click any row in Fleet inventory or All measured latencies to highlight that instance across the tables. Click again to clear.';
+      bar.classList.toggle('active', n > 0);
+    }
+
+    function toggle(ip) {
+      if (!ip) return;
+      if (sel.has(ip)) sel.delete(ip); else sel.add(ip);
+      paint();
+    }
+
+    // Inventory / fan-out: the row IS one instance.
+    document.querySelectorAll('#inv-table tr[data-ip], #fanout-table tr[data-ip]').forEach((tr) => {
+      tr.style.cursor = 'pointer';
+      tr.addEventListener('click', () => toggle(tr.dataset.ip));
+    });
+    // Latency rows describe a PAIR. Clicking the src or dst cell selects that
+    // endpoint; clicking anywhere else on the row selects the source.
+    document.querySelectorAll('#lat-table tr[data-src]').forEach((tr) => {
+      tr.style.cursor = 'pointer';
+      tr.addEventListener('click', (ev) => {
+        const ci = ev.target.cellIndex;
+        toggle(ci === 3 ? tr.dataset.dst : tr.dataset.src);
+      });
+    });
+    document.getElementById('selclear').addEventListener('click', () => { sel.clear(); paint(); });
+    paint();
   })();
   </script>
 </body></html>`;
