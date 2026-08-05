@@ -99,8 +99,8 @@ export function mountControls(host, opts = {}) {
         <div data-target-block>
           <div class="row"><span class="cp-section">Target Set</span></div>
           <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span><button class="cp-btn cp-btn-sm" data-clear-targets style="display:none">Clear</button></div>
-          <div class="row"><span class="cp-lbl">Scope</span><select class="cp-sel" data-scope></select></div>
-          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">Same PG</button><button class="cp-btn cp-btn-sm" data-preset="az">Same AZ</button><button class="cp-btn cp-btn-sm" data-preset="vpc">Same VPC</button><button class="cp-btn cp-btn-sm" data-preset="region">Same Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm" data-preset="clear">Clear</button></div>
+          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">Same PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">Same VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">Same AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Same Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm" data-preset="clear">Clear</button></div>
+          <div class="row"><select class="cp-sel" data-scope></select></div>
         </div>
         <div class="cp-hr"></div>
         <div class="row center"><span class="cp-section">Test Latency</span></div>

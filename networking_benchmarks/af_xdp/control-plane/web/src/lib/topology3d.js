@@ -113,6 +113,14 @@ export function mountTopology3D(container, fleet, opts = {}) {
   labelRenderer.domElement.style.pointerEvents = 'none';
   container.appendChild(labelRenderer.domElement);
   const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true;
+  // Shift makes left-drag pan. Right-drag still pans as well, so nothing is
+  // lost; shift is simply reachable on a trackpad without a second button.
+  const setPanModifier = (on) => {
+    controls.mouseButtons.LEFT = on ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+  };
+  const onKeyShift = (ev) => { if (ev.key === 'Shift') setPanModifier(ev.type === 'keydown'); };
+  window.addEventListener('keydown', onKeyShift);
+  window.addEventListener('keyup', onKeyShift);
   scene.add(new THREE.AmbientLight(0xffffff, 0.8));
   const dl = new THREE.DirectionalLight(0xffffff, 0.75); dl.position.set(1,1,1); scene.add(dl);
 
@@ -533,7 +541,7 @@ export function mountTopology3D(container, fleet, opts = {}) {
     + '<div class="hint-row"><b>Click</b> a node \u2014 select it + its 1-hop neighbours; click again to deselect</div>'
     + '<div class="hint-row"><b>Shift+Click</b> a node \u2014 toggle target-set membership (gold outline)</div>'
     + '<div class="hint-row"><b>Deselect all</b> \u2014 restore the full view</div>'
-    + '<div class="hint-row"><b>Drag</b> = rotate &middot; <b>scroll</b> = zoom &middot; <b>right-drag</b> = pan</div>'
+    + '<div class="hint-row"><b>Drag</b> = rotate &middot; <b>scroll</b> = zoom &middot; <b>shift+drag</b> = pan</div>'
     + '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold</div>'
     + '</div>';
   // Shared Boundaries toggles — flip .visible on each level's collected objects.
@@ -566,6 +574,6 @@ export function mountTopology3D(container, fleet, opts = {}) {
 
   return {
     getView() { return { pos: camera.position.toArray(), target: controls.target.toArray() }; },
-    dispose() { cancelAnimationFrame(rafId); window.removeEventListener('resize', onResize); panelCtx.disposers.forEach(fn => fn()); pinned.forEach((p) => { p.dispose(); if (p.el.parentNode) p.el.parentNode.removeChild(p.el); }); pinned.clear(); },
+    dispose() { cancelAnimationFrame(rafId); window.removeEventListener('resize', onResize); window.removeEventListener('keydown', onKeyShift); window.removeEventListener('keyup', onKeyShift); panelCtx.disposers.forEach(fn => fn()); pinned.forEach((p) => { p.dispose(); if (p.el.parentNode) p.el.parentNode.removeChild(p.el); }); pinned.clear(); },
   };
 }

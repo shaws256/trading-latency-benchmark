@@ -68,3 +68,22 @@ test('every node gets a sphere keyed the same way the target set is', () => {
   assert.match(src, /classList\.toggle\('checked',\s*targeted\)/,
     'render must reflect membership on the sphere');
 });
+
+test('shift really pans, so the legend is not lying', () => {
+  // A legend that claims shift+drag pans while OrbitControls still has PAN on
+  // the right button only is worse than an unclear one.
+  assert.match(src, /THREE\.MOUSE\.PAN/, 'shift must remap the left button to PAN');
+  assert.match(src, /addEventListener\('keydown', onKeyShift\)/);
+  assert.match(src, /addEventListener\('keyup', onKeyShift\)/);
+  assert.match(src, /shift\+drag<\/b> = pan/, 'legend must say shift+drag');
+  assert.ok(!/right-drag<\/b> = pan/.test(src), 'stale right-drag legend must be gone');
+});
+
+test('the shift listeners are removed on dispose', () => {
+  // The 3D view remounts on every live update, so window listeners that are
+  // never removed accumulate and mutate a disposed controls object.
+  const i = src.indexOf('dispose() {');
+  const body = src.slice(i, i + 500);
+  assert.match(body, /removeEventListener\('keydown', onKeyShift\)/);
+  assert.match(body, /removeEventListener\('keyup', onKeyShift\)/);
+});

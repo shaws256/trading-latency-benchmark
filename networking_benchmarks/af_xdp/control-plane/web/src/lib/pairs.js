@@ -33,8 +33,8 @@ export const SCOPES = [
  */
 export const PRESETS = [
   { id: 'pg', label: 'Same PG', attr: 'cpg_name' },
-  { id: 'az', label: 'Same AZ', attr: 'az' },
   { id: 'vpc', label: 'Same VPC', attr: 'vpc_id' },
+  { id: 'az', label: 'Same AZ', attr: 'az' },
   { id: 'region', label: 'Same region', attr: 'region' },
   { id: 'all', label: 'All' },
   { id: 'clear', label: 'Clear' },

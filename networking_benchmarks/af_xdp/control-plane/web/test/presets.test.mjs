@@ -98,3 +98,9 @@ test('a preset ignores nodes missing the attribute', () => {
   const r = resolvePreset('pg', partial, '10.0.0.1');
   assert.deepEqual(ids(r), ['10.0.0.1'], 'missing/unknown attributes must not group together');
 });
+
+test('preset order matches the control panel', () => {
+  // The panel markup and this list must agree, or the chips resolve to the
+  // wrong grouping after a reorder.
+  assert.deepEqual(PRESETS.map((p) => p.id), ['pg', 'vpc', 'az', 'region', 'all', 'clear']);
+});
