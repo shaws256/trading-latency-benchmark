@@ -110,7 +110,7 @@ export function mountControls(host, opts = {}) {
 
       <!-- Target block: shared between normal and live modes -->
       <div data-target-block>
-        <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>\u25B6</span></div>
+        <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>+</span></div>
         <div data-targets-content style="display:none">
         <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
         <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
@@ -121,7 +121,7 @@ export function mountControls(host, opts = {}) {
       <div class="cp-hr"></div>
 
       <div data-normal>
-        <div class="row center"><span class="cp-section">Test Latency</span><span class="cp-panel-caret collapsed" data-fold-latency>\u25B6</span></div>
+        <div class="row center"><span class="cp-section">Test Latency</span><span class="cp-panel-caret collapsed" data-fold-latency>+</span></div>
         <div data-latency-content style="display:none">
         <div class="row"><span class="cp-lbl">Packets</span><input class="cp-num" data-count value="10000" title="Measurement packets per pair (100–1,000,000)"></div>
         <div class="row"><span class="cp-lbl">Rate</span><input class="cp-num" data-rate value="10000" title="Ucast send rate (1,000–1,000,000)"><span class="cp-dim">pps</span></div>
@@ -173,8 +173,9 @@ export function mountControls(host, opts = {}) {
       </div>
 
       <div class="cp-hr"></div>
-      <div class="cp-log-row"><span class="cp-log-label">LOG</span><button class="cp-btn cp-btn-sm" data-cancel-run disabled title="Cancel the in-flight campaign run">Cancel Run</button><button class="cp-icon cp-log-dl" data-log-download title="Download the full session ops log">\u2913</button></div>
+      <div class="cp-log-row"><span class="cp-log-label">LOG</span><button class="cp-icon cp-log-dl" data-log-download title="Download the full session ops log">\u2913</button></div>
       <div class="cp-status" data-status></div>
+      <div class="row" style="margin-top:6px"><button class="cp-btn cp-btn-sm" data-cancel-run disabled title="Cancel the in-flight campaign run">Cancel Run</button></div>
     </div>
   `;
   host.appendChild(el);
@@ -339,8 +340,12 @@ export function mountControls(host, opts = {}) {
   }));
 
   let _lastTargetState = { count: 0, pairs: 0, scope: 'among', totalNodes: 0 };
+  const scopeRow = scopeSel.closest('.row');
+  if (scopeRow) scopeRow.style.display = 'none'; // hidden until selection exists
   const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes, preset }) => {
     _lastTargetState = { count, pairs, scope: sc, totalNodes, preset };
+    // Show the scope dropdown only when there is a selection
+    if (scopeRow) scopeRow.style.display = count > 0 ? '' : 'none';
     // Each preset expands the marked instance into its group, so there is
     // nothing for them to act on until an instance is marked - EXCEPT 'all'
     // which selects every online node regardless of anchor.
@@ -384,13 +389,13 @@ export function mountControls(host, opts = {}) {
     if (foldState.targets) {
       targetsContent.style.display = '';
       foldTargetsBtn.classList.remove('collapsed');
-      foldTargetsBtn.textContent = '\u25BC';
+      foldTargetsBtn.textContent = '\u2212';
     }
     foldTargetsBtn.addEventListener('click', () => {
       const hidden = targetsContent.style.display === 'none';
       targetsContent.style.display = hidden ? '' : 'none';
       foldTargetsBtn.classList.toggle('collapsed', !hidden);
-      foldTargetsBtn.textContent = hidden ? '\u25BC' : '\u25B6';
+      foldTargetsBtn.textContent = hidden ? '\u2212' : '+';
       foldState.targets = hidden;
       saveFoldState(foldState);
     });
@@ -402,13 +407,13 @@ export function mountControls(host, opts = {}) {
     if (foldState.latency) {
       latencyContent.style.display = '';
       foldLatencyBtn.classList.remove('collapsed');
-      foldLatencyBtn.textContent = '\u25BC';
+      foldLatencyBtn.textContent = '\u2212';
     }
     foldLatencyBtn.addEventListener('click', () => {
       const hidden = latencyContent.style.display === 'none';
       latencyContent.style.display = hidden ? '' : 'none';
       foldLatencyBtn.classList.toggle('collapsed', !hidden);
-      foldLatencyBtn.textContent = hidden ? '\u25BC' : '\u25B6';
+      foldLatencyBtn.textContent = hidden ? '\u2212' : '+';
       foldState.latency = hidden;
       saveFoldState(foldState);
     });

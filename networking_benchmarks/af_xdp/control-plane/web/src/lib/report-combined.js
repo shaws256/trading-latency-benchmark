@@ -12,7 +12,7 @@
 //   - The overview grid, which does mix modes to show the freshest value per
 //     cell, says so, and badges every cell with the mode that produced it.
 
-import { fmtLat, cellColor, isCrossRegion, esc } from './2d/palette.js';
+import { fmtLat, cellColor, isCrossRegion, esc, LATENCY_BEST_COLOR } from './2d/palette.js';
 import { buildCompareHTML } from './report.js';
 
 /** Short per-mode badge: K/X for ucast kernel/xdp, C/I/K for mcast fwd modes. */
@@ -168,7 +168,7 @@ function latencyTable(rows, tz) {
   const colourCell = (col, val) => {
     const e = extremes[col];
     if (!e) return '';
-    if (val === e.mn) return ' style="color:green"';
+    if (val === e.mn) return ` style="color:${LATENCY_BEST_COLOR}"`;
     if (val === e.mx) return ' style="color:red"';
     return '';
   };
@@ -229,7 +229,7 @@ export const REPORT_CSS = `
   h3{font-size:13px}
   .meta{color:#8b949e;font-size:12px;margin-bottom:10px}
   table{border-collapse:collapse;margin:8px 0 4px;font-size:12px}
-  th,td{border:1px solid #30363d;padding:3px 7px;text-align:right;white-space:nowrap}
+  .report-view th,.report-view td{border:1px solid #30363d;padding:3px 7px;text-align:right;white-space:nowrap}
   th{background:#161b22;color:#8b949e;font-weight:600;cursor:pointer;user-select:none}
   .inv td,.inv th{text-align:left}
   .heat td{font-family:'SF Mono',monospace;font-weight:700;background:#0d1117}
@@ -312,8 +312,8 @@ export function buildCombinedReportBody(views, tz) {
   <div class="meta">Region: ${esc(region)} \u00b7 Nodes: ${nodes.length} \u00b7 Modes: ${esc(modeList.join(', '))} \u00b7 Measurements: ${rows.length} \u00b7 Timezone: ${esc(tzLabel(tz))} \u00b7 Generated: ${esc(gen)}</div>
   ${ages(rows, tz)}
 
-  <div class="selbar"><span id="selinfo">Click an IP anywhere to highlight that instance everywhere.</span><button id="selclear">Clear</button></div>
-  <h2>Overview \u2014 freshest measurement per pair, badged by mode</h2>
+  <div class="selbar"><span id="selinfo">Click an IP anywhere to highlight that instance everywhere.</span><button id="selclear">Clear</button><button data-csv-btn style="margin-left:6px">Save as CSVs</button></div>
+  <h2>Latest measurements</h2>
   ${overviewGrid(nodes, best, scale, tz)}
 
   <h2>Fleet inventory</h2>
@@ -457,6 +457,57 @@ export function reportInteractions(root) {
   var clearBtn = root.querySelector('#selclear');
   if (clearBtn) clearBtn.addEventListener('click', function() { sel.clear(); paint(); });
   paint();
+
+  // ── Save as CSVs: one file per table ──────────────────────────────────────
+  function tableToCsv(table) {
+    var rows = [].slice.call(table.querySelectorAll('tr'));
+    var lines = [];
+    for (var r = 0; r < rows.length; r++) {
+      var cells = [].slice.call(rows[r].querySelectorAll('th, td'));
+      var fields = [];
+      for (var c = 0; c < cells.length; c++) {
+        var txt = cells[c].textContent.trim();
+        if (/[,"\n\r]/.test(txt)) {
+          txt = '"' + txt.replace(/"/g, '""') + '"';
+        }
+        fields.push(txt);
+      }
+      lines.push(fields.join(','));
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  function slugify(str) {
+    return str.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
+
+  function findHeadingForTable(table) {
+    var prev = table.previousElementSibling;
+    while (prev) {
+      if (/^H[1-6]$/.test(prev.tagName)) return prev.textContent.trim();
+      prev = prev.previousElementSibling;
+    }
+    return '';
+  }
+
+  var csvBtn = root.querySelector('[data-csv-btn]');
+  if (csvBtn) csvBtn.addEventListener('click', function() {
+    var tables = [].slice.call(root.querySelectorAll('table'));
+    for (var i = 0; i < tables.length; i++) {
+      var heading = findHeadingForTable(tables[i]);
+      var fname = heading ? slugify(heading) + '.csv' : 'table-' + (i + 1) + '.csv';
+      var csv = tableToCsv(tables[i]);
+      var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  });
 }
 
 /**
@@ -477,7 +528,7 @@ export function buildCombinedReportHTML(views, tz) {
 
   return `<!doctype html><html><head><meta charset="utf-8">
   <title>${docTitle}</title>
-  <style>${REPORT_CSS}</style></head><body>
+  <style>${REPORT_CSS}</style></head><body class="report-view">
   ${body}
   <script>(${reportInteractions.toString()})(document);</script></body></html>`;
 }

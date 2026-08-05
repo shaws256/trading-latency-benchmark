@@ -154,7 +154,7 @@
     if (contentEl) {
       contentEl.innerHTML = body;
     } else {
-      reportOverlayEl.innerHTML = `<div class="report-content">${body}</div>`;
+      reportOverlayEl.innerHTML = `<div class="report-content report-view">${body}</div>`;
     }
 
     const root = reportOverlayEl.querySelector('.report-content');
@@ -383,14 +383,11 @@
       },
       onScopeChange: (s) => { scope = s; updateTargetPanel(); remount(); },
       onPreset: (name) => {
-        // Presets are group expansions of the MARKED instance: PG selects every
-        // instance sharing its placement group, AZ every one in its AZ, and so
-        // on. Pressing the active preset again collapses back to just that
-        // instance, keeping the anchor so another grouping can be tried without
-        // re-marking. The buttons are disabled while nothing is marked.
+        // 'all' selects every online node unconditionally - no anchor needed.
+        // Other presets are group expansions of the MARKED instance.
         const anchor = targetAnchor || (targetIds.size ? [...targetIds][0] : null);
-        if (!anchor) return;
-        if (activePreset === name) {
+        if (name !== 'all' && !anchor) return;
+        if (activePreset === name && name !== 'all') {
           targetIds = new Set([anchor]);
           activePreset = null;
           updateTargetPanel(); remount(); return;

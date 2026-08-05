@@ -171,9 +171,15 @@ export function cellColor(p50, mn, mx, crossRegion) {
   return crossRegion ? CROSS_REGION_COLOR : latencyColor(p50, mn, mx);
 }
 
+// Latency ramp: gold (#FFD166) -> coral/salmon (#E85D50) -> deep red (#B22033).
+// Gold at the fast end is warm and readable on #0d1117; the mid-stop is a
+// distinct coral that separates gold from the red end despite the narrow hue
+// span. All three are easily distinguishable on the dark canvas.
+export const LATENCY_BEST_COLOR = 'rgb(255,209,102)';
+
 export function latencyColor(p50, minP50, maxP50) {
   const t = (maxP50 === minP50) ? 0 : Math.max(0, Math.min(1, (p50 - minP50) / (maxP50 - minP50)));
-  const stops = [[57, 211, 83], [240, 136, 62], [248, 81, 73]];
+  const stops = [[255, 209, 102], [232, 93, 80], [178, 32, 51]];
   const seg = t <= 0.5 ? 0 : 1, lt = t <= 0.5 ? t * 2 : (t - 0.5) * 2, a = stops[seg], b = stops[seg + 1];
   return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * lt) + ',' + Math.round(a[1] + (b[1] - a[1]) * lt) + ',' + Math.round(a[2] + (b[2] - a[2]) * lt) + ')';
 }

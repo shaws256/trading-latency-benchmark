@@ -15,8 +15,17 @@ const maxOf = (arr) => arr.reduce((m, v) => (v > m ? v : m), -Infinity);
 // PAD_BASE: clearance from the innermost nodes to the AZ border.
 // STEP: additional clearance per tier, i.e. the distance between one
 // contour border and the next one out.
-export const PAD_BASE = 20, STEP = 20;
-const LABEL_H = 18;
+// A node draws badges outside its circle (.pg-badge at top:-9px, .role-badge at
+// bottom:-9px, both centred so they overhang sideways too), and every contour
+// draws its label at top:-11px, above its own border. Padding measured from the
+// circle alone therefore lets decoration cross a border, so the rendered extent
+// is padded instead.
+const DECOR_Y = 10, DECOR_X = 18, LABEL_OVERHANG = 24;
+// PAD_BASE: clearance from the innermost node extents to the AZ border.
+// STEP: clearance per tier, i.e. the gap between one contour border and the
+// next out. It must exceed LABEL_OVERHANG so a child label cannot reach its
+// parent border.
+export const PAD_BASE = 20, STEP = 28;
 const CONTOUR_DEFS = [
   { depth: 3, cls: 'az',      prefix: 'AZ',      pad: PAD_BASE },
   { depth: 2, cls: 'vpc',     prefix: 'VPC',     pad: PAD_BASE + STEP },
@@ -54,11 +63,10 @@ export function computeContourBoxes(fleet, positions) {
       const idx = cells[key].idx; if (idx.length === 0) continue;
       const xs = idx.map(i => positions[i].x), ys = idx.map(i => positions[i].y);
       const radii = idx.map(i => nodeRadius(fleet.nodes[i]));
-      const left = minOf(xs.map((x, k) => x - radii[k])) - def.pad;
-      const right = maxOf(xs.map((x, k) => x + radii[k])) + def.pad;
-      const rawTop = minOf(ys.map((y, k) => y - radii[k])) - def.pad;
-      const top = Math.max(rawTop, LABEL_H);
-      const bottom = maxOf(ys.map((y, k) => y + radii[k])) + def.pad;
+      const left = minOf(xs.map((x, k) => x - radii[k] - DECOR_X)) - def.pad;
+      const right = maxOf(xs.map((x, k) => x + radii[k] + DECOR_X)) + def.pad;
+      const top = minOf(ys.map((y, k) => y - radii[k] - DECOR_Y)) - def.pad;
+      const bottom = maxOf(ys.map((y, k) => y + radii[k] + DECOR_Y)) + def.pad;
       const box = { tier: def.cls, key, left, top, right, bottom, nodeIndices: idx };
       boxes.push(box);
       boxByKey[key] = box;
@@ -81,7 +89,8 @@ export function computeContourBoxes(fleet, positions) {
         // Parent must contain child with at least STEP margin.
         pbox.left = Math.min(pbox.left, cbox.left - STEP);
         pbox.right = Math.max(pbox.right, cbox.right + STEP);
-        pbox.top = Math.min(pbox.top, cbox.top - STEP);
+        // The child's label sits above its own top edge, so clear that too.
+        pbox.top = Math.min(pbox.top, cbox.top - Math.max(STEP, LABEL_OVERHANG));
         pbox.bottom = Math.max(pbox.bottom, cbox.bottom + STEP);
       }
     }

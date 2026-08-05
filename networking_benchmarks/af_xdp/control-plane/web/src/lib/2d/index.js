@@ -14,6 +14,7 @@ import { renderEdges } from './edges.js';
 import { renderNodes } from './nodes.js';
 import { renderPanels } from './panels.js';
 import { applySel } from './selection.js';
+import { applyZoom, resetZoom } from './zoom.js';
 
 const STYLE_ID = 'topology2d-styles';
 
@@ -91,6 +92,39 @@ export function mountTopology2D(container, fleet, opts = {}) {
   root.addEventListener('mousedown', onPanDown);
   window.addEventListener('mousemove', onPanMove); window.addEventListener('mouseup', onPanUp);
   ctx.disposers.push(() => { root.removeEventListener('mousedown', onPanDown); window.removeEventListener('mousemove', onPanMove); window.removeEventListener('mouseup', onPanUp); });
+
+  // ── zoom: wheel/pinch scales the viewport about the cursor ─────────────────
+  const zoomState = { scale: 1, tx: 0, ty: 0 };
+  const syncTransform = () => {
+    viewport.style.transform = `translate(${panX + zoomState.tx}px,${panY + zoomState.ty}px) scale(${zoomState.scale})`;
+  };
+  // Override the pan transform to compose with zoom
+  const onPanMoveZ = (e) => { if (!panning) return; panX = pox + (e.clientX - psx); panY = poy + (e.clientY - psy); syncTransform(); };
+  const onPanUpZ = () => { if (panning) { panning = false; root.style.cursor = ''; } };
+  window.removeEventListener('mousemove', onPanMove); window.removeEventListener('mouseup', onPanUp);
+  window.addEventListener('mousemove', onPanMoveZ); window.addEventListener('mouseup', onPanUpZ);
+  ctx.disposers.push(() => { window.removeEventListener('mousemove', onPanMoveZ); window.removeEventListener('mouseup', onPanUpZ); });
+
+  const onWheel = (e) => {
+    e.preventDefault();
+    const rect = root.getBoundingClientRect();
+    const cx = e.clientX - rect.left - panX - zoomState.tx;
+    const cy = e.clientY - rect.top - panY - zoomState.ty;
+    applyZoom(zoomState, e.deltaY, cx, cy);
+    syncTransform();
+  };
+  root.addEventListener('wheel', onWheel, { passive: false });
+  ctx.disposers.push(() => root.removeEventListener('wheel', onWheel));
+
+  // Double-click on empty canvas resets zoom
+  const onDblClick = (e) => {
+    if (e.target.closest && e.target.closest(NO_PAN)) return;
+    resetZoom(zoomState);
+    panX = 0; panY = 0;
+    syncTransform();
+  };
+  root.addEventListener('dblclick', onDblClick);
+  ctx.disposers.push(() => root.removeEventListener('dblclick', onDblClick));
 
   deselectBtn.addEventListener('click', () => { ctx.selected.clear(); applySel(ctx, -1); if (ctx.unpinAll) ctx.unpinAll(); });
 
