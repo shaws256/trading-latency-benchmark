@@ -139,6 +139,7 @@ export function mountTopology3D(container, fleet, opts = {}) {
   const PG_DISC_COL = 0xf0883e; // orange PG marker disc
 
   const nodeMeshes = [];
+  const targetSpheres = [];
   const nodeEdges = [];   // per node { front, back } grey outline; recoloured gold on select
   fleet.nodes.forEach((n, i) => {
     const col = new THREE.Color(capabilityColor(n, capScale).border), emissive = col.clone().multiplyScalar(0.3);
@@ -166,6 +167,22 @@ export function mountTopology3D(container, fleet, opts = {}) {
     div.innerHTML = (n.public_ip ? '<div class="ipp">' + n.public_ip + '</div>' : '')
       + '<div class="ipv">' + n.private_ip + '</div>'
       + roleTag;
+    // Selection sphere, top-left of the node. 3D has no DOM node body to hang a
+    // checkbox on, so it rides the CSS2D label: a real sphere mesh would need
+    // raycast hit-testing and would still be hard to hit at small node sizes.
+    const box = document.createElement('span');
+    box.className = 'target-sphere';
+    box.dataset.targetSphere = n.instance_id || n.private_ip;
+    box.title = 'Select for the next run';
+    div.appendChild(box);
+    targetSpheres[i] = box;
+    box.addEventListener('click', (ev) => {
+      // Do not also pin/select the node body underneath.
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (opts.onToggleTarget) opts.onToggleTarget(box.dataset.targetSphere);
+    });
+
     const lab = new CSS2DObject(div); lab.position.set(0, 0, 0); mesh.add(lab);   // centered on node
   });
 
@@ -389,11 +406,16 @@ export function mountTopology3D(container, fleet, opts = {}) {
       const iid = node.instance_id || node.private_ip;
       const targeted = tids.has(iid);
       e.front.visible = e.back.visible = m.visible;
+      const sph = targetSpheres[i];
+      if (sph) {
+        sph.classList.toggle('checked', targeted);
+        sph.classList.toggle('visible', hasTargets || i === hover);
+      }
       if (sel) {
         m.material.color.set(GOLD); m.material.emissive.set(GOLD).multiplyScalar(0.45);
         e.front.material.color.set(GOLD); e.back.material.color.set(GOLD);
       } else if (targeted) {
-        // Gold wireframe outline for targeted nodes (distinct from selected).
+        // Gold outline for targeted nodes (distinct from selected).
         m.material.color.copy(m.userData.baseColor);
         m.material.emissive.copy(m.userData.baseEmissive).multiplyScalar(i === hover ? 1.6 : 1);
         e.front.material.color.set(GOLD); e.back.material.color.set(GOLD);

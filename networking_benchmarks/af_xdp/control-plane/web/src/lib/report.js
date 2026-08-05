@@ -429,6 +429,13 @@ export function buildReportHTML(fleet, kind, variation) {
         toggle(ci === 2 ? tr.dataset.dst : tr.dataset.src);
       });
     });
+    // The heatmap's own axis labels select too: it is the most natural place to
+    // click when reading the grid. Row and column headers both toggle the node,
+    // and paint() marks that node's row AND column.
+    document.querySelectorAll('#heat-table th[data-row-ip], #heat-table th[data-col-ip]').forEach((th) => {
+      th.style.cursor = 'pointer';
+      th.addEventListener('click', () => toggle(th.dataset.rowIp || th.dataset.colIp));
+    });
     document.getElementById('selclear').addEventListener('click', () => { sel.clear(); paint(); });
     paint();
   })();
