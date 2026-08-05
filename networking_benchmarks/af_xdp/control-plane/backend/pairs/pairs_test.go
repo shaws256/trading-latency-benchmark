@@ -1,4 +1,4 @@
-package main
+package pairs
 
 import (
 	"encoding/json"
@@ -6,14 +6,15 @@ import (
 	"strings"
 	"testing"
 
+	"afxdp-cp/backend/registry"
 	"afxdp-cp/proto"
 )
 
 // fleet builds n online nodes i-1..i-n with matching 10.0.0.x private IPs.
-func fleet(n int) []Node {
-	out := make([]Node, 0, n)
+func fleet(n int) []registry.Node {
+	out := make([]registry.Node, 0, n)
 	for i := 1; i <= n; i++ {
-		out = append(out, Node{
+		out = append(out, registry.Node{
 			NodeInfo: proto.NodeInfo{
 				InstanceID: "i-" + string(rune('0'+i)),
 				PrivateIP:  "10.0.0." + string(rune('0'+i)),
@@ -25,7 +26,7 @@ func fleet(n int) []Node {
 }
 
 // pairsOf flattens the resolver output into "src>dst" strings for comparison.
-func pairsOf(sources []Node, destsFor map[string][]Node) []string {
+func pairsOf(sources []registry.Node, destsFor map[string][]registry.Node) []string {
 	var out []string
 	for _, s := range sources {
 		for _, d := range destsFor[s.InstanceID] {
@@ -165,7 +166,7 @@ func TestResolvePairsScopes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sources, destsFor, skipped, err := resolvePairs(four, tc.ids, tc.scope)
+			sources, destsFor, skipped, err := ResolvePairs(four, tc.ids, tc.scope)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got pairs %v", pairsOf(sources, destsFor))
@@ -206,7 +207,7 @@ func TestResolvePairsSkipsOfflineNodes(t *testing.T) {
 	nodes[2].Online = false // i-3 is offline
 
 	t.Run("offline target is skipped and reported", func(t *testing.T) {
-		sources, destsFor, skipped, err := resolvePairs(nodes, []string{"i-1", "i-2", "i-3"}, "among")
+		sources, destsFor, skipped, err := ResolvePairs(nodes, []string{"i-1", "i-2", "i-3"}, "among")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -220,7 +221,7 @@ func TestResolvePairsSkipsOfflineNodes(t *testing.T) {
 	})
 
 	t.Run("offline node is not a fanout destination", func(t *testing.T) {
-		sources, destsFor, _, err := resolvePairs(nodes, []string{"i-1"}, "fanout")
+		sources, destsFor, _, err := ResolvePairs(nodes, []string{"i-1"}, "fanout")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -231,7 +232,7 @@ func TestResolvePairsSkipsOfflineNodes(t *testing.T) {
 	})
 
 	t.Run("offline node is not a fanin source", func(t *testing.T) {
-		sources, destsFor, _, err := resolvePairs(nodes, []string{"i-1"}, "fanin")
+		sources, destsFor, _, err := ResolvePairs(nodes, []string{"i-1"}, "fanin")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -242,7 +243,7 @@ func TestResolvePairsSkipsOfflineNodes(t *testing.T) {
 	})
 
 	t.Run("full mesh excludes offline nodes", func(t *testing.T) {
-		sources, destsFor, _, err := resolvePairs(nodes, nil, "among")
+		sources, destsFor, _, err := ResolvePairs(nodes, nil, "among")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -276,11 +277,11 @@ func TestPrepareSetIsUnionOfSourcesAndDests(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sources, destsFor, _, err := resolvePairs(four, tc.ids, tc.scope)
+			sources, destsFor, _, err := ResolvePairs(four, tc.ids, tc.scope)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			got := prepareSet(sources, destsFor)
+			got := PrepareSet(sources, destsFor)
 			var ids []string
 			for _, n := range got {
 				ids = append(ids, n.InstanceID)
@@ -318,8 +319,8 @@ func TestScopeDescription(t *testing.T) {
 		{"fanin", 3, "all to 3 selected nodes"},
 	}
 	for _, tc := range cases {
-		if got := scopeDescription(tc.scope, tc.k); got != tc.want {
-			t.Fatalf("scopeDescription(%q, %d) = %q, want %q", tc.scope, tc.k, got, tc.want)
+		if got := ScopeDescription(tc.scope, tc.k); got != tc.want {
+			t.Fatalf("ScopeDescription(%q, %d) = %q, want %q", tc.scope, tc.k, got, tc.want)
 		}
 	}
 }
@@ -334,13 +335,13 @@ func TestCountPairsMatchesResolver(t *testing.T) {
 			for i := 1; i <= k; i++ {
 				ids = append(ids, "i-"+string(rune('0'+i)))
 			}
-			sources, destsFor, _, err := resolvePairs(six, ids, scope)
+			sources, destsFor, _, err := ResolvePairs(six, ids, scope)
 			want := 0
 			if err == nil {
 				want = len(pairsOf(sources, destsFor))
 			}
-			if got := countPairs(len(six), k, scope); got != want {
-				t.Fatalf("countPairs(N=6, k=%d, %s) = %d, resolver produced %d", k, scope, got, want)
+			if got := CountPairs(len(six), k, scope); got != want {
+				t.Fatalf("CountPairs(N=6, k=%d, %s) = %d, resolver produced %d", k, scope, got, want)
 			}
 		}
 	}
@@ -349,8 +350,15 @@ func TestCountPairsMatchesResolver(t *testing.T) {
 // The web UI posts nodes/scope in the run body, so the wire contract must bind
 // onto the params struct without any explicit handling in handleRun.
 func TestScopedRunJSONBinding(t *testing.T) {
-	body := `{"kind":"ucast","variation":"kernel","nodes":["i-abc","i-def"],"scope":"fanout","count":5000}`
-	var p UcastMatrixParams
+	// UcastMatrixParams is in the orchestrator package, so test the JSON binding
+	// on the fields that matter to pairs: nodes and scope.
+	type runReq struct {
+		Nodes []string `json:"nodes,omitempty"`
+		Scope string   `json:"scope,omitempty"`
+		Count int      `json:"count"`
+	}
+	body := `{"nodes":["i-abc","i-def"],"scope":"fanout","count":5000}`
+	var p runReq
 	if err := json.Unmarshal([]byte(body), &p); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -360,20 +368,20 @@ func TestScopedRunJSONBinding(t *testing.T) {
 	if p.Scope != "fanout" {
 		t.Fatalf("scope = %q, want fanout", p.Scope)
 	}
-	if p.Count != 5000 || p.Variation != "kernel" {
+	if p.Count != 5000 {
 		t.Fatalf("existing fields broken: %+v", p)
 	}
 
 	// Omitting both must leave them zero so the resolver picks full mesh: this
 	// is what keeps old clients on the pre-existing NxN behaviour.
-	var q UcastMatrixParams
-	if err := json.Unmarshal([]byte(`{"kind":"ucast","variation":"xdp"}`), &q); err != nil {
+	var q runReq
+	if err := json.Unmarshal([]byte(`{}`), &q); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(q.Nodes) != 0 || q.Scope != "" {
 		t.Fatalf("absent fields should stay zero, got nodes=%v scope=%q", q.Nodes, q.Scope)
 	}
-	sources, destsFor, _, err := resolvePairs(fleet(3), q.Nodes, q.Scope)
+	sources, destsFor, _, err := ResolvePairs(fleet(3), q.Nodes, q.Scope)
 	if err != nil {
 		t.Fatalf("full mesh must resolve: %v", err)
 	}

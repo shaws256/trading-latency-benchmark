@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"database/sql"
@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"afxdp-cp/backend/collector"
 	"afxdp-cp/proto"
 )
 
@@ -87,7 +88,7 @@ func TestStoreSeedCollector(t *testing.T) {
 		}
 	}
 
-	c := NewCollector()
+	c := collector.NewCollector()
 	if err := s.SeedCollector(c, 60); err != nil {
 		t.Fatalf("SeedCollector: %v", err)
 	}
@@ -158,7 +159,7 @@ func TestStoreNilSafe(t *testing.T) {
 	}
 
 	// The collector with nil store must work fine.
-	c := NewCollector()
+	c := collector.NewCollector()
 	tt := proto.Telemetry{
 		Kind: "ucast", Variation: "kernel", SrcIP: "a", DstIP: "b", Unix: 1,
 		Metrics: proto.Metrics{ServiceRTT: proto.Pct{P50: 10}},
@@ -172,8 +173,8 @@ func TestStoreNilSafe(t *testing.T) {
 	RecordMeasurement(s, tt, 0)
 
 	// SeedCollector with nil store does nothing.
-	if err := SeedFromStore(s, c, 60); err != nil {
-		t.Fatalf("SeedFromStore with nil store: %v", err)
+	if err := seedFromStore(s, c, 60); err != nil {
+		t.Fatalf("seedFromStore with nil store: %v", err)
 	}
 }
 
@@ -205,7 +206,7 @@ func TestStoreDropPath(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		RecordMeasurement(s, proto.Telemetry{
 			Kind: "ucast", Variation: "kernel", SrcIP: "a", DstIP: "b",
-			Unix: time.Now().Unix(),
+			Unix:    time.Now().Unix(),
 			Metrics: proto.Metrics{ServiceRTT: proto.Pct{P50: int64(i)}},
 		}, 0)
 	}

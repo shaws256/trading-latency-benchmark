@@ -1,4 +1,4 @@
-package main
+package orchestrator
 
 import (
 	"encoding/json"
@@ -10,6 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"afxdp-cp/backend/hub"
+	"afxdp-cp/backend/pairs"
+	"afxdp-cp/backend/registry"
+	"afxdp-cp/backend/store"
 	"afxdp-cp/proto"
 
 	"github.com/nats-io/nats.go"
@@ -20,22 +24,22 @@ import (
 // learned operationally (serial senders for ucast; mode barriers; clock gates).
 type Orchestrator struct {
 	nc    *nats.Conn
-	reg   *Registry
-	hub   *Hub
-	store *Store // durable measurement history; nil when persistence is disabled
+	reg   *registry.Registry
+	hub   *hub.Hub
+	store *store.Store // durable measurement history; nil when persistence is disabled
 
 	mu      sync.Mutex
 	pending map[string]chan proto.CommandResult
 	seq     uint64
 
-	running int32 // 0/1 — only one campaign at a time
+	running      int32  // 0/1 — only one campaign at a time
 	lastMcastFwd string // replicator's last-applied mcast fwd mode (skip redundant set_mode)
-	cancel  int32 // set to 1 to request the running campaign abort at the next boundary
+	cancel       int32  // set to 1 to request the running campaign abort at the next boundary
 }
 
 // NewOrchestrator creates an orchestrator and subscribes to fleet.result.* so
 // it can correlate results by CmdID regardless of which subscription delivered the command.
-func NewOrchestrator(nc *nats.Conn, reg *Registry, hub *Hub, store *Store) (*Orchestrator, error) {
+func NewOrchestrator(nc *nats.Conn, reg *registry.Registry, hub *hub.Hub, store *store.Store) (*Orchestrator, error) {
 	o := &Orchestrator{nc: nc, reg: reg, hub: hub, store: store,
 		pending: map[string]chan proto.CommandResult{}}
 	if _, err := nc.Subscribe(proto.SubjectResultWildcard, o.onResult); err != nil {
@@ -70,7 +74,7 @@ func (o *Orchestrator) nextCmdID() string {
 // Cancel requests the currently running campaign to abort at the next safe
 // boundary (round for ucast, mode for mcast). In-flight per-pair measurements
 // already dispatched to agents run to completion; no new work is started.
-func (o *Orchestrator) Cancel() { atomic.StoreInt32(&o.cancel, 1) }
+func (o *Orchestrator) Cancel()         { atomic.StoreInt32(&o.cancel, 1) }
 func (o *Orchestrator) cancelled() bool { return atomic.LoadInt32(&o.cancel) == 1 }
 
 // Dispatch publishes a command to a subject and waits for the agent's result.
@@ -127,7 +131,7 @@ func (o *Orchestrator) dispatchRetry(instanceID string, c proto.Command, timeout
 
 // UcastMatrixParams configures a serial NxN ucast campaign.
 type UcastMatrixParams struct {
-	Variation   string `json:"variation"`   // kernel|xdp
+	Variation   string `json:"variation"` // kernel|xdp
 	Count       int    `json:"count"`
 	Rate        int    `json:"rate"`
 	Warmup      int    `json:"warmup"`
@@ -189,7 +193,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	}
 	online := o.reg.Online()
 	// A target set scopes the campaign to a subset of pairs; empty = full mesh.
-	nodes, destsFor, skipped, rerr := resolvePairs(online, p.Nodes, p.Scope)
+	nodes, destsFor, skipped, rerr := pairs.ResolvePairs(online, p.Nodes, p.Scope)
 	if rerr != nil {
 		o.hub.Emit("job", map[string]any{"status": "error", "kind": "ucast",
 			"variation": p.Variation, "reason": rerr.Error()})
@@ -198,12 +202,12 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	}
 	// Converge the union of sources and destinations, not just the sources: a
 	// destination still in client profile from an earlier run would not echo.
-	prep := prepareSet(nodes, destsFor)
+	prep := pairs.PrepareSet(nodes, destsFor)
 	total := 0
 	for _, s := range nodes {
 		total += len(destsFor[s.InstanceID])
 	}
-	desc := scopeDescription(p.Scope, len(p.Nodes)-len(skipped))
+	desc := pairs.ScopeDescription(p.Scope, len(p.Nodes)-len(skipped))
 	ev := map[string]any{"status": "running", "kind": "ucast", "variation": p.Variation,
 		"pairs": total, "sources": len(nodes), "scope": desc}
 	if len(skipped) > 0 {
@@ -225,7 +229,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 			targetJSON = string(b)
 		}
 	}
-	runID, rErr := o.store.InsertRun("ucast", p.Variation, scopeName(p.Scope, len(p.Nodes)), targetJSON, total,
+	runID, rErr := o.store.InsertRun("ucast", p.Variation, pairs.ScopeName(p.Scope, len(p.Nodes)), targetJSON, total,
 		map[string]any{"count": p.Count, "rate": p.Rate, "warmup": p.Warmup, "max_loss_pct": p.MaxLossPct})
 	if rErr != nil {
 		log.Printf("store: could not open run row: %v", rErr)
@@ -253,7 +257,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	var prepWg sync.WaitGroup
 	for _, n := range prep {
 		prepWg.Add(1)
-		go func(n Node) {
+		go func(n registry.Node) {
 			defer prepWg.Done()
 			o.dispatchRetry(n.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
 				Host: &proto.HostStateParams{Profile: proto.HostEchoUcast}}, 60*time.Second, 2)
@@ -272,7 +276,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	var purge sync.WaitGroup
 	for _, n := range prep {
 		purge.Add(1)
-		go func(n Node) {
+		go func(n registry.Node) {
 			defer purge.Done()
 			o.dispatchRetry(n.InstanceID, proto.Command{Type: proto.CmdPurgeDests}, 30*time.Second, 2)
 		}(n)
@@ -365,8 +369,8 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 		// LAST, giving their replicator the maximum time to finish starting while
 		// the other pairs run.
 		myDests := destsFor[s.InstanceID]
-		dests := make([]Node, 0, len(myDests))
-		var restoring []Node
+		dests := make([]registry.Node, 0, len(myDests))
+		var restoring []registry.Node
 		for _, d := range myDests {
 			if d.InstanceID == s.InstanceID {
 				continue
@@ -385,7 +389,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 		for _, d := range dests {
 			wg.Add(1)
 			sem <- struct{}{} // block if maxPar measurements already in flight
-			go func(s, d Node) {
+			go func(s, d registry.Node) {
 				defer wg.Done()
 				defer func() { <-sem }()
 				// Never measure to a node that is still starting its replicator.
@@ -427,7 +431,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 		restoreDone[s.InstanceID] = ch
 		restoreMu.Unlock()
 		tRestore := time.Now()
-		go func(n Node, ch chan struct{}, started time.Time) {
+		go func(n registry.Node, ch chan struct{}, started time.Time) {
 			o.dispatchRetry(n.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
 				Host: &proto.HostStateParams{Profile: proto.HostEchoUcast}}, 60*time.Second, 2)
 			atomic.AddInt64(&msRestoreWall, time.Since(started).Milliseconds())
@@ -571,10 +575,10 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 	// what makes a ucast -> mcast switchover converge in a single pass per node.
 	tMPrep := time.Now()
 	var mprep sync.WaitGroup
-	endpoints := append([]Node{*source}, dests...)
+	endpoints := append([]registry.Node{*source}, dests...)
 	for _, n := range endpoints {
 		mprep.Add(1)
-		go func(n Node) {
+		go func(n registry.Node) {
 			defer mprep.Done()
 			o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
 				Host: &proto.HostStateParams{Profile: proto.HostMcastEndpoint}}, runSetup)
@@ -606,9 +610,9 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 		// Clock sync does not depend on the replicator, so run it concurrently
 		// with the mode switch (which restarts the replicator) instead of after.
 		var clockWG sync.WaitGroup
-		for _, n := range append([]Node{*source}, modeDests...) {
+		for _, n := range append([]registry.Node{*source}, modeDests...) {
 			clockWG.Add(1)
-			go func(n Node) {
+			go func(n registry.Node) {
 				defer clockWG.Done()
 				o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
 			}(n)
@@ -643,7 +647,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 		var joinWG sync.WaitGroup
 		for _, d := range modeDests {
 			joinWG.Add(1)
-			go func(d Node) {
+			go func(d registry.Node) {
 				defer joinWG.Done()
 				o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdJoinGroup,
 					Mcast: &proto.McastParams{ReplicatorIP: replicator.PrivateIP, Group: p.Group}}, runSetup)

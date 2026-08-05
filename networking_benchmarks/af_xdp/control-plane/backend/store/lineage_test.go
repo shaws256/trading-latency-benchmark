@@ -1,8 +1,9 @@
-package main
+package store
 
 import (
 	"testing"
 
+	"afxdp-cp/backend/pairs"
 	"afxdp-cp/proto"
 )
 
@@ -128,8 +129,8 @@ func TestScopeNameDistinguishesFullMesh(t *testing.T) {
 		{"fanin", 3, "fanin"},
 	}
 	for _, tc := range cases {
-		if got := scopeName(tc.scope, tc.k); got != tc.want {
-			t.Fatalf("scopeName(%q, %d) = %q, want %q", tc.scope, tc.k, got, tc.want)
+		if got := pairs.ScopeName(tc.scope, tc.k); got != tc.want {
+			t.Fatalf("ScopeName(%q, %d) = %q, want %q", tc.scope, tc.k, got, tc.want)
 		}
 	}
 }

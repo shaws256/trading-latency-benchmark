@@ -13,6 +13,15 @@ import (
 	"os"
 	"time"
 
+	"afxdp-cp/backend/api"
+	"afxdp-cp/backend/collector"
+	"afxdp-cp/backend/errorreg"
+	"afxdp-cp/backend/hub"
+	"afxdp-cp/backend/ingest"
+	"afxdp-cp/backend/orchestrator"
+	"afxdp-cp/backend/registry"
+	"afxdp-cp/backend/store"
+
 	"github.com/nats-io/nats.go"
 )
 
@@ -44,42 +53,42 @@ func main() {
 	}
 	defer nc.Drain()
 
-	reg := NewRegistry(*staleSec)
-	coll := NewCollector()
-	hub := NewHub()
+	reg := registry.NewRegistry(*staleSec)
+	coll := collector.NewCollector()
+	h := hub.NewHub()
 
 	// Open SQLite persistence (nil if --db-path="").
-	var store *Store
+	var st *store.Store
 	if *dbPath != "" {
 		var err error
-		store, err = OpenStore(*dbPath, *retentionDays)
+		st, err = store.OpenStore(*dbPath, *retentionDays)
 		if err != nil {
 			log.Fatalf("store: %v", err)
 		}
-		defer store.Close()
+		defer st.Close()
 		// Seed the collector from disk BEFORE the HTTP listener starts so
 		// reconnecting browsers see historical data and we don't flood SSE.
-		if err := store.SeedCollector(coll, edgeHistoryLen); err != nil {
+		if err := st.SeedCollector(coll, collector.EdgeHistoryLen); err != nil {
 			log.Printf("store: seed: %v (continuing with empty matrix)", err)
 		}
 	}
 
-	if err := startIngest(nc, reg, coll, hub, store); err != nil {
+	if err := ingest.StartIngest(nc, reg, coll, h, st); err != nil {
 		log.Fatalf("ingest: %v", err)
 	}
-	errReg := NewErrorRegistry(nc, hub)
-	orch, err := NewOrchestrator(nc, reg, hub, store)
+	errReg := errorreg.NewErrorRegistry(nc, h)
+	orch, err := orchestrator.NewOrchestrator(nc, reg, h, st)
 	if err != nil {
 		log.Fatalf("orchestrator: %v", err)
 	}
 
 	web := *webDir
 	if web == "" {
-		web = webDirDefault()
+		web = api.WebDirDefault()
 	}
-	srv := &Server{reg: reg, coll: coll, hub: hub, orch: orch, errReg: errReg, web: web}
+	srv := &api.Server{Reg: reg, Coll: coll, Hub: h, Orch: orch, ErrReg: errReg, Web: web}
 	log.Printf("backend up: nats=%s http=%s web=%q", *natsURL, *addr, web)
-	if err := http.ListenAndServe(*addr, srv.routes()); err != nil {
+	if err := http.ListenAndServe(*addr, srv.Routes()); err != nil {
 		log.Fatalf("http: %v", err)
 	}
 }

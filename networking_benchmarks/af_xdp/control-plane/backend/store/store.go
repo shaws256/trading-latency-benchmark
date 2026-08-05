@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"database/sql"
@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"afxdp-cp/backend/collector"
 	"afxdp-cp/proto"
 
 	_ "modernc.org/sqlite"
@@ -129,9 +130,9 @@ func (s *Store) signalFlush() {
 }
 
 const (
-	storeChanCap   = 4096
-	batchSize      = 200
-	batchTimeout   = 500 * time.Millisecond
+	storeChanCap = 4096
+	batchSize    = 200
+	batchTimeout = 500 * time.Millisecond
 )
 
 // OpenStore opens (or creates) the SQLite database and starts the writer.
@@ -383,7 +384,7 @@ func RecordMeasurement(s *Store, t proto.Telemetry, runID int64) {
 
 // SeedCollector repopulates the in-memory rings from the newest perEdge
 // samples per edge so a restart does not blank the map.
-func (s *Store) SeedCollector(c *Collector, perEdge int) error {
+func (s *Store) SeedCollector(c *collector.Collector, perEdge int) error {
 	rows, err := s.db.Query(`
 		SELECT kind, variation, src_ip, dst_ip, unix, p50, p90, p99, p999, max, min, mean, messages, lost, loss_pct, tx_mode
 		FROM (
@@ -430,12 +431,24 @@ func (s *Store) SeedCollector(c *Collector, perEdge int) error {
 	return rows.Err()
 }
 
-// SeedFromStore is a nil-safe wrapper for SeedCollector.
-func SeedFromStore(s *Store, c *Collector, perEdge int) error {
+// seedFromStore is a nil-safe wrapper for SeedCollector.
+func seedFromStore(s *Store, c *collector.Collector, perEdge int) error {
 	if s == nil {
 		return nil
 	}
 	return s.SeedCollector(c, perEdge)
+}
+
+// runRetention deletes old measurements and orphaned runs.
+func (s *Store) runRetention(retentionDays int) {
+	cutoff := time.Now().Unix() - int64(retentionDays)*24*3600
+	_, err := s.db.Exec("DELETE FROM measurements WHERE unix < ?", cutoff)
+	if err != nil {
+		log.Printf("store: retention delete: %v", err)
+		return
+	}
+	// Delete orphaned runs (no remaining measurements).
+	s.db.Exec("DELETE FROM runs WHERE id NOT IN (SELECT DISTINCT run_id FROM measurements WHERE run_id IS NOT NULL)")
 }
 
 // retentionLoop runs hourly deletion + weekly VACUUM.
@@ -456,16 +469,4 @@ func (s *Store) retentionLoop(retentionDays int) {
 			}
 		}
 	}
-}
-
-// runRetention deletes old measurements and orphaned runs.
-func (s *Store) runRetention(retentionDays int) {
-	cutoff := time.Now().Unix() - int64(retentionDays)*24*3600
-	_, err := s.db.Exec("DELETE FROM measurements WHERE unix < ?", cutoff)
-	if err != nil {
-		log.Printf("store: retention delete: %v", err)
-		return
-	}
-	// Delete orphaned runs (no remaining measurements).
-	s.db.Exec("DELETE FROM runs WHERE id NOT IN (SELECT DISTINCT run_id FROM measurements WHERE run_id IS NOT NULL)")
 }

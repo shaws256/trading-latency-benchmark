@@ -1,8 +1,12 @@
-package main
+package pairs
 
-import "fmt"
+import (
+	"fmt"
 
-// Scope names accepted by resolvePairs. They expand a target set into ordered
+	"afxdp-cp/backend/registry"
+)
+
+// Scope names accepted by ResolvePairs. They expand a target set into ordered
 // pairs; an empty target set is a full mesh regardless of scope.
 const (
 	ScopeAmong  = "among"  // k*(k-1): how the selected nodes see each other
@@ -10,14 +14,14 @@ const (
 	ScopeFanin  = "fanin"  // (N-1)*k: how the fleet reaches the selected nodes
 )
 
-// resolvePairs turns a target set + scope into the (sources, destsFor) shape the
+// ResolvePairs turns a target set + scope into the (sources, destsFor) shape the
 // source-grouped campaign loop needs.
 //
 // Offline and unknown ids are dropped and returned in skipped so the caller can
 // say so rather than silently measuring less than the user asked for. An empty
 // target set means full mesh, which is the pre-existing behaviour.
-func resolvePairs(online []Node, ids []string, scope string) (
-	sources []Node, destsFor map[string][]Node, skipped []string, err error) {
+func ResolvePairs(online []registry.Node, ids []string, scope string) (
+	sources []registry.Node, destsFor map[string][]registry.Node, skipped []string, err error) {
 
 	if scope == "" {
 		scope = ScopeAmong
@@ -29,8 +33,8 @@ func resolvePairs(online []Node, ids []string, scope string) (
 
 	// Only online nodes are ever measurable. A node that dropped out between the
 	// UI selecting it and the campaign starting must not be dispatched to.
-	up := make([]Node, 0, len(online))
-	byID := map[string]Node{}
+	up := make([]registry.Node, 0, len(online))
+	byID := map[string]registry.Node{}
 	for _, n := range online {
 		if !n.Online {
 			continue
@@ -41,7 +45,7 @@ func resolvePairs(online []Node, ids []string, scope string) (
 
 	// Resolve the target set, preserving the fleet's own ordering so a run is
 	// deterministic regardless of the order the user clicked nodes in.
-	var targets []Node
+	var targets []registry.Node
 	if len(ids) > 0 {
 		want := map[string]bool{}
 		for _, id := range ids {
@@ -58,10 +62,10 @@ func resolvePairs(online []Node, ids []string, scope string) (
 		}
 	}
 
-	destsFor = map[string][]Node{}
+	destsFor = map[string][]registry.Node{}
 	// exclSelf appends every node in pool except src.
-	exclSelf := func(src Node, pool []Node) []Node {
-		out := make([]Node, 0, len(pool))
+	exclSelf := func(src registry.Node, pool []registry.Node) []registry.Node {
+		out := make([]registry.Node, 0, len(pool))
 		for _, d := range pool {
 			if d.InstanceID != src.InstanceID {
 				out = append(out, d)
@@ -121,15 +125,15 @@ func resolvePairs(online []Node, ids []string, scope string) (
 	return sources, destsFor, skipped, nil
 }
 
-// prepareSet is the union of sources and every destination.
+// PrepareSet is the union of sources and every destination.
 //
 // The prepare phase converges hosts to the echo profile, and it must cover
 // destinations too: a node left in client profile by an earlier run does not
 // echo, so measuring to it would fail for a reason unrelated to the network.
-func prepareSet(sources []Node, destsFor map[string][]Node) []Node {
+func PrepareSet(sources []registry.Node, destsFor map[string][]registry.Node) []registry.Node {
 	seen := map[string]bool{}
-	var out []Node
-	add := func(n Node) {
+	var out []registry.Node
+	add := func(n registry.Node) {
 		if !seen[n.InstanceID] {
 			seen[n.InstanceID] = true
 			out = append(out, n)
@@ -144,9 +148,9 @@ func prepareSet(sources []Node, destsFor map[string][]Node) []Node {
 	return out
 }
 
-// scopeDescription renders the resolved scope for the job event, so the UI log
+// ScopeDescription renders the resolved scope for the job event, so the UI log
 // states what ran instead of only how many pairs it was.
-func scopeDescription(scope string, k int) string {
+func ScopeDescription(scope string, k int) string {
 	if k == 0 {
 		return "full mesh"
 	}
@@ -164,13 +168,13 @@ func scopeDescription(scope string, k int) string {
 	}
 }
 
-// countPairs predicts the pair count without a fleet snapshot, for the UI button
-// label. It mirrors resolvePairs and returns 0 where that would resolve to
+// CountPairs predicts the pair count without a fleet snapshot, for the UI button
+// label. It mirrors ResolvePairs and returns 0 where that would resolve to
 // nothing, so the label never promises a run that will be refused.
 //
 // fanout and fanin are both k*(N-1): a fanin source that is itself a target
 // contributes k-1 dests rather than k, and k*(N-k) + k*(k-1) reduces to k*(N-1).
-func countPairs(n, k int, scope string) int {
+func CountPairs(n, k int, scope string) int {
 	if n < 2 {
 		return 0
 	}
@@ -188,10 +192,10 @@ func countPairs(n, k int, scope string) int {
 	}
 }
 
-// scopeName is the scope as persisted in the runs table: "full" for a full mesh,
-// otherwise the requested scope id. Distinct from scopeDescription, which is
+// ScopeName is the scope as persisted in the runs table: "full" for a full mesh,
+// otherwise the requested scope id. Distinct from ScopeDescription, which is
 // prose for the UI log.
-func scopeName(scope string, k int) string {
+func ScopeName(scope string, k int) string {
 	if k == 0 {
 		return "full"
 	}

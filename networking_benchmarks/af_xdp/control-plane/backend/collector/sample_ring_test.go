@@ -1,4 +1,4 @@
-package main
+package collector
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 )
 
 // Tests for the richer Sample ring (Phase 3.1): History is []Sample, each
-// carrying Unix, P50, P99. The ring caps at edgeHistoryLen=60, newest last.
+// carrying Unix, P50, P99. The ring caps at EdgeHistoryLen=60, newest last.
 
 func TestSampleRingBasic(t *testing.T) {
 	c := NewCollector()
@@ -34,19 +34,19 @@ func TestSampleRingBasic(t *testing.T) {
 
 func TestSampleRingCapAt60(t *testing.T) {
 	c := NewCollector()
-	for i := 0; i < edgeHistoryLen+20; i++ {
+	for i := 0; i < EdgeHistoryLen+20; i++ {
 		c.Apply(proto.Telemetry{
 			Kind: "ucast", Variation: "xdp", SrcIP: "x", DstIP: "y", Unix: int64(i),
 			Metrics: proto.Metrics{ServiceRTT: proto.Pct{P50: int64(i * 10), P99: int64(i * 20)}},
 		})
 	}
 	e := c.Snapshot()[0]
-	if len(e.History) != edgeHistoryLen {
-		t.Fatalf("ring must cap at %d, got %d", edgeHistoryLen, len(e.History))
+	if len(e.History) != EdgeHistoryLen {
+		t.Fatalf("ring must cap at %d, got %d", EdgeHistoryLen, len(e.History))
 	}
 	// The newest sample (index 79) must be last.
 	last := e.History[len(e.History)-1]
-	wantUnix := int64(edgeHistoryLen + 19)
+	wantUnix := int64(EdgeHistoryLen + 19)
 	if last.Unix != wantUnix {
 		t.Fatalf("newest sample unix: want %d, got %d", wantUnix, last.Unix)
 	}

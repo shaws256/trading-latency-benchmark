@@ -1,4 +1,4 @@
-package main
+package collector
 
 import (
 	"sync"
@@ -27,7 +27,8 @@ type Edge struct {
 	History   []Sample      `json:"history,omitempty"`
 }
 
-const edgeHistoryLen = 60
+// EdgeHistoryLen is the maximum number of history samples kept per edge.
+const EdgeHistoryLen = 60
 
 // Collector holds the authoritative in-memory NxN state.
 type Collector struct {
@@ -60,8 +61,8 @@ func (c *Collector) Apply(t proto.Telemetry) Edge {
 		e.TxMode = t.TxMode
 	}
 	e.History = append(e.History, Sample{Unix: t.Unix, P50: t.Metrics.ServiceRTT.P50, P99: t.Metrics.ServiceRTT.P99})
-	if len(e.History) > edgeHistoryLen {
-		e.History = e.History[len(e.History)-edgeHistoryLen:]
+	if len(e.History) > EdgeHistoryLen {
+		e.History = e.History[len(e.History)-EdgeHistoryLen:]
 	}
 	return *e
 }
