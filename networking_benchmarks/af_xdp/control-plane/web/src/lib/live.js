@@ -132,6 +132,7 @@ export function createLive({ onUpdate, onJob } = {}) {
         const cell = {
           p50: m.p50, p90: m.p90, p99: m.p99, p999: m.p999, max: m.max,
           loss: +(e.metrics.loss_pct || 0).toFixed(3),
+          unix: e.unix || 0,
         };
         if (relayIdx >= 0 && i !== relayIdx && j !== relayIdx) {
           matrix[i][relayIdx] = matrix[i][relayIdx] || cell;   // source → replicator (shared)

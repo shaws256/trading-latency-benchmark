@@ -42,8 +42,8 @@ func TestCollectorHistoryRing(t *testing.T) {
 	if len(e.History) != edgeHistoryLen {
 		t.Fatalf("history ring should cap at %d, got %d", edgeHistoryLen, len(e.History))
 	}
-	if e.History[len(e.History)-1] != int64(edgeHistoryLen+24) {
-		t.Fatalf("ring should keep most-recent sample, got %d", e.History[len(e.History)-1])
+	if e.History[len(e.History)-1].P50 != int64(edgeHistoryLen+24) {
+		t.Fatalf("ring should keep most-recent sample, got %d", e.History[len(e.History)-1].P50)
 	}
 }
 

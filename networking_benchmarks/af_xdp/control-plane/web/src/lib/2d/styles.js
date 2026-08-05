@@ -206,4 +206,10 @@ export const CSS = `
 .t2d-root svg.edges line.peering-hit { stroke: transparent; stroke-width: 18; pointer-events: stroke; cursor: help; }
 .t2d-root .peering-label { position: absolute; z-index: 1; transform: translate(-50%,-50%); font-size: 10px; font-weight: 700; color: #58a6ff;
   background: rgba(13,17,23,0.9); border: 1px solid rgba(88,166,255,0.45); border-radius: 4px; padding: 1px 7px; white-space: nowrap; }
+
+/* ── Age hint + sparkline (Phase 3.2, D7) ── */
+.t2d-root .node-tooltip .age-hint { display: block; font-size: 9px; color: #6e7681; margin-top: 1px; }
+.t2d-root .node-tooltip .sparkline-row td { padding: 2px 6px; }
+.t2d-root .node-tooltip .sparkline-row svg.sparkline { display: block; }
+.t2d-root .node-tooltip tr[style*="dashed"] td { border-style: dashed; }
 `;

@@ -108,7 +108,7 @@ func TestStoreSeedCollector(t *testing.T) {
 	if len(e.History) != 5 {
 		t.Fatalf("expected 5 history entries, got %d", len(e.History))
 	}
-	if e.History[0] != 100 || e.History[4] != 104 {
+	if e.History[0].P50 != 100 || e.History[4].P50 != 104 {
 		t.Fatalf("history not in chronological order: %v", e.History)
 	}
 }

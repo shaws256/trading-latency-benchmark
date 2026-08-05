@@ -6,6 +6,81 @@
 
 import { fmtLat, latencyColor, esc } from './2d/palette.js';
 
+// Measurement ages section (3.3): reports oldest/newest cell and count of cells
+// older than the newest run. A scoped-run grid is a mosaic of measurement ages.
+function buildMeasurementAges(matrix, N) {
+  let oldest = Infinity, newest = 0, total = 0;
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const c = matrix[i] && matrix[i][j];
+    if (!c || !c.unix) continue;
+    total++;
+    if (c.unix < oldest) oldest = c.unix;
+    if (c.unix > newest) newest = c.unix;
+  }
+  if (total === 0) return '';
+  const fmtTime = (u) => new Date(u * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  let staleCount = 0;
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const c = matrix[i] && matrix[i][j];
+    if (c && c.unix && c.unix < newest) staleCount++;
+  }
+  return `<div class="coverage"><h3 style="margin:0 0 4px;font-size:13px;color:#58a6ff">Measurement ages</h3>`
+    + `<b>newest</b>: ${fmtTime(newest)} · <b>oldest</b>: ${fmtTime(oldest)}`
+    + (staleCount > 0 ? ` · <b>${staleCount}</b> of ${total} cells are older than the newest run - this grid is a mosaic of measurements taken at different times, not a single snapshot.` : ' · All cells from the same run.')
+    + `</div>`;
+}
+
+// Compare-mode view (3.4/D6): cell = delta p50 (xdp - kernel), diverging colour,
+// cells missing EITHER mode rendered hatched.
+export function buildCompareHTML(nodes, kernelMatrix, xdpMatrix) {
+  const N = nodes.length;
+  const label = (n) => esc(n.private_ip || n.ec2_name || ('#' + n.index));
+  // Compute max absolute delta for colour scale.
+  let maxAbs = 1;
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    if (i === j) continue;
+    const k = kernelMatrix[i] && kernelMatrix[i][j];
+    const x = xdpMatrix[i] && xdpMatrix[i][j];
+    if (k && x && k.p50 != null && x.p50 != null) {
+      const d = Math.abs(x.p50 - k.p50);
+      if (d > maxAbs) maxAbs = d;
+    }
+  }
+  let html = '<table class="heat compare-heat"><tr><th>src \\ dst</th>'
+    + nodes.map((n) => `<th>${label(n)}</th>`).join('') + '</tr>';
+  for (let i = 0; i < N; i++) {
+    html += `<tr><th>${label(nodes[i])}</th>`;
+    for (let j = 0; j < N; j++) {
+      if (i === j) { html += '<td class="diag">\u2014</td>'; continue; }
+      const k = kernelMatrix[i] && kernelMatrix[i][j];
+      const x = xdpMatrix[i] && xdpMatrix[i][j];
+      if (!k && !x) { html += '<td class="na">\u00b7</td>'; continue; }
+      if (!k || !x || k.p50 == null || x.p50 == null) {
+        // Missing EITHER mode: hatched, not green.
+        html += '<td class="hatched" title="missing ' + (!k ? 'kernel' : 'xdp') + ' data">\u2014</td>';
+        continue;
+      }
+      const delta = x.p50 - k.p50;
+      const t = Math.min(1, Math.abs(delta) / maxAbs);
+      let bg;
+      if (delta < 0) {
+        const g = Math.round(60 + t * 150);
+        bg = `rgba(46,${g},67,${(0.3 + t * 0.6).toFixed(2)})`;
+      } else if (delta > 0) {
+        const r = Math.round(100 + t * 148);
+        bg = `rgba(${r},50,50,${(0.3 + t * 0.6).toFixed(2)})`;
+      } else {
+        bg = 'rgba(128,128,128,0.2)';
+      }
+      const sign = delta > 0 ? '+' : '';
+      html += `<td style="background:${bg}" title="xdp p50 - kernel p50">${sign}${delta}</td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</table>';
+  return html;
+}
+
 export function buildReportHTML(fleet, kind, variation) {
   const nodes = (fleet && fleet.nodes) || [];
   const matrix = (fleet && fleet.matrix) || [];
@@ -118,7 +193,11 @@ export function buildReportHTML(fleet, kind, variation) {
         const dat = ` data-row-ip="${rip}" data-col-ip="${esc(nodes[j].private_ip || '')}"`;
         if (i === j) heat += `<td class="diag"${dat}>—</td>`;
         else if (!c) heat += `<td class="na"${dat}>·</td>`;
-        else heat += `<td${dat} style="background:${latencyColor(c.p50, mn, mx)}" title="p99 ${fmtLat(c.p99)} · loss ${c.loss ?? 0}%">${fmtLat(c.p50)}</td>`;
+        else {
+          const cellTime = c.unix ? new Date(c.unix * 1000).toISOString().replace('T', ' ').slice(0, 19) : '';
+          const cellTitle = `${esc(variation)} · p99 ${fmtLat(c.p99)} · loss ${c.loss ?? 0}%${cellTime ? ' · ' + cellTime : ''}`;
+          heat += `<td${dat} style="background:${latencyColor(c.p50, mn, mx)}" title="${cellTitle}">${fmtLat(c.p50)}</td>`;
+        }
       }
       heat += '</tr>';
     }
@@ -245,6 +324,7 @@ export function buildReportHTML(fleet, kind, variation) {
   ${inventory}
   <h2>${isMcast ? 'Multicast paths — one-way latency, source → replicator → destination' : 'Heatmap — round-trip p50 (green = fast, red = slow)'}</h2>
   ${heat}
+  ${buildMeasurementAges(matrix, N)}
   <h2>All measured latencies — ${isMcast ? 'one-way' : 'round-trip (RTT)'}</h2>
   <table id="lat-table" class="sortable">${tableHeader}${rows}</table>
   <script>
