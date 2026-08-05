@@ -32,8 +32,8 @@ const p2 = (v) => String(v).padStart(2, '0');
 const stamp = (unix) => {
   if (!unix) return 'unknown';
   const d = new Date(unix * 1000);
-  return `${p2(d.getHours())}:${p2(d.getMinutes())}, `
-    + `${p2(d.getDate())}-${p2(d.getMonth() + 1)}-${d.getFullYear()}`;
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}-`
+    + `${p2(d.getDate())}.${p2(d.getMonth() + 1)}.${d.getFullYear()}`;
 };
 
 /**
@@ -63,10 +63,8 @@ function collate(views) {
 }
 
 /** Mode-annotated overview: freshest value per cell, badged with its mode. */
-function overviewGrid(nodes, best) {
-  const vals = [...best.values()].map((b) => b.cell.p50).filter((v) => v != null);
-  const mn = vals.length ? Math.min(...vals) : 0;
-  const mx = vals.length ? Math.max(...vals) : 1;
+function overviewGrid(nodes, best, scale) {
+  const { mn, mx } = scale;
   let h = '<table class="heat" id="overview-table"><tr><th>src \\ dst</th>'
     + nodes.map((n) => `<th data-col-ip="${esc(n.private_ip || '')}">${label(n)}</th>`).join('')
     + '</tr>';
@@ -90,13 +88,10 @@ function overviewGrid(nodes, best) {
 }
 
 /** Per-mode heatmap, so colour remains comparable inside that mode. */
-function modeHeatmap(v) {
+function modeHeatmap(v, scale) {
   const { nodes, matrix } = v.fleet;
   const key = modeKey(v);
-  const vals = [];
-  matrix.forEach((r) => r && r.forEach((c) => c && c.p50 != null && vals.push(c.p50)));
-  const mn = vals.length ? Math.min(...vals) : 0;
-  const mx = vals.length ? Math.max(...vals) : 1;
+  const { mn, mx } = scale;
   let h = `<table class="heat" data-mode="${esc(key)}"><tr><th>src \\ dst</th>`
     + nodes.map((n) => `<th data-col-ip="${esc(n.private_ip || '')}">${label(n)}</th>`).join('')
     + '</tr>';
@@ -184,7 +179,7 @@ function ages(rows) {
   return '<div class="coverage"><h3 style="margin:0 0 4px;font-size:13px;color:#58a6ff">Measurement ages</h3>'
     + `newest ${esc(stamp(newest))} \u00b7 oldest ${esc(stamp(oldest))}`
     + (stale ? ` \u00b7 <b>${stale}</b> measurement(s) more than 5 min older than the newest` : '')
-    + ' \u2014 a scoped-run grid is a mosaic of measurement ages, not one snapshot.</div>';
+    + '</div>';
 }
 
 /**
@@ -203,11 +198,20 @@ export function buildCombinedReportHTML(views) {
   const region = vs[0].fleet.region || '?';
   const { rows, best } = collate(vs);
   const modeList = vs.map((v) => modeKey(v));
+  // One scale for every grid in the document, so a given latency always gets the
+  // same colour. Scaling each grid to its own range made 31us red beside 90us and
+  // green beside 32us, which reads as a difference in the network rather than in
+  // the normalisation.
+  const allP50 = rows.map((r) => r.cell.p50).filter((v) => v != null);
+  const scale = {
+    mn: allP50.length ? Math.min(...allP50) : 0,
+    mx: allP50.length ? Math.max(...allP50) : 1,
+  };
 
   const sections = vs.map((v) => `
   <h2>${esc(modeKey(v))} \u2014 ${v.kind === 'mcast' ? 'one-way' : 'round-trip (RTT)'}</h2>
   ${methodology(v)}
-  ${modeHeatmap(v)}`).join('\n');
+  ${modeHeatmap(v, scale)}`).join('\n');
 
   // Delta grid last, and only with two variations to compare: with one there is
   // nothing to subtract, and an empty diverging grid would imply "no difference"
@@ -267,14 +271,10 @@ export function buildCombinedReportHTML(views) {
   <div class="meta">Region: ${esc(region)} \u00b7 Nodes: ${nodes.length} \u00b7 Modes: ${esc(modeList.join(', '))} \u00b7 Measurements: ${rows.length} \u00b7 Generated: ${esc(gen)}</div>
   ${ages(rows)}
 
-  <h2>Overview \u2014 freshest measurement per pair, badged by mode</h2>
-  <div class="warn">Colour here is <b>not comparable across modes</b>: a ucast RTT and an mcast
-  one-way measure different quantities, so a cell's colour partly reflects its mode rather than
-  its network position. Compare within a mode using the per-mode heatmaps below; this grid answers
-  "what is the latest figure for this pair, and where did it come from".</div>
-  ${overviewGrid(nodes, best)}
-
   <div class="selbar"><span id="selinfo">Click an IP anywhere to highlight that instance everywhere.</span><button id="selclear">Clear</button></div>
+  <h2>Overview \u2014 freshest measurement per pair, badged by mode</h2>
+  ${overviewGrid(nodes, best, scale)}
+
   <h2>Fleet inventory</h2>
   ${inventory(nodes)}
   ${sections}

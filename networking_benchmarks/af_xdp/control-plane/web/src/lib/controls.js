@@ -52,6 +52,7 @@ const CSS = `
 .cp-target-info{color:#8b949e;font:12px inherit;flex:1}
 .cp-target-info.active{color:#ffd700}
 .cp-presets{gap:4px}
+.cp-presets button.on{background:rgba(88,166,255,.18);color:#58a6ff;border-color:#1f6feb}
 .cp-cost-hint{color:#f0883e;font:10px inherit;margin-left:4px}
 .cp-icon{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;padding:4px 9px;cursor:pointer;font:600 14px inherit;line-height:1;flex:0 0 auto}
 .cp-icon:hover{background:#30363d;color:#fff}
@@ -98,7 +99,7 @@ export function mountControls(host, opts = {}) {
         <div class="cp-hr"></div>
         <div data-target-block>
           <div class="row"><span class="cp-section">Target Set</span></div>
-          <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span><button class="cp-btn cp-btn-sm" data-clear-targets style="display:none">Clear</button></div>
+          <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
           <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button></div>
           <div class="row"><select class="cp-sel" data-scope></select></div>
         </div>
@@ -202,13 +203,13 @@ export function mountControls(host, opts = {}) {
   let lastCombos = null, lastSel = null;
   const renderCombos = (combos, sel) => {
     lastCombos = combos; lastSel = sel;
-    const cur = sel ? `${sel.kind}|${sel.variation}` : viewSel.value;
+    const cur = sel ? sel.kind : viewSel.value;
     if (!combos || !combos.length) { viewSel.innerHTML = '<option value="">(no data yet)</option>'; return; }
-    // Newest-first, labelled "HH:MM TZ · kind/variation".
+    // One entry per KIND, at most ucast and mcast. Each unifies every variation
+    // of that kind, so there is no per-run entry to pick between.
     viewSel.innerHTML = combos.map((c) => {
-      const v = `${c.kind}|${c.variation}`;
       const t = c.unix ? fmtTime(c.unix * 1000) + ' · ' : '';
-      return `<option value="${v}"${v === cur ? ' selected' : ''}>${t}${c.kind}/${c.variation}</option>`;
+      return `<option value="${c.kind}"${c.kind === cur ? ' selected' : ''}>${t}${c.kind}</option>`;
     }).join('');
   };
   tzSel.addEventListener('change', () => { selectedTz = tzSel.value; if (lastCombos) renderCombos(lastCombos, lastSel); });
@@ -236,8 +237,8 @@ export function mountControls(host, opts = {}) {
     const opt = viewSel.selectedOptions[0];
     if (opt && opt.dataset.run !== undefined) { onPickResult && onPickResult(opt.dataset.run); return; }
     const v = viewSel.value; if (!v) return;
-    const [kind, variation] = v.split('|');
-    onSelectView && onSelectView({ kind, variation });
+    // The value is a kind; variation stays null so the view unifies them.
+    onSelectView && onSelectView({ kind: v, variation: null });
   });
   // Track the currently running one-shot button. While a run is active it stays
   // orange; every other run button is disabled (gray) until the run finishes.
@@ -274,10 +275,9 @@ export function mountControls(host, opts = {}) {
   $('[data-report]').addEventListener('click', () => onReport && onReport());
 
   // ── Target set: scope select, presets, clear ────────────────────────────────
-  const { onScopeChange, onPreset, onClearTargets } = opts;
+  const { onScopeChange, onPreset } = opts;
   const scopeSel = $('[data-scope]');
   const targetInfo = $('[data-target-info]');
-  const clearBtn = $('[data-clear-targets]');
   // Scope options carry a live pair count, so each one states what it will
   // actually run instead of leaving the arrow notation to be decoded.
   const paintScopeOptions = (count, totalNodes) => {
@@ -291,26 +291,25 @@ export function mountControls(host, opts = {}) {
   };
   paintScopeOptions(0, 0);
   scopeSel.addEventListener('change', () => { onScopeChange && onScopeChange(scopeSel.value); });
-  clearBtn.addEventListener('click', () => { onClearTargets && onClearTargets(); });
   // Chips pass the preset NAME; App resolves it against the fleet.
   el.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
     onPreset && onPreset(b.dataset.preset);
   }));
 
   let _lastTargetState = { count: 0, pairs: 0, scope: 'among', totalNodes: 0 };
-  const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes }) => {
-    _lastTargetState = { count, pairs, scope: sc, totalNodes };
+  const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes, preset }) => {
+    _lastTargetState = { count, pairs, scope: sc, totalNodes, preset };
+    el.querySelectorAll('[data-preset]').forEach((b) =>
+      b.classList.toggle('on', !!preset && b.dataset.preset === preset));
     paintScopeOptions(count, totalNodes);
     scopeSel.value = sc;
     if (count === 0) {
       const fullPairs = countPairs(totalNodes, 0, 'among');
       targetInfo.textContent = `No selection \u2014 full mesh (${fullPairs} pairs)`;
       targetInfo.classList.remove('active');
-      clearBtn.style.display = 'none';
     } else {
       targetInfo.textContent = `${count} selected \u00b7 ${pairs} pairs`;
       targetInfo.classList.add('active');
-      clearBtn.style.display = '';
     }
   };
 

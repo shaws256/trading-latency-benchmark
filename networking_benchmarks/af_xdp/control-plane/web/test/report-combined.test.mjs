@@ -97,12 +97,36 @@ test('mcast and ucast badges are distinguishable', () => {
   assert.notEqual(MODE_BADGE['ucast/kernel'], MODE_BADGE['mcast/copy']);
 });
 
-test('the overview states that its colour is NOT cross-mode comparable', () => {
-  // The overview deliberately mixes modes, so it must say so rather than invite
-  // a comparison the data does not support.
+test('colour uses ONE global scale across every mode in the report', () => {
+  // The same latency must get the same colour everywhere. Per-mode scaling made
+  // 31us red in one grid and green in another purely because each grid
+  // normalised to its own range.
+  const vs = [
+    view('ucast', 'kernel', [[0, 1, 31], [1, 0, 90]], 2000),   // local range 31..90
+    view('ucast', 'xdp', [[0, 1, 31], [1, 0, 32]], 3000),      // local range 31..32
+  ];
+  const doc = parse(buildCombinedReportHTML(vs));
+  const colourOf = (mode, r, c) => {
+    const t = doc.querySelector(`table.heat[data-mode="${mode}"]`);
+    const td = t.querySelector(`td[data-row-ip="10.0.0.${r}"][data-col-ip="10.0.0.${c}"]`);
+    return /color:\s*([^;"]+)/.exec(td.getAttribute('style'))[1].trim();
+  };
+  assert.equal(colourOf('ucast/kernel', 1, 2), colourOf('ucast/xdp', 1, 2),
+    '31us must render the same colour in every grid');
+});
+
+test('the cross-mode colour warning is gone', () => {
   const html = buildCombinedReportHTML(views());
-  assert.match(html, /not comparable across modes|compare within a mode/i,
-    'the overview must warn that mixing modes breaks colour comparability');
+  assert.ok(!/not comparable across modes/i.test(html));
+  assert.ok(!/mosaic of measurement ages/i.test(html));
+});
+
+test('the selection hint sits ABOVE the first table', () => {
+  const html = buildCombinedReportHTML(views());
+  const hint = html.indexOf('Click an IP anywhere');
+  const firstTable = html.indexOf('<table');
+  assert.ok(hint > 0 && firstTable > 0);
+  assert.ok(hint < firstTable, 'the hint must precede any table it applies to');
 });
 
 test('one latency table covers all modes, with a mode column', () => {
@@ -194,7 +218,7 @@ test('ages are absolute timestamps, not relative', () => {
   assert.ok(!/\d+\s*min ago/.test(html), 'no relative ages');
   assert.ok(!/\d+s ago/.test(html), 'no relative ages');
   // hh:mm, dd-mm-yyyy
-  assert.match(html, /\d{2}:\d{2}, \d{2}-\d{2}-\d{4}/, 'expected hh:mm, dd-mm-yyyy');
+  assert.match(html, /\d{2}:\d{2}-\d{2}\.\d{2}\.\d{4}/, 'expected hh:mm-dd.mm.yyyy');
 });
 
 test('the age column carries a timestamp per measurement', () => {
@@ -203,7 +227,7 @@ test('the age column carries a timestamp per measurement', () => {
   const ai = cols.indexOf('measured');
   assert.ok(ai >= 0, `expected a "measured" column, got ${cols}`);
   for (const tr of doc.querySelectorAll('#lat-table tr[data-src]')) {
-    assert.match(tr.cells[ai].textContent.trim(), /^\d{2}:\d{2}, \d{2}-\d{2}-\d{4}$/);
+    assert.match(tr.cells[ai].textContent.trim(), /^\d{2}:\d{2}-\d{2}\.\d{2}\.\d{4}$/);
   }
 });
 
