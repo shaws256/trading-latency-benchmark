@@ -48,10 +48,11 @@ const CSS = `
 .cp-tz{flex:0 0 auto;width:auto;max-width:150px}
 .cp-sel{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:4px 6px;font:12px inherit;flex:1}
 .cp-btn{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;
-  padding:4px 8px;cursor:pointer;font:600 12px inherit;transition:background .15s,border-color .15s}
+  padding:4px 8px;cursor:pointer;font:600 12px inherit;transition:background .15s,border-color .15s;text-decoration:none;display:inline-block}
 .cp-btn:hover{background:#30363d;color:#fff}
 .cp-btn:active,.cp-btn.running{background:rgba(240,136,62,.22);color:#f0883e;border-color:#f0883e}
-.cp-btn:disabled{opacity:.4;cursor:not-allowed;color:#6e7681;background:#1a1f26;border-color:#21262d}
+.cp-btn:disabled,.cp-btn.disabled{opacity:.4;cursor:not-allowed;color:#6e7681;background:#1a1f26;border-color:#21262d}
+.cp-btn.disabled:hover{background:#1a1f26;color:#6e7681}
 .cp-btn-sm{padding:3px 7px;font-size:11px}
 .cp-target-info{color:#8b949e;font:12px inherit;flex:1}
 .cp-target-info.active{color:#ffd700}
@@ -103,7 +104,7 @@ export function mountControls(host, opts = {}) {
       <!-- NORMAL mode: View buttons + one-shot Run Tests -->
       <div data-normal>
         <div class="row"><span class="cp-lbl">View</span>
-          <span class="cp-seg" data-view-seg></span>
+          <span class="cp-btn-group" data-view-seg></span>
         </div>
         <div class="cp-hr"></div>
       </div>
@@ -225,18 +226,15 @@ export function mountControls(host, opts = {}) {
   let activeViewKind = null;
   const renderViewButtons = (kinds, sel) => {
     lastCombos = kinds; lastSel = sel;
-    // Anchors, not buttons: a button plus window.open can be redirected into the
-    // CURRENT tab by the browser's popup settings, which rewrote this page's URL.
-    // target=_blank on a real link always opens a tab and never navigates here.
-    // Both kinds are always rendered; one without data is disabled, so the panel
-    // states what exists rather than hiding it.
+    // Anchors styled identically to the .cp-btn mode buttons below. A disabled
+    // anchor (no data yet) matches the disabled button appearance.
     const have = new Set((kinds || []).map((c) => c.kind));
     viewSeg.innerHTML = ['ucast', 'mcast'].map((k) => {
       const on = have.has(k);
       return on
-        ? `<a data-view-btn="${esc(k)}" href="?report=${esc(k)}" target="_blank" rel="noopener"`
+        ? `<a data-view-btn="${esc(k)}" class="cp-btn" href="?report=${esc(k)}" target="_blank" rel="noopener"`
           + ` title="Open the ${esc(k)} report in a new tab">${esc(k)}</a>`
-        : `<a data-view-btn="${esc(k)}" class="disabled" aria-disabled="true"`
+        : `<a data-view-btn="${esc(k)}" class="cp-btn disabled" aria-disabled="true"`
           + ` title="No ${esc(k)} results yet">${esc(k)}</a>`;
     }).join('');
     viewSeg.querySelectorAll('a.disabled').forEach((a) => {
@@ -484,9 +482,11 @@ export function mountControls(host, opts = {}) {
       if (!runs || !runs.length) return;
     },
     // kinds: [{kind,unix}]; sel: {kind,variation} currently shown
-    setCombos(kinds, sel) { renderViewButtons(kinds, sel); },
+    setCombos(kinds, sel) { renderViewButtons(kinds, sel);   applyFoldState();
+    },
     setTargets(state) { paintTargetBlock(state); },
-    setTargetIds(ids) { _targetIds = ids || new Set(); },
+    setTargetIds(ids) { _targetIds = ids || new Set();   applyFoldState();
+    },
     startRunUI() {
       // Mark cancel-run as enabled (for external callers / testing).
       if (cancelRunBtn) cancelRunBtn.disabled = false;

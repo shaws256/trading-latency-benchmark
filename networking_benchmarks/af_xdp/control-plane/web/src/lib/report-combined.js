@@ -228,9 +228,9 @@ export const REPORT_CSS = `
   h1{font-size:19px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 6px;color:#e6edf3}
   h3{font-size:13px}
   .meta{color:#8b949e;font-size:12px;margin-bottom:10px}
-  table{border-collapse:collapse;margin:8px 0 4px;font-size:12px}
+  .report-view table{border-collapse:collapse;margin:8px 0 4px;font-size:12px}
   .report-view th,.report-view td{border:1px solid #30363d;padding:3px 7px;text-align:right;white-space:nowrap}
-  th{background:#161b22;color:#8b949e;font-weight:600;cursor:pointer;user-select:none}
+  .report-view th{background:#161b22;color:#8b949e;font-weight:600;cursor:pointer;user-select:none}
   .inv td,.inv th{text-align:left}
   .heat td{font-family:'SF Mono',monospace;font-weight:700;background:#0d1117}
   .heat th{font-family:'SF Mono',monospace}
@@ -261,6 +261,10 @@ export const REPORT_CSS = `
   .selbar{font-size:12px;color:#8b949e;margin:10px 0 2px}
   .selbar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;
     padding:1px 7px;font-size:11px;cursor:pointer;margin-left:6px}
+  .report-export-bar{display:flex;gap:8px;margin-bottom:12px}
+  .report-toolbar-btn{background:#21262d;color:#e6edf3;border:1px solid #30363d;
+    border-radius:6px;padding:6px 14px;cursor:pointer;font:600 13px system-ui,-apple-system,sans-serif}
+  .report-toolbar-btn:hover{background:#30363d;color:#fff}
   .inv tr.sel{background:#1f2937;outline:2px solid #d29922;outline-offset:-2px}
   .heat td.sel-row,.heat td.sel-col{outline:2px solid #d29922;outline-offset:-2px}
   .heat th.sel-row,.heat th.sel-col{background:#243b53;color:#e6edf3}
@@ -309,11 +313,12 @@ export function buildCombinedReportBody(views, tz) {
 
   const kindLabel = vs[0].kind === 'mcast' ? 'multicast' : 'unicast';
   const title = `Latency Report - ${kindLabel}`;
-  return `<h1>${esc(title)}</h1>
+  return `<div class="report-export-bar"><button data-print-btn class="report-toolbar-btn">Save as PDF</button><button data-xls-btn class="report-toolbar-btn">Save as XLS</button></div>
+  <h1>${esc(title)}</h1>
   <div class="meta">Region: ${esc(region)} \u00b7 Nodes: ${nodes.length} \u00b7 Modes: ${esc(modeList.join(', '))} \u00b7 Measurements: ${rows.length} \u00b7 Timezone: ${esc(tzLabel(tz))} \u00b7 Generated: ${esc(gen)}</div>
   ${ages(rows, tz)}
 
-  <div class="selbar"><span id="selinfo">Click an IP anywhere to highlight that instance everywhere.</span><button id="selclear">Clear</button><button data-xls-btn class="cp-btn" style="margin-left:6px">Save as XLS</button></div>
+  <div class="selbar"><span id="selinfo">Click an IP anywhere to highlight that instance everywhere.</span><button id="selclear">Clear</button></div>
   <h2>Latest measurements</h2>
   ${overviewGrid(nodes, best, scale, tz)}
 
@@ -458,6 +463,10 @@ export function reportInteractions(root) {
   var clearBtn = root.querySelector('#selclear');
   if (clearBtn) clearBtn.addEventListener('click', function() { sel.clear(); paint(); });
   paint();
+
+  // ── Save as PDF: triggers the browser print dialog ──────────────────────────
+  var printBtn = root.querySelector('[data-print-btn]');
+  if (printBtn) printBtn.addEventListener('click', function() { window.print(); });
 
   // ── Save as XLS: single SpreadsheetML 2003 workbook, one sheet per table ───
   function xmlEsc(s) {

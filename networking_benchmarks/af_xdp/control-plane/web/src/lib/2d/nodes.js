@@ -143,6 +143,7 @@ export function renderNodes(ctx) {
     });
 
     const positionTip = (e) => {
+      // Accept both real MouseEvents and synthetic {clientX, clientY} objects.
       let tx = e.clientX + 16, ty = e.clientY - 10;
       const tw = tooltip.offsetWidth || 280, th = tooltip.offsetHeight || 200;
       if (tx + tw > W - 20) tx = e.clientX - tw - 16;
@@ -156,6 +157,9 @@ export function renderNodes(ctx) {
       if (!hoverActive()) return;
       tooltip.innerHTML = tipHTML(ctx, i);
       tooltip.classList.add('visible');
+      // Position immediately using the node's known position so the tooltip
+      // never renders at 0,0 while waiting for the first mousemove.
+      positionTip({ clientX: positions[i].x + r + 16, clientY: positions[i].y });
     });
     el.addEventListener('mousemove', (e) => { if (hoverActive()) positionTip(e); });
     el.addEventListener('mouseleave', () => {

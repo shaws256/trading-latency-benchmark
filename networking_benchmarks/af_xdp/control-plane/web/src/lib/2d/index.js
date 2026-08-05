@@ -131,6 +131,10 @@ export function mountTopology2D(container, fleet, opts = {}) {
 
   deselectBtn.addEventListener('click', () => { ctx.selected.clear(); applySel(ctx, -1); if (ctx.unpinAll) ctx.unpinAll(); });
 
+  // Write the restored pan/zoom to the element: the transform is otherwise only
+  // set by the event handlers, so a remounted view would ignore it.
+  syncTransform();
+
   return {
     getView() { return { scale: zoomState.scale, tx: zoomState.tx, ty: zoomState.ty, panX, panY }; },
     dispose() { ctx.disposers.forEach(fn => fn()); if (root.parentNode) root.parentNode.removeChild(root); },

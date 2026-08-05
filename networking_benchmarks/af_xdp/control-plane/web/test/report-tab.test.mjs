@@ -66,7 +66,7 @@ test('view controls carry no selected state', () => {
   assert.ok(!/activeViewKind\s*=/.test(block),
     'no state to track: the panel does not "have" a chosen kind');
   // Statefulness is limited to enabled/disabled, which reflects DATA not selection.
-  assert.match(block, /class="disabled"/, 'a kind without data must be disabled');
+  assert.match(block, /disabled/, 'a kind without data must be disabled');
   assert.match(block, /target="_blank"/, 'and an enabled one opens a tab');
 });
 

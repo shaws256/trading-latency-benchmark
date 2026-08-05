@@ -158,7 +158,7 @@ test('best (min) value in measurement columns is gold, worst (max) is red', () =
   assert.ok(p50idx >= 0);
   // Gather styles
   const p50cells = rows.map((r) => r.cells[p50idx]);
-  const goldCell = p50cells.find((c) => /color:\s*rgb\(255,\s*215,\s*0\)/i.test(c.getAttribute('style') || ''));
+  const goldCell = p50cells.find((c) => /color:\s*rgb\(57,\s*211,\s*83\)/i.test(c.getAttribute('style') || ''));
   const redCell = p50cells.find((c) => /color:\s*red/i.test(c.getAttribute('style') || ''));
   assert.ok(goldCell, 'the minimum p50 cell must be gold');
   assert.ok(redCell, 'the maximum p50 cell must be red');

@@ -171,8 +171,8 @@ export function latencyRange(cells) {
   return { mn, mx, gold };
 }
 
-// Gold highlight for the fastest 1% of measurements.
-export const GOLD_COLOR = 'rgb(255,215,0)';
+// Vivid green highlight for the fastest 1% of measurements.
+export const GOLD_COLOR = 'rgb(57,211,83)';
 
 /** Latency ramp for intra-region cells, neutral grey for cross-region ones.
  * When `gold` is supplied and the value is at or below it, returns GOLD_COLOR.
@@ -183,13 +183,15 @@ export function cellColor(p50, mn, mx, crossRegion, gold) {
   return latencyColor(p50, mn, mx);
 }
 
-// Latency ramp: green (#39d353) -> orange (#f0883e) -> red (#f85149).
-// Lower latency = greener. t=0 at minP50, t=1 at maxP50.
-export const LATENCY_BEST_COLOR = 'rgb(255,215,0)';
+// Latency ramp: mild pre-green (#9abe5a) -> orange (#f0883e) -> red (#f85149).
+// Lower latency = greener. t=0 at minP50, t=1 at maxP50. The fastest 1% is
+// highlighted separately with GOLD_COLOR (vivid green), so this ramp starts at
+// a mild yellow-green that is clearly distinct from the vivid highlight.
+export const LATENCY_BEST_COLOR = 'rgb(57,211,83)';
 
 export function latencyColor(p50, minP50, maxP50) {
   const t = (maxP50 === minP50) ? 0 : Math.max(0, Math.min(1, (p50 - minP50) / (maxP50 - minP50)));
-  const stops = [[57, 211, 83], [240, 136, 62], [248, 81, 73]];
+  const stops = [[154, 190, 90], [240, 136, 62], [248, 81, 73]];
   const seg = t <= 0.5 ? 0 : 1, lt = t <= 0.5 ? t * 2 : (t - 0.5) * 2, a = stops[seg], b = stops[seg + 1];
   return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * lt) + ',' + Math.round(a[1] + (b[1] - a[1]) * lt) + ',' + Math.round(a[2] + (b[2] - a[2]) * lt) + ')';
 }

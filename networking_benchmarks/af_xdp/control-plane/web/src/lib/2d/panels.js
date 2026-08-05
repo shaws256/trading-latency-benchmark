@@ -321,7 +321,7 @@ export function renderPanels(ctx) {
   (function () {
     const el = document.createElement('div'); el.className = 'vis-legend';
     el.innerHTML = '<h3>Legend</h3>'
-      + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#39d353,#f0883e,#f85149)"></div><span>Edge color = p50 (green=fast, red=slow)</span></div>'
+      + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#9abe5a,#f0883e,#f85149)"></div><span>Edge color = p50 (green=fast, red=slow)</span></div>'
       + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,rgba(57,211,83,0.7),rgba(57,211,83,0.07))"></div><span>Edge opacity = p50 (faster = more opaque)</span></div>'
       + '<div class="row"><div class="swatch" style="background:' + CAP_GRADIENT_CSS + '"></div><span>Node color = capability (blue=basic \u2192 green=metal/top-net)</span></div>'
       + '<div class="row"><span>Distance \u221d p50 \u2014 stress ' + (stress * 100).toFixed(1) + '%</span></div>'

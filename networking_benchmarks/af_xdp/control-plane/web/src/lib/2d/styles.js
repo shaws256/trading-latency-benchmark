@@ -23,8 +23,8 @@ export const CSS = `
 .t2d-root .node.offline::after { content: ""; position: absolute; top: 2px; right: 2px;
   width: 8px; height: 8px; background: #f85149; border-radius: 50%; border: 1.5px solid #0d1117; }
 .t2d-root .node.selected { box-shadow: 0 0 0 2px rgba(255,215,0,0.55), 0 0 10px 2px rgba(255,215,0,0.28); z-index: 30; }
-.t2d-root .node .ip { font-size: 9px; color: #b1bac4; font-family: 'SF Mono',monospace; }
-.t2d-root .node .ip-private { color: #fff; font-size: 11px; font-weight: 700; }
+.t2d-root .node .ip { font-size: 8px; color: #b1bac4; font-family: 'SF Mono',monospace; }
+.t2d-root .node .ip-private { color: #fff; font-size: 9px; font-weight: 700; }
 .t2d-root .node .ip-public { color: #8b949e; margin-top: 1px; }
 .t2d-root .node.peer-hover { box-shadow: 0 0 0 3px rgba(88,166,255,0.9), 0 0 14px 3px rgba(88,166,255,0.5); z-index: 31; }
 
