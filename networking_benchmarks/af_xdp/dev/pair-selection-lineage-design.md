@@ -15,16 +15,6 @@ pinned-pair run fills/refreshes selected cells without creating a new event. The
 "Show" dropdown stays as one entry per kind/variation, showing the latest value
 per cell regardless of when it was taken.
 
-### UX
-
-- **Shift+click** a node to pin it (gold outline, pin badge)
-- Panel shows "Pinned: N nodes (M pairs)"
-- Existing kernel/xdp buttons **respect the pin selection**:
-  - 0 pinned → full NxN (today's behaviour)
-  - 1 pinned → star pattern (that node as source → all others)
-  - 2+ pinned → only ordered pairs among pinned nodes
-- **Clear pins** button resets to full NxN mode
-- Offline pinned nodes are silently skipped (warning in status line)
 
 ### API
 
@@ -35,12 +25,6 @@ POST /api/run
 
 `nodes` is optional. When present, the orchestrator filters `reg.Online()` to only
 the listed instance IDs. Omit for full NxN (backward-compatible).
-
-### Quick presets (future)
-
-- "Same PG only" — auto-pins all nodes in the clicked node's PG
-- "Cross-AZ" — pins one node per AZ
-- Right-click context menu: "Test this node → all" / "Test within this PG"
 
 ---
 
@@ -63,7 +47,7 @@ Display always shows the latest entry (or latest for a chosen variation filter).
 ### Single matrix, mode-annotated cells
 
 - Cell background = latency colour (green→red)
-- Tiny badge in corner: **K** (kernel) or **X** (xdp)
+- Tiny badge in corner: **K** (kernel) or **X** (xdp), or C/I/K for mcast
 - Hover: "34 µs · kernel · 2 min ago"
 - Filter mode: show only kernel / only xdp cells (dim missing)
 - Compare mode: split cell (left kernel, right xdp) for delta analysis

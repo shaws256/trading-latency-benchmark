@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -136,6 +137,12 @@ type UcastMatrixParams struct {
 	// recording its (survivorship-biased) percentiles. Negative disables the
 	// gate; 0 means "use the default". See DefaultMaxLossPct.
 	MaxLossPct float64 `json:"max_loss_pct"`
+
+	// Nodes optionally restricts the campaign to these instance IDs. Empty means
+	// every online node, i.e. the full NxN mesh.
+	Nodes []string `json:"nodes,omitempty"`
+	// Scope expands Nodes into ordered pairs: among (default) | fanout | fanin.
+	Scope string `json:"scope,omitempty"`
 }
 
 // DefaultMaxLossPct is the loss ceiling applied when UcastMatrixParams.MaxLossPct
@@ -178,18 +185,36 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	} else if p.MaxLossPct < 0 {
 		p.MaxLossPct = 0
 	}
-	nodes := o.reg.Online()
-	if len(nodes) < 2 {
+	online := o.reg.Online()
+	// A target set scopes the campaign to a subset of pairs; empty = full mesh.
+	nodes, destsFor, skipped, rerr := resolvePairs(online, p.Nodes, p.Scope)
+	if rerr != nil {
 		o.hub.Emit("job", map[string]any{"status": "error", "kind": "ucast",
-			"reason": fmt.Sprintf("need >=2 online nodes for an NxN matrix, have %d", len(nodes))})
-		log.Printf("ucast campaign refused: only %d online node(s)", len(nodes))
+			"variation": p.Variation, "reason": rerr.Error()})
+		log.Printf("ucast campaign refused: %v", rerr)
 		return
 	}
-	total := len(nodes) * (len(nodes) - 1)
-	o.hub.Emit("job", map[string]any{"status": "running", "kind": "ucast", "variation": p.Variation,
-		"pairs": total, "sources": len(nodes)})
-	log.Printf("campaign ucast/%s over %d nodes (%d pairs, source-grouped, max %d concurrent per source)",
-		p.Variation, len(nodes), total, p.MaxParallel)
+	// Converge the union of sources and destinations, not just the sources: a
+	// destination still in client profile from an earlier run would not echo.
+	prep := prepareSet(nodes, destsFor)
+	total := 0
+	for _, s := range nodes {
+		total += len(destsFor[s.InstanceID])
+	}
+	desc := scopeDescription(p.Scope, len(p.Nodes)-len(skipped))
+	ev := map[string]any{"status": "running", "kind": "ucast", "variation": p.Variation,
+		"pairs": total, "sources": len(nodes), "scope": desc}
+	if len(skipped) > 0 {
+		// Proceed, but say which selected nodes are not being measured.
+		sort.Strings(skipped)
+		ev["skipped"] = skipped
+		ev["msg"] = fmt.Sprintf("skipping %d selected node(s) that are not online: %s",
+			len(skipped), strings.Join(skipped, ", "))
+		log.Printf("ucast/%s: skipping offline/unknown selected nodes: %v", p.Variation, skipped)
+	}
+	o.hub.Emit("job", ev)
+	log.Printf("campaign ucast/%s — %s: %d pairs over %d source(s), %d node(s) to converge, max %d concurrent per source",
+		p.Variation, desc, total, len(nodes), len(prep), p.MaxParallel)
 
 	// Phase timers. Each accumulates wall-clock across the campaign so the `done`
 	// event carries a breakdown of where the run actually spent its time.
@@ -204,17 +229,17 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	// of guessing from a possibly-stale heartbeat.
 	tPrepare := time.Now()
 	o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
-		"phase": "prepare", "msg": fmt.Sprintf("converging %d node(s) to ucast echo profile", len(nodes))})
-	var prep sync.WaitGroup
-	for _, n := range nodes {
-		prep.Add(1)
+		"phase": "prepare", "msg": fmt.Sprintf("converging %d node(s) to ucast echo profile", len(prep))})
+	var prepWg sync.WaitGroup
+	for _, n := range prep {
+		prepWg.Add(1)
 		go func(n Node) {
-			defer prep.Done()
+			defer prepWg.Done()
 			o.dispatchRetry(n.InstanceID, proto.Command{Type: proto.CmdEnsureHost,
 				Host: &proto.HostStateParams{Profile: proto.HostEchoUcast}}, 60*time.Second, 2)
 		}(n)
 	}
-	prep.Wait()
+	prepWg.Wait()
 	// Purge stale ucast destinations on EVERY node before measuring.
 	//
 	// `rtt` deregisters itself on exit, but a killed/crashed rtt (timeout, cancel,
@@ -225,7 +250,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
 		"phase": "prepare", "msg": "initiating test"})
 	var purge sync.WaitGroup
-	for _, n := range nodes {
+	for _, n := range prep {
 		purge.Add(1)
 		go func(n Node) {
 			defer purge.Done()
@@ -244,7 +269,13 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	// MaxParallel caps concurrent pairs per source. 0 or negative = unlimited.
 	maxPar := p.MaxParallel
 	if maxPar <= 0 {
-		maxPar = len(nodes) // effectively unlimited (more than any round can have)
+		// Effectively unlimited: no source has more dests than this.
+		maxPar = 1
+		for _, s := range nodes {
+			if d := len(destsFor[s.InstanceID]); d > maxPar {
+				maxPar = d
+			}
+		}
 	}
 	// AF_XDP TX binds a socket on a single TX queue, and every pair from a source
 	// would bind the SAME queue. Concurrent binds contend and fall into rtt's
@@ -313,9 +344,10 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 		// Order destinations so nodes with an outstanding restore are measured
 		// LAST, giving their replicator the maximum time to finish starting while
 		// the other pairs run.
-		dests := make([]Node, 0, len(nodes)-1)
+		myDests := destsFor[s.InstanceID]
+		dests := make([]Node, 0, len(myDests))
 		var restoring []Node
-		for _, d := range nodes {
+		for _, d := range myDests {
 			if d.InstanceID == s.InstanceID {
 				continue
 			}

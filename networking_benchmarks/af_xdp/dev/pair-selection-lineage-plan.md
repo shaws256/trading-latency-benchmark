@@ -43,7 +43,7 @@ missing is the ability to *scope* a run, and durability + annotation of history.
 (mirroring the existing `pg-badge`/`role-badge` pattern). Clicking the checkbox
 toggles target-set membership. Clicking the node body keeps its current meaning
 (pin the latency table). `Shift+click` anywhere on the node is an accelerator for
-the same toggle.
+the same toggle. Clicking the checkbox dims other nodes, but their checkboxes remain opaque for the ease of use.
 
 **Rationale.** Three alternatives were considered:
 
@@ -57,23 +57,11 @@ the same toggle.
 
 The checkbox is always visible when the target set is non-empty, and appears on
 hover when it is empty, so the resting map stays clean.
+Ensure the checkbox works for 3d view, as well as preserved in Live mode.
 
-### D2. The run buttons carry the scope in their label
 
-**Decision.** The existing `kernel` / `xdp` buttons do not change position or
-count. Their labels become scope-aware:
+### D2. The scope is highlighted in a separate label on the control panel
 
-- Target set empty → `kernel` (unchanged, runs full NxN)
-- Target set active → `kernel · 6 pairs`
-
-Disabled with a tooltip when the resolved pair count is 0.
-
-**Rationale.** The single most likely failure of this feature is a user running a
-full 462-pair campaign when they meant to run 6, or vice versa. Putting the
-resolved pair count on the button that triggers the run makes the scope
-impossible to miss at the moment of commitment. No separate "Run targeted"
-button — a second button doubles the surface and invites the wrong one being
-pressed.
 
 ### D3. Scope is explicit, not inferred from count
 
@@ -108,8 +96,8 @@ number cannot.
 
 ### D5. Presets act on the hovered node's groups
 
-**Decision.** A row of preset chips in the selection block: `Same PG`, `Same AZ`,
-`One per AZ`, `One per PG`, `All`, `Clear`. Each resolves against the current
+**Decision.** A row of preset chips in the dedicated selection panel (new): `Same PG`, `Same AZ`,
+`Same VPC`, `Same Region`, `All`, `Clear`. Each resolves against the current
 fleet and replaces the target set.
 
 **Rationale.** The interesting questions are almost always structural
