@@ -102,6 +102,7 @@ export function mountControls(host, opts = {}) {
           <span class="cp-btn-group">
             <button class="cp-btn" data-run-ucast="kernel" title="kernel sendto()/recvfrom() — full kernel network stack, AF_XDP echo on remote">kernel</button>
             <button class="cp-btn" data-run-ucast="xdp" title="Kernel bypass on sender - AF_XDP zero-copy TX + RX">xdp</button>
+            <button class="cp-btn" data-run-ucast="all" title="Run both ucast variations sequentially (kernel then xdp)">all</button>
           </span>
         </div>
         <div class="row"><span class="cp-lbl">multicast</span></div>
@@ -118,14 +119,15 @@ export function mountControls(host, opts = {}) {
       <!-- LIVE mode: heartbeat — interval first, then pick a mode to re-run -->
       <div data-live-section style="display:none">
         <div class="row"><span class="cp-lbl">Every</span>
-          <input class="cp-num" data-hb-interval value="60" title="Heartbeat interval — keep >= 60s (a full campaign takes several seconds)">
-          <span class="cp-dim">sec (min 60)</span>
+          <input class="cp-num" data-hb-interval value="30" title="Heartbeat interval - keep >= 30s (a full campaign takes several seconds)">
+          <span class="cp-dim">sec (min 30)</span>
         </div>
         <div class="cp-hr"></div>
         <div class="row"><span class="cp-lbl">unicast</span></div>
         <div class="row"><span class="cp-btn-group">
           <button class="cp-btn" data-hb-ucast="kernel">kernel</button>
           <button class="cp-btn" data-hb-ucast="xdp">xdp</button>
+          <button class="cp-btn" data-hb-ucast="all">all</button>
         </span></div>
         <div class="row"><span class="cp-lbl">multicast</span></div>
         <div class="row"><span class="cp-btn-group">
@@ -258,11 +260,11 @@ export function mountControls(host, opts = {}) {
   // Download report (heatmap + all latencies) for the currently-shown run.
   $('[data-report]').addEventListener('click', () => onReport && onReport());
 
-  // ── Live heartbeat: choose a mode → App re-runs it every interval (min 60s) ──
+  // ── Live heartbeat: choose a mode -> App re-runs it every interval (min 30s) ──
   const hbIntervalSec = () => {
     const input = $('[data-hb-interval]');
-    let v = parseInt(input.value, 10) || 60;
-    if (v < 60) { v = 60; input.value = '60'; }
+    let v = parseInt(input.value, 10) || 30;
+    if (v < 30) { v = 30; input.value = '30'; }
     return v;
   };
   const hbClick = (btn, sel) => {

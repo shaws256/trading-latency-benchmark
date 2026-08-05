@@ -59,8 +59,13 @@ export function buildReportHTML(fleet, kind, variation) {
     // Mcast heatmap: single-column (source → each destination via replicator)
     heat = '<table class="heat"><tr><th>Destination</th><th>Role</th><th>AZ</th><th>PG</th><th>p50</th><th>p99</th><th>loss</th></tr>';
     dstIdxs.forEach(di => {
-      // In mcast matrix, the edge is typically src→dst (one-way through replicator)
-      const c = (srcIdx >= 0 && matrix[srcIdx] && matrix[srcIdx][di]) || null;
+      // The live model renders mcast as two physical hops and attributes the
+      // end-to-end one-way metric to the measured last leg (replicator → dest),
+      // so read that cell. Fall back to source → dest for a saved fleet.json that
+      // stored the direct edge instead.
+      const c = (replIdx >= 0 && matrix[replIdx] && matrix[replIdx][di])
+        || (srcIdx >= 0 && matrix[srcIdx] && matrix[srcIdx][di])
+        || null;
       const n = nodes[di];
       const pg = n.cpg_name && n.cpg_name !== 'unknown' ? n.cpg_name : '—';
       if (c) {
@@ -143,7 +148,9 @@ export function buildReportHTML(fleet, kind, variation) {
   td{font-family:'SF Mono',monospace}
   .role-source{color:#1f6feb} .role-replicator{color:#f0883e} .role-destination{color:#2ea043}
   .role{font-size:11px;padding:1px 5px;border-radius:8px;margin-left:4px}
-  .coverage{font-size:12px;margin:6px 0 12px;padding:7px 10px;border-left:3px solid #d29922;background:#fff8e1;line-height:1.5}
+  .coverage{font-size:12px;margin:6px 0 12px;padding:7px 10px;border-left:3px solid #d29922;
+    background:#1c1810;color:#e3b341;line-height:1.5}
+  .coverage b{color:#f0c674}
 </style></head><body>
   <h1>AF_XDP latency report — ${esc(kind)} / ${esc(variation)}</h1>
   <div class="meta">Region: ${esc(fleet.region || '?')} · Nodes: ${N} · Pairs: ${pairs} · Generated: ${gen}</div>

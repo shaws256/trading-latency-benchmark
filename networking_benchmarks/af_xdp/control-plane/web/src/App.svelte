@@ -200,7 +200,7 @@
   function startHeartbeat(body) {
     stopHeartbeat();
     hbBody = body;
-    const ms = Math.max(60, body.intervalSec || 60) * 1000;
+    const ms = Math.max(30, body.intervalSec || 30) * 1000;
     const tick = async () => { if (hbRunning || !hbBody) return; hbRunning = true; try { await doRun(hbBody); } finally { hbRunning = false; } };
     tick();                                    // fire immediately
     hbTimer = setInterval(tick, ms);

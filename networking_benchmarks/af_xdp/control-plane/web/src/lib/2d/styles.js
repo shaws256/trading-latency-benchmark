@@ -103,6 +103,7 @@ export const CSS = `
 .t2d-root .vis-legend .contour-samples span { border-radius: 4px; padding: 3px 10px; font-size: 12px; }
 .t2d-root .vis-legend .ux-hint { margin-top: 10px; padding-top: 8px; border-top: 1px solid #30363d; font-size: 11px; color: #8b949e; line-height: 1.6; }
 .t2d-root .vis-legend .ux-hint b { color: #e6edf3; }
+.t2d-root .vis-legend .ux-hint .hint-row { display: block; margin: 3px 0; }
 
 /* Shared Boundaries toggles */
 .t2d-root .boundary-toggles { margin-top: 10px; padding-top: 8px; border-top: 1px solid #30363d; }

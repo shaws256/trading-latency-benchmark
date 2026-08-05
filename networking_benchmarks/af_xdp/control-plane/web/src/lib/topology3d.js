@@ -486,7 +486,14 @@ export function mountTopology3D(container, fleet, opts = {}) {
     + '<div class="row"><div class="swatch" style="background:' + CAP_GRADIENT_CSS + '"></div><span>Node colour = capability (blue=basic \u2192 green=metal/top-net)</span></div>'
     + '<div class="row"><span>Distance \u221d log(p50 latency)</span></div>'
     + '<div class="row"><span style="color:#79c0ff;font-weight:700">Public IP</span><span style="color:#8b949e">&nbsp;/&nbsp;Private IP</span><span>&nbsp;on each node</span></div>'
-    + '<div class="ux-hint"><b>Hover</b> a node \u2014 highlight edges + latency table; <b>hover</b> a boundary plane \u2014 draw contour lines to its member nodes. <b>Click</b> a node \u2014 select it + its 1-hop neighbours & links; the selected node\u2019s body turns gold (faces + edges). Click again to deselect. <b>Deselect all</b> restores the full view. <b>Drag</b> = rotate, <b>scroll</b> = zoom, <b>right-drag</b> = pan; drag a panel title to move, click it to fold.</div>';
+    + '<div class="ux-hint">'
+    + '<div class="hint-row"><b>Hover</b> a node \u2014 highlight its edges + latency table</div>'
+    + '<div class="hint-row"><b>Hover</b> a boundary plane \u2014 draw contours to its member nodes</div>'
+    + '<div class="hint-row"><b>Click</b> a node \u2014 select it + its 1-hop neighbours; click again to deselect</div>'
+    + '<div class="hint-row"><b>Deselect all</b> \u2014 restore the full view</div>'
+    + '<div class="hint-row"><b>Drag</b> = rotate &middot; <b>scroll</b> = zoom &middot; <b>right-drag</b> = pan</div>'
+    + '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold</div>'
+    + '</div>';
   // Shared Boundaries toggles — flip .visible on each level's collected objects.
   legendEl.appendChild(buildBoundaryToggles((key, on) => {
     (boundaryObjs[key] || []).forEach((o) => { o.visible = on; });
