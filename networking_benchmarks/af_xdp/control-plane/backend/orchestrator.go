@@ -537,6 +537,28 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			log.Printf("campaign mcast cancelled")
 			return
 		}
+		// kernel (XDP_TX) mode is a single-destination passthrough - it cannot
+		// fan out to multiple receivers. Use only the first destination as the
+		// representative measurement; copy/inplace test the full fan-out.
+		modeDests := dests
+		if mode == "kernel" && len(dests) > 1 {
+			modeDests = dests[:1]
+			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
+				"msg": fmt.Sprintf("kernel mode: single-destination only (XDP_TX passthrough) - using %s", dests[0].PrivateIP)})
+			log.Printf("mcast/kernel: limiting to 1 destination (%s) - XDP_TX is single-dest passthrough", dests[0].PrivateIP)
+		}
+
+		// Clock sync does not depend on the replicator, so run it concurrently
+		// with the mode switch (which restarts the replicator) instead of after.
+		var clockWG sync.WaitGroup
+		for _, n := range append([]Node{*source}, modeDests...) {
+			clockWG.Add(1)
+			go func(n Node) {
+				defer clockWG.Done()
+				o.DispatchAgent(n.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
+			}(n)
+		}
+
 		// EnsureHostState is idempotent and collapses a mode+fwd change into a
 		// single restart, so the cached-mode guard is only an extra fast path: if
 		// the replicator is already in mcast/<mode> the agent does no service work.
@@ -548,6 +570,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			if res, err := o.DispatchAgent(replicator.InstanceID,
 				proto.Command{Type: proto.CmdEnsureHost, Host: &proto.HostStateParams{
 					Profile: proto.HostMcastReplicator, FwdMode: mode}}, svcT); err != nil || !res.OK {
+				clockWG.Wait()
 				o.hub.Emit("job", map[string]any{"status": "error", "mode": mode, "stage": "set_mode", "err": firstErr(err, res.Err)})
 				continue
 			}
@@ -557,25 +580,23 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 		}
 		msMSetMode += time.Since(tMode).Milliseconds()
 		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
-			"msg": "replicator in mcast/" + mode + " — destinations joining group + clock sync"})
-		// kernel (XDP_TX) mode is a single-destination passthrough — it cannot
-		// fan out to multiple receivers. Use only the first destination as the
-		// representative measurement; copy/inplace test the full fan-out.
-		modeDests := dests
-		if mode == "kernel" && len(dests) > 1 {
-			modeDests = dests[:1]
-			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
-				"msg": fmt.Sprintf("kernel mode: single-destination only (XDP_TX passthrough) — using %s", dests[0].PrivateIP)})
-			log.Printf("mcast/kernel: limiting to 1 destination (%s) — XDP_TX is single-dest passthrough", dests[0].PrivateIP)
-		}
+			"msg": "replicator in mcast/" + mode + " - destinations joining group + clock sync"})
 		tJoin := time.Now()
-		// Destinations (re)join the group behind the replicator + clock-gate.
+		// Destinations (re)join the group behind the replicator. Joins need the
+		// replicator listening so they follow the mode switch, but they are
+		// independent of each other and run in parallel.
+		var joinWG sync.WaitGroup
 		for _, d := range modeDests {
-			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdJoinGroup,
-				Mcast: &proto.McastParams{ReplicatorIP: replicator.PrivateIP, Group: p.Group}}, runSetup)
-			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
+			joinWG.Add(1)
+			go func(d Node) {
+				defer joinWG.Done()
+				o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdJoinGroup,
+					Mcast: &proto.McastParams{ReplicatorIP: replicator.PrivateIP, Group: p.Group}}, runSetup)
+			}(d)
 		}
-		o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
+		joinWG.Wait()
+		// Clock sync was started before the mode switch; collect it here.
+		clockWG.Wait()
 		msMJoin += time.Since(tJoin).Milliseconds()
 		if o.cancelled() {
 			for _, d := range modeDests {

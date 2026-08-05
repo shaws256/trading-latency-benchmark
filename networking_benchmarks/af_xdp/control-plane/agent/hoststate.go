@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -29,6 +30,10 @@ import (
 // instead of sleeping a fixed worst-case interval.
 
 const standaloneMarker = "/run/afxdp-standalone-xdp"
+
+// replicatorEnvFile holds REPLICATOR_MODE / REPLICATOR_FWD_MODE, read by
+// start-replicator.sh at launch.
+const replicatorEnvFile = "/etc/default/replicator"
 
 // hostState is the observed local configuration.
 type hostState struct {
@@ -162,7 +167,7 @@ func (r *Runner) ensureClient(st hostState, needXdpStamp bool) (string, error) {
 		// No ingress stamping required. Clear a standalone program if one is
 		// present so a stale attach from an earlier xdp run cannot interfere.
 		if st.standalone {
-			_, _ = sh(fmt.Sprintf(`sudo ip link set dev %s xdp off 2>/dev/null || true; sudo rm -f %s`,
+			_, _ = sh(fmt.Sprintf(`sudo bash -c 'ip link set dev %s xdp off 2>/dev/null || true; rm -f %s'`,
 				st.iface, standaloneMarker))
 			did = append(did, "detached standalone xdp (not stamping)")
 		}
@@ -176,9 +181,10 @@ func (r *Runner) ensureClient(st hostState, needXdpStamp bool) (string, error) {
 	// just stopped it took its program with it, so a prior xdpAttached reading is
 	// stale — the st.svcActive term forces a re-attach in that case.
 	if st.svcActive || !st.xdpAttached || !st.standalone {
+		// ONE sudo: each costs ~125ms from this service context.
 		out, err := sh(fmt.Sprintf(
-			`sudo ip link set dev %s xdp off 2>/dev/null || true
-sudo ip link set dev %s xdp obj %s/xdp/ucast.o sec xdp 2>&1 && sudo touch %s`,
+			`sudo bash -c 'ip link set dev %s xdp off 2>/dev/null || true
+ip link set dev %s xdp obj %s/xdp/ucast.o sec xdp 2>&1 && touch %s'`,
 			st.iface, st.iface, r.binDir, standaloneMarker))
 		if err != nil {
 			return "", fmt.Errorf("attach standalone xdp: %w (%s)", err, strings.TrimSpace(out))
@@ -211,34 +217,53 @@ func (r *Runner) ensureReplicator(st hostState, mode, fwd string) (string, error
 
 	var did []string
 	if needDetach {
-		_, _ = sh(fmt.Sprintf(`sudo ip link set dev %s xdp off 2>/dev/null || true; sudo rm -f %s`,
+		t := time.Now()
+		_, _ = sh(fmt.Sprintf(`sudo bash -c 'ip link set dev %s xdp off 2>/dev/null || true; rm -f %s'`,
 			st.iface, standaloneMarker))
-		did = append(did, "detached standalone xdp")
+		did = append(did, fmt.Sprintf("detached standalone xdp(%dms)", time.Since(t).Milliseconds()))
 	}
 	if needCfg {
-		script := fmt.Sprintf(`sudo sed -i '/^REPLICATOR_MODE=/d' /etc/default/replicator
-echo REPLICATOR_MODE=%s | sudo tee -a /etc/default/replicator >/dev/null
-sudo sed -i '/^REPLICATOR_FWD_MODE=/d' /etc/default/replicator`, mode)
-		if wantFwd != "" {
-			script += fmt.Sprintf("\necho REPLICATOR_FWD_MODE=%s | sudo tee -a /etc/default/replicator >/dev/null", wantFwd)
+		t := time.Now()
+		// Compute the new file in Go and write it with ONE sudo. The previous form
+		// used four (two sed, two tee); each sudo from a systemd service context
+		// costs ~125ms, so the write measured 430-590ms instead of ~125ms.
+		keep := []string{}
+		if b, err := os.ReadFile(replicatorEnvFile); err == nil {
+			for _, ln := range strings.Split(string(b), "\n") {
+				s := strings.TrimSpace(ln)
+				if s == "" || strings.HasPrefix(s, "REPLICATOR_MODE=") || strings.HasPrefix(s, "REPLICATOR_FWD_MODE=") {
+					continue
+				}
+				keep = append(keep, ln)
+			}
 		}
+		keep = append(keep, "REPLICATOR_MODE="+mode)
+		if wantFwd != "" {
+			keep = append(keep, "REPLICATOR_FWD_MODE="+wantFwd)
+		}
+		// Quoted heredoc delimiter: the content is written verbatim, no expansion.
+		script := fmt.Sprintf("sudo tee %s >/dev/null <<'AFXDP_EOF'\n%s\nAFXDP_EOF", replicatorEnvFile,
+			strings.Join(keep, "\n"))
 		if _, err := sh(script); err != nil {
 			return "", fmt.Errorf("write replicator config: %w", err)
 		}
-		did = append(did, "mode="+mode+" fwd="+orCopy(wantFwd))
+		did = append(did, fmt.Sprintf("mode=%s fwd=%s cfg(%dms)", mode, orCopy(wantFwd), time.Since(t).Milliseconds()))
 	}
 
 	action := "restart"
 	if !st.svcActive && !needCfg && !needDetach {
 		action = "start"
 	}
+	tSvc := time.Now()
 	if _, err := sh(`sudo systemctl ` + action + ` replicator`); err != nil {
 		return "", fmt.Errorf("%s replicator: %w", action, err)
 	}
+	msSvc := time.Since(tSvc).Milliseconds()
+	tReady := time.Now()
 	if err := r.waitReplicator(true, 30*time.Second); err != nil {
 		return "", err
 	}
-	did = append(did, action+"ed replicator")
+	did = append(did, fmt.Sprintf("%sed replicator(svc %dms + ready %dms)", action, msSvc, time.Since(tReady).Milliseconds()))
 	return strings.Join(did, " + "), nil
 }
 
@@ -257,9 +282,9 @@ func (r *Runner) ensureEndpoint(st hostState) (string, error) {
 		did = append(did, "stopped replicator")
 	}
 	if st.xdpAttached || st.standalone {
-		_, _ = sh(fmt.Sprintf(`sudo ip link set dev %s xdp off 2>/dev/null || true
-sudo ip link set dev %s xdpgeneric off 2>/dev/null || true
-sudo rm -f %s`, st.iface, st.iface, standaloneMarker))
+		_, _ = sh(fmt.Sprintf(`sudo bash -c 'ip link set dev %s xdp off 2>/dev/null || true
+ip link set dev %s xdpgeneric off 2>/dev/null || true
+rm -f %s'`, st.iface, st.iface, standaloneMarker))
 		did = append(did, "detached xdp")
 	}
 	if len(did) == 0 {

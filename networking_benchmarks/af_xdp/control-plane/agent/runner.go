@@ -79,18 +79,21 @@ func (r *Runner) ClockSync() (float64, error) {
 // stale XDP. Safe to call on source/destination (NOT the replicator, whose XDP
 // must stay) — the caller decides.
 func (r *Runner) FreeQueue() error {
-	// Poll for the killed processes to disappear rather than sleeping a flat
-	// second: SIGKILL reaping is sub-10ms in the normal case.
-	_, err := sh(`sudo pkill -9 -x mcast_receive 2>/dev/null || true;
-		sudo pkill -9 -x mcast_send 2>/dev/null || true;
+	// ONE sudo for the whole sequence: each sudo from this service context costs
+	// ~125ms, so the previous five-invocation form dominated per-mode cleanup.
+	// Polls for the killed processes to disappear rather than sleeping a flat
+	// second; SIGKILL reaping is sub-10ms in the normal case.
+	_, err := sh(`sudo bash -c '
+		pkill -9 -x mcast_receive 2>/dev/null || true
+		pkill -9 -x mcast_send 2>/dev/null || true
 		for i in $(seq 1 100); do
 			pgrep -x mcast_receive >/dev/null 2>&1 || pgrep -x mcast_send >/dev/null 2>&1 || break
 			sleep 0.02
-		done;
-		IFACE=$(ip -4 route show default | awk '{print $5}' | head -1);
-		sudo ip link set "$IFACE" xdp off 2>/dev/null || true;
-		sudo ip link set "$IFACE" xdpgeneric off 2>/dev/null || true;
-		sudo xdp-loader unload "$IFACE" --all 2>/dev/null || true`)
+		done
+		IFACE=$(ip -4 route show default | awk "{print \$5}" | head -1)
+		ip link set "$IFACE" xdp off 2>/dev/null || true
+		ip link set "$IFACE" xdpgeneric off 2>/dev/null || true
+		xdp-loader unload "$IFACE" --all 2>/dev/null || true'`)
 	return err
 }
 
