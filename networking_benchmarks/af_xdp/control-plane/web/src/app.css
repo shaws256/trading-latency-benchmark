@@ -110,17 +110,17 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1117;
   position: absolute; top: -14px; left: -16px;
   width: 11px; height: 11px; border-radius: 50%;
   box-sizing: border-box;
-  border: 1px solid #0d1117;
-  background: radial-gradient(circle at 32% 28%, #ffffff 0%, #c9d1d9 45%, #6e7681 100%);
-  box-shadow: 0 0 0 1px rgba(255,255,255,0.35), 0 1px 3px rgba(0,0,0,0.8);
+  /* Contour is always visible so the affordance never has to be discovered. */
+  border: 2px solid rgba(255,215,0,0.5);
+  background: radial-gradient(circle at 32% 28%, #8b949e 0%, #6e7681 45%, #484f58 100%);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.8);
   cursor: pointer; pointer-events: auto;
-  opacity: 0; transition: opacity .12s, transform .12s;
+  opacity: 1; transition: transform .12s;
 }
-.node-label .target-sphere.visible { opacity: 1; }
-.node-label .target-sphere:hover { transform: scale(1.25); opacity: 1; }
+.node-label .target-sphere:hover { transform: scale(1.25); }
+/* Selected: gold, matching the 2D checkbox. */
 .node-label .target-sphere.checked {
-  opacity: 1;
-  border-color: #d29922;
-  background: radial-gradient(circle at 32% 30%, #ffd75e 0%, #d29922 55%, #8a6112 100%);
-  box-shadow: 0 0 6px rgba(210,153,34,0.85);
+  border-color: #ffd700;
+  background: radial-gradient(circle at 32% 30%, #ffe873 0%, #ffd700 55%, #b8960b 100%);
+  box-shadow: 0 0 6px rgba(255,215,0,0.85);
 }

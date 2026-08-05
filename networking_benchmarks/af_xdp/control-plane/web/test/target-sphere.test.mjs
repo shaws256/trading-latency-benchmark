@@ -44,9 +44,19 @@ test('it reads as a sphere, not a flat dot', () => {
     'a radial gradient is what makes it look spherical');
 });
 
-test('checked and visible states are both styled', () => {
-  assert.match(rule('.node-label .target-sphere.checked'), /background|border-color/);
-  assert.match(rule('.node-label .target-sphere.visible'), /opacity/);
+test('the contour is permanently visible, not hover-gated', () => {
+  const r = rule('.node-label .target-sphere {');
+  assert.match(r, /opacity:\s*1/, 'the sphere must not start invisible');
+  assert.match(r, /border:\s*2px solid/, 'it needs a contour to be visible at rest');
+  assert.ok(!css.includes('.target-sphere.visible'),
+    'a .visible gate would mean the contour is conditional again');
+});
+
+test('unselected is grey and selected is the same gold as 2D', () => {
+  const base = rule('.node-label .target-sphere {');
+  assert.match(base, /#8b949e|#6e7681|#484f58/, 'unselected must be grey');
+  const on = rule('.node-label .target-sphere.checked');
+  assert.match(on, /#ffd700/, 'selected must be the 2D gold (#ffd700)');
 });
 
 test('the sphere toggles the target set and stops propagation', () => {

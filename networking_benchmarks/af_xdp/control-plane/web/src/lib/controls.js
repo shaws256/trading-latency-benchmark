@@ -52,6 +52,7 @@ const CSS = `
 .cp-target-info{color:#8b949e;font:12px inherit;flex:1}
 .cp-target-info.active{color:#ffd700}
 .cp-presets{gap:4px}
+.cp-presets .cp-cancel{margin-left:auto;margin-right:2px}
 .cp-tip{color:#6e7681;font:10px inherit;font-style:italic}
 .cp-presets button.on{background:rgba(240,136,62,.22);color:#f0883e;border-color:#f0883e}
 .cp-cost-hint{color:#f0883e;font:10px inherit;margin-left:4px}
@@ -59,8 +60,10 @@ const CSS = `
 .cp-icon:hover{background:#30363d;color:#fff}
 .cp-num{width:58px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 5px;font:12px inherit}
 .cp-dim{color:#6e7681;font:11px inherit;margin-left:2px}
-.cp-log-label{color:#6e7681;font:700 10px inherit;letter-spacing:.6px;margin:2px 0 3px}
-.cp-status{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:6px 8px;
+.cp-log-label{color:#6e7681;font:700 10px inherit;letter-spacing:.6px}
+.cp-log-row{display:flex;align-items:center;gap:6px;margin:2px 0 3px}
+.cp-log-row .cp-log-dl{margin-left:auto;padding:0 4px;font-size:11px;line-height:1.4}
+.cp-status{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:6px 8px;white-space:pre-wrap;overflow-y:auto;max-height:140px;
   color:#3fb950;font:12px 'SF Mono','Fira Code',ui-monospace,Menlo,monospace;
   min-height:34px;max-height:120px;overflow:auto;white-space:pre-wrap;word-break:break-word;
   font-variant-numeric:tabular-nums}
@@ -72,6 +75,8 @@ import { esc } from './2d/palette.js';
 import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, PRESETS, countPairs } from './pairs.js';
 
 export function mountControls(host, opts = {}) {
+  const OPS_LOG_MAX = 5000, LOG_TAIL = 40;
+  const opsLog = [];
   const { onSetMode, onToggleLive, onSelectView, onRun, onPickResult, onHeartbeat, onReport } = opts;
   if (!document.getElementById(STYLE_ID)) {
     const s = document.createElement('style'); s.id = STYLE_ID; s.textContent = CSS; document.head.appendChild(s);
@@ -102,7 +107,7 @@ export function mountControls(host, opts = {}) {
           <div class="row"><span class="cp-section">Target Set</span></div>
           <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
           <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
-            <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button></div>
+            <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm cp-cancel" data-cancel-targets title="Clear the target set">Cancel</button></div>
           <div class="row"><select class="cp-sel" data-scope></select></div>
         </div>
         <div class="cp-hr"></div>
@@ -155,7 +160,7 @@ export function mountControls(host, opts = {}) {
       </div>
 
       <div class="cp-hr"></div>
-      <div class="cp-log-label">LOG</div>
+      <div class="cp-log-row"><span class="cp-log-label">LOG</span><button class="cp-icon cp-log-dl" data-log-download title="Download the full session ops log">\u2913</button></div>
       <div class="cp-status" data-status></div>
     </div>
   `;
@@ -271,12 +276,22 @@ export function mountControls(host, opts = {}) {
 
   // Download report (heatmap + all latencies) for the currently-shown run.
   $('[data-report]').addEventListener('click', () => onReport && onReport());
+  $('[data-log-download]').addEventListener('click', () => {
+    const blob = new Blob([opsLog.join('\n') + '\n'], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), {
+      href: url, download: `afxdp-ops-log-${Date.now()}.txt`,
+    });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  });
 
   // ── Target set: scope select, presets, clear ────────────────────────────────
-  const { onScopeChange, onPreset } = opts;
+  const { onScopeChange, onPreset, onClearTargets } = opts;
   const scopeSel = $('[data-scope]');
   const targetInfo = $('[data-target-info]');
   const targetTip = $('[data-target-tip]');
+  const cancelBtn = $('[data-cancel-targets]');
   // Scope options carry a live pair count, so each one states what it will
   // actually run instead of leaving the arrow notation to be decoded.
   const paintScopeOptions = (count, totalNodes) => {
@@ -291,6 +306,7 @@ export function mountControls(host, opts = {}) {
   paintScopeOptions(0, 0);
   scopeSel.addEventListener('change', () => { onScopeChange && onScopeChange(scopeSel.value); });
   // Chips pass the preset NAME; App resolves it against the fleet.
+  cancelBtn.addEventListener('click', () => { onClearTargets && onClearTargets(); });
   el.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
     onPreset && onPreset(b.dataset.preset);
   }));
@@ -308,11 +324,11 @@ export function mountControls(host, opts = {}) {
         : `Select every instance in the same ${b.textContent.trim()} as the marked one`;
     });
     if (targetTip) targetTip.style.display = count === 0 ? '' : 'none';
+    if (cancelBtn) cancelBtn.disabled = count === 0;
     paintScopeOptions(count, totalNodes);
     scopeSel.value = sc;
     if (count === 0) {
-      const fullPairs = countPairs(totalNodes, 0, 'among');
-      targetInfo.textContent = `Full mesh (${fullPairs} pairs).`;
+      targetInfo.textContent = '';
       targetInfo.classList.remove('active');
     } else {
       targetInfo.textContent = `${count} selected \u00b7 ${pairs} pairs`;
@@ -345,7 +361,18 @@ export function mountControls(host, opts = {}) {
   return {
     setMode(m) { mode = m; paintMode(); },
     setLive(on) { liveOn = on; paintLive(); syncSections(); },
-    setStatus(text) { statusEl.textContent = text || ''; },
+    setStatus(text) {
+      // Keep the whole session, show the tail. The panel is a few lines tall but
+      // an ops log is only useful if it retains what scrolled past.
+      if (text) {
+        const t = new Date().toISOString().replace('T', ' ').slice(0, 19);
+        opsLog.push(`${t}  ${text}`);
+        if (opsLog.length > OPS_LOG_MAX) opsLog.splice(0, opsLog.length - OPS_LOG_MAX);
+      }
+      statusEl.textContent = opsLog.slice(-LOG_TAIL).join('\n');
+      statusEl.scrollTop = statusEl.scrollHeight;
+    },
+    opsLog() { return opsLog.slice(); },
     endRun() { endRunUI(); },
     setStats({ nodes = 0, online = 0, edges = 0 } = {}) {
       statsEl.innerHTML = `<b>${online}</b>/${nodes} online &middot; <b>${edges}</b> edges`;

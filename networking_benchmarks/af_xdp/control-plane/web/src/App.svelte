@@ -325,6 +325,10 @@
         panel?.setStatus(`downloaded ${kind} report (${views.length} mode(s))`);
       },
       onRun: doRun,
+      onClearTargets: () => {
+        targetIds = new Set(); activePreset = null; targetAnchor = null; scope = SCOPE_AMONG;
+        updateTargetPanel(); remount();
+      },
       onScopeChange: (s) => { scope = s; updateTargetPanel(); remount(); },
       onPreset: (name) => {
         // Presets are group expansions of the MARKED instance: PG selects every

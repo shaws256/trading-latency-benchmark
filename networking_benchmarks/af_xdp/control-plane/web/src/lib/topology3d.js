@@ -417,7 +417,7 @@ export function mountTopology3D(container, fleet, opts = {}) {
       const sph = targetSpheres[i];
       if (sph) {
         sph.classList.toggle('checked', targeted);
-        sph.classList.toggle('visible', hasTargets || i === hover);
+        // Contour is permanently visible; only the checked state varies.
       }
       if (sel) {
         m.material.color.set(GOLD); m.material.emissive.set(GOLD).multiplyScalar(0.45);
