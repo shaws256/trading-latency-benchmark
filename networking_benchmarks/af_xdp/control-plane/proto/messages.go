@@ -57,6 +57,7 @@ type CmdType string
 const (
 	CmdRunRTT       CmdType = "run_rtt"        // run rtt to a peer, return metrics
 	CmdMcastReceive CmdType = "mcast_receive"  // start mcast_receive (foreground), return when done
+	CmdMcastRxReady CmdType = "mcast_rx_ready" // is a local mcast_receive attached and listening?
 	CmdMcastSend    CmdType = "mcast_send"     // run mcast_send burst
 	CmdSetFwdMode   CmdType = "set_fwd_mode"   // set REPLICATOR_FWD_MODE + restart
 	CmdSetMode      CmdType = "set_mode"       // set REPLICATOR_MODE (+ fwd) + restart

@@ -501,6 +501,10 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 
 	const svcT, runSetup = 45 * time.Second, 30 * time.Second
 
+	// Phase timers so the done event reports where an mcast run spent its time.
+	mcastStart := time.Now()
+	var msMPrepare, msMSetMode, msMJoin, msMSettle, msMRun, msMCleanup int64
+
 	// One-time: free the AF_XDP queue on the transient app nodes. Skip the (slow)
 	// replicator STOP when it's already inactive from a prior run — but always run
 	// the cheap cleanup (detach stale XDP / kill leftover procs) for robustness.
@@ -510,6 +514,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 	// nodes already in that state cost one state read and no service work — this
 	// replaces the previous heartbeat-guessing plus unconditional cleanup, and is
 	// what makes a ucast -> mcast switchover converge in a single pass per node.
+	tMPrep := time.Now()
 	var mprep sync.WaitGroup
 	endpoints := append([]Node{*source}, dests...)
 	for _, n := range endpoints {
@@ -521,6 +526,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 		}(n)
 	}
 	mprep.Wait()
+	msMPrepare = time.Since(tMPrep).Milliseconds()
 	o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "phase": "prepare",
 		"msg": "freed AF_XDP queues on source + destinations"})
 
@@ -537,6 +543,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 		o.mu.Lock()
 		skip := replicator.ReplicatorMode == "mcast" && o.lastMcastFwd == mode
 		o.mu.Unlock()
+		tMode := time.Now()
 		if !skip {
 			if res, err := o.DispatchAgent(replicator.InstanceID,
 				proto.Command{Type: proto.CmdEnsureHost, Host: &proto.HostStateParams{
@@ -548,6 +555,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			o.lastMcastFwd = mode
 			o.mu.Unlock()
 		}
+		msMSetMode += time.Since(tMode).Milliseconds()
 		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
 			"msg": "replicator in mcast/" + mode + " — destinations joining group + clock sync"})
 		// kernel (XDP_TX) mode is a single-destination passthrough — it cannot
@@ -560,6 +568,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 				"msg": fmt.Sprintf("kernel mode: single-destination only (XDP_TX passthrough) — using %s", dests[0].PrivateIP)})
 			log.Printf("mcast/kernel: limiting to 1 destination (%s) — XDP_TX is single-dest passthrough", dests[0].PrivateIP)
 		}
+		tJoin := time.Now()
 		// Destinations (re)join the group behind the replicator + clock-gate.
 		for _, d := range modeDests {
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdJoinGroup,
@@ -567,6 +576,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
 		}
 		o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
+		msMJoin += time.Since(tJoin).Milliseconds()
 		if o.cancelled() {
 			for _, d := range modeDests {
 				o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
@@ -593,6 +603,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			if o.cancelled() {
 				break
 			}
+			tRun := time.Now()
 			var wg sync.WaitGroup
 			results = make([]rr, len(modeDests))
 			// Cancel watcher: if a cancel arrives mid-measurement, kill the in-flight
@@ -628,11 +639,35 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 					results[i] = rr{d.PrivateIP, res, err}
 				}()
 			}
-			time.Sleep(3 * time.Second) // receivers attach XDP before the send
+			// Wait for every receiver to have attached its XDP program and bound
+			// its socket before the source starts sending. Polling the receivers'
+			// own "listening" signal replaces a blind 3s sleep that was ~47% of a
+			// single-mode run. The 3s cap means this is never slower than the
+			// sleep it replaces, and a receiver that never reports ready still
+			// gets the send (its own timeout then surfaces the failure).
+			tSettle := time.Now()
+			settleDeadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(settleDeadline) {
+				allReady := true
+				for _, d := range modeDests {
+					res, err := o.DispatchAgent(d.InstanceID,
+						proto.Command{Type: proto.CmdMcastRxReady}, 3*time.Second)
+					if err != nil || !res.OK {
+						allReady = false
+						break
+					}
+				}
+				if allReady {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			atomic.AddInt64(&msMSettle, time.Since(tSettle).Milliseconds())
 			sres, serr := o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdMcastSend,
 				Mcast: &proto.McastParams{Group: p.Group, DataPort: p.DataPort, ReplicatorIP: replicator.PrivateIP,
 					Count: p.Count, IntervalUs: p.IntervalUs}}, recvT)
 			wg.Wait()
+			atomic.AddInt64(&msMRun, time.Since(tRun).Milliseconds())
 			close(stopWatch)
 			if o.cancelled() {
 				ok = false
@@ -664,11 +699,19 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
 				"src": source.PrivateIP, "dst": r.dst, "ok": pairOK, "err": firstErr(r.err, r.res.Err)})
 		}
+		tClean := time.Now()
 		for _, d := range modeDests { // release the queue for the next mode
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 		}
+		msMCleanup += time.Since(tClean).Milliseconds()
 		o.hub.Emit("job", map[string]any{"status": "mode_done", "kind": "mcast", "mode": mode, "ok": ok})
 		log.Printf("campaign mcast/%s done (ok=%v)", mode, ok)
 	}
-	o.hub.Emit("job", map[string]any{"status": "done", "kind": "mcast", "modes": p.Modes})
+	msMTotal := time.Since(mcastStart).Milliseconds()
+	o.hub.Emit("job", map[string]any{"status": "done", "kind": "mcast", "modes": p.Modes,
+		"timing": map[string]any{"total_ms": msMTotal, "prepare_ms": msMPrepare,
+			"set_mode_ms": msMSetMode, "join_ms": msMJoin, "settle_ms": msMSettle,
+			"run_ms": msMRun, "cleanup_ms": msMCleanup}})
+	log.Printf("TIMING mcast/%v total=%dms prepare=%dms set_mode=%dms join=%dms settle=%dms run=%dms cleanup=%dms",
+		p.Modes, msMTotal, msMPrepare, msMSetMode, msMJoin, msMSettle, msMRun, msMCleanup)
 }

@@ -378,8 +378,11 @@ private:
             ::send(s, nullptr, 0, 0);
             ::close(s);
         }
-        for (int attempt = 0; attempt < 20; ++attempt) {
-            usleep(50000);
+        // Check the cache BEFORE sleeping: in a benchmark the neighbour entry is
+        // almost always already resolved, so a wait-then-check loop would pay a
+        // fixed 50ms on every invocation for nothing.
+        for (int attempt = 0; attempt < 21; ++attempt) {
+            if (attempt) usleep(50000);
             FILE* f = fopen("/proc/net/arp", "r");
             if (!f) return false;
             char line[256]; fgets(line, sizeof(line), f);  // header
