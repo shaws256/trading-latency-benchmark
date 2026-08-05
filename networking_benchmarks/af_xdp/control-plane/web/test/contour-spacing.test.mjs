@@ -37,8 +37,9 @@ test('nested borders are separated and the inner margin is non-trivial', () => {
 });
 
 test('the separation floor keeps sibling contours from overlapping', () => {
-  // gaps = max(SEP*ratio, 2*pad + 24): the floor must exceed twice the pad so two
-  // adjacent groups at the same tier cannot have touching borders.
-  assert.match(layout, /Math\.max\(SEP \* ratio\[d\], 2 \* p \+ \d+\)/,
-    'the 2*pad floor must remain, otherwise larger pads make contours overlap');
+  // gaps = max(SEP*ratio, 2*pad + 2*R + 24): the floor must exceed twice the pad
+  // plus twice the node radius so two adjacent groups at the same tier cannot have
+  // touching borders even with full-size nodes at the edges.
+  assert.match(layout, /Math\.max\(SEP \* ratio\[d\], 2 \* p \+ 2 \* R \+ \d+\)/,
+    'the 2*pad+2*R floor must remain, otherwise larger pads make contours overlap');
 });

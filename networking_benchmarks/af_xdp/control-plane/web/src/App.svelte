@@ -255,6 +255,7 @@
     const k = targetIds.size;
     const pairs = countPairs(N, k, scope);
     panel.setTargets({ count: k, pairs, scope, totalNodes: N, preset: activePreset });
+    panel.setTargetIds(targetIds);
   }
 
   // Target toggle handler — called from 2D checkbox / shift+click and 3D shift+click.

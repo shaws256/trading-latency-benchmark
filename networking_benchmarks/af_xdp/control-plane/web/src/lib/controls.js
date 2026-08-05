@@ -106,16 +106,21 @@ export function mountControls(host, opts = {}) {
           <span class="cp-seg" data-view-seg></span>
         </div>
         <div class="cp-hr"></div>
-        <div data-target-block>
-          <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>\u25B6</span></div>
-          <div data-targets-content style="display:none">
-          <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
-          <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
-            <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm cp-cancel" data-cancel-targets title="Clear the target set">Cancel</button></div>
-          <div class="row"><select class="cp-sel" data-scope></select></div>
-          </div>
+      </div>
+
+      <!-- Target block: shared between normal and live modes -->
+      <div data-target-block>
+        <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>\u25B6</span></div>
+        <div data-targets-content style="display:none">
+        <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
+        <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
+          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm cp-cancel" data-cancel-targets title="Clear the target set">Cancel</button></div>
+        <div class="row"><select class="cp-sel" data-scope></select></div>
         </div>
-        <div class="cp-hr"></div>
+      </div>
+      <div class="cp-hr"></div>
+
+      <div data-normal>
         <div class="row center"><span class="cp-section">Test Latency</span><span class="cp-panel-caret collapsed" data-fold-latency>\u25B6</span></div>
         <div data-latency-content style="display:none">
         <div class="row"><span class="cp-lbl">Packets</span><input class="cp-num" data-count value="10000" title="Measurement packets per pair (100–1,000,000)"></div>
@@ -168,7 +173,7 @@ export function mountControls(host, opts = {}) {
       </div>
 
       <div class="cp-hr"></div>
-      <div class="cp-log-row"><span class="cp-log-label">LOG</span><button class="cp-icon cp-log-dl" data-log-download title="Download the full session ops log">\u2913</button></div>
+      <div class="cp-log-row"><span class="cp-log-label">LOG</span><button class="cp-btn cp-btn-sm" data-cancel-run disabled title="Cancel the in-flight campaign run">Cancel Run</button><button class="cp-icon cp-log-dl" data-log-download title="Download the full session ops log">\u2913</button></div>
       <div class="cp-status" data-status></div>
     </div>
   `;
@@ -261,10 +266,12 @@ export function mountControls(host, opts = {}) {
   // orange; every other run button is disabled (gray) until the run finishes.
   const runBtns = [...el.querySelectorAll('[data-run-ucast],[data-run-mcast]')];
   let activeRunBtn = null;
+  const cancelRunBtn = $('[data-cancel-run]');
   const endRunUI = () => {
     if (activeRunBtn) activeRunBtn.classList.remove('running');
     activeRunBtn = null;
     runBtns.forEach((b) => { b.disabled = false; });
+    if (cancelRunBtn) cancelRunBtn.disabled = true;
   };
   const startRun = (btn, payload) => {
     if (activeRunBtn === btn) {          // second press on the active button = cancel
@@ -274,10 +281,17 @@ export function mountControls(host, opts = {}) {
     }
     if (activeRunBtn) return;            // a run is active — others are disabled anyway
     activeRunBtn = btn;
-    btn.classList.add('running');                                  // active = orange
-    runBtns.forEach((b) => { if (b !== btn) b.disabled = true; });  // others gray + disabled
+    btn.classList.add('running');
+    runBtns.forEach((b) => { if (b !== btn) b.disabled = true; });
+    if (cancelRunBtn) cancelRunBtn.disabled = false;
     onRun && onRun(payload);
   };
+  // Cancel Run button handler
+  if (cancelRunBtn) {
+    cancelRunBtn.addEventListener('click', () => {
+      if (!cancelRunBtn.disabled) { onRun && onRun(null); endRunUI(); }
+    });
+  }
 
   el.querySelectorAll('[data-run-ucast]').forEach((b) => b.addEventListener('click', () => {
     startRun(b, { kind: 'ucast', variation: b.dataset.runUcast, count: clamp(num('[data-count]'), 100, 1000000), rate: clamp(num('[data-rate]'), 1000, 1000000), warmup: clamp(num('[data-warmup]'), 0, 100000), max_parallel: clamp(num('[data-max-parallel]'), 1, 100), max_loss_pct: clamp(numf('[data-max-loss]', 2), -1, 100) });
@@ -328,11 +342,13 @@ export function mountControls(host, opts = {}) {
   const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes, preset }) => {
     _lastTargetState = { count, pairs, scope: sc, totalNodes, preset };
     // Each preset expands the marked instance into its group, so there is
-    // nothing for them to act on until an instance is marked.
+    // nothing for them to act on until an instance is marked - EXCEPT 'all'
+    // which selects every online node regardless of anchor.
     el.querySelectorAll('[data-preset]').forEach((b) => {
-      b.disabled = count === 0;
+      const isAll = b.dataset.preset === 'all';
+      b.disabled = isAll ? false : count === 0;
       b.classList.toggle('on', !!preset && b.dataset.preset === preset);
-      b.title = count === 0
+      b.title = (!isAll && count === 0)
         ? 'Mark an instance first'
         : `Select every instance in the same ${b.textContent.trim()} as the marked one`;
     });
@@ -350,29 +366,56 @@ export function mountControls(host, opts = {}) {
     }
   };
 
+  // ── Fold state persistence (localStorage) ────────────────────────────────
+  const FOLD_KEY = 'cp-fold-state';
+  function loadFoldState() {
+    try { return JSON.parse(localStorage.getItem(FOLD_KEY)) || {}; } catch { return {}; }
+  }
+  function saveFoldState(state) {
+    try { localStorage.setItem(FOLD_KEY, JSON.stringify(state)); } catch { /* ignore */ }
+  }
+  const foldState = loadFoldState();
+
   // ── Test Latency fold toggle ────────────────────────────────────────────────
   const foldTargetsBtn = $('[data-fold-targets]');
   const targetsContent = $('[data-targets-content]');
+  // Restore fold state for targets
   if (foldTargetsBtn && targetsContent) {
+    if (foldState.targets) {
+      targetsContent.style.display = '';
+      foldTargetsBtn.classList.remove('collapsed');
+      foldTargetsBtn.textContent = '\u25BC';
+    }
     foldTargetsBtn.addEventListener('click', () => {
       const hidden = targetsContent.style.display === 'none';
       targetsContent.style.display = hidden ? '' : 'none';
       foldTargetsBtn.classList.toggle('collapsed', !hidden);
       foldTargetsBtn.textContent = hidden ? '\u25BC' : '\u25B6';
+      foldState.targets = hidden;
+      saveFoldState(foldState);
     });
   }
   const foldLatencyBtn = $('[data-fold-latency]');
   const latencyContent = $('[data-latency-content]');
+  // Restore fold state for latency
   if (foldLatencyBtn && latencyContent) {
+    if (foldState.latency) {
+      latencyContent.style.display = '';
+      foldLatencyBtn.classList.remove('collapsed');
+      foldLatencyBtn.textContent = '\u25BC';
+    }
     foldLatencyBtn.addEventListener('click', () => {
       const hidden = latencyContent.style.display === 'none';
       latencyContent.style.display = hidden ? '' : 'none';
       foldLatencyBtn.classList.toggle('collapsed', !hidden);
       foldLatencyBtn.textContent = hidden ? '\u25BC' : '\u25B6';
+      foldState.latency = hidden;
+      saveFoldState(foldState);
     });
   }
 
   // ── Live heartbeat: choose a mode -> App re-runs it every interval (min 30s) ──
+  let _targetIds = new Set();
   const hbIntervalSec = () => {
     const input = $('[data-hb-interval]');
     let v = parseInt(input.value, 10) || 30;
@@ -383,9 +426,8 @@ export function mountControls(host, opts = {}) {
     if (activeHb === btn) { btn.classList.remove('running'); activeHb = null; onHeartbeat && onHeartbeat(null); return; }
     if (activeHb) activeHb.classList.remove('running');
     btn.classList.add('running'); activeHb = btn;
-    // Heartbeat is a frequent liveness pulse — a small packet count keeps each
-    // tick quick and resource-light (one-shot Test Latency uses the larger 5000).
-    const params = { count: 1000, rate: 20000, warmup: 500, interval_us: 100, timeout_sec: 25, intervalSec: hbIntervalSec() };
+    const params = { count: 1000, rate: 20000, warmup: 500, interval_us: 100, timeout_sec: 25, intervalSec: hbIntervalSec(),
+      nodes: [..._targetIds], scope: scopeSel.value || 'among' };
     onHeartbeat && onHeartbeat({ ...sel, ...params });
   };
   el.querySelectorAll('[data-hb-ucast]').forEach((b) => b.addEventListener('click', () => hbClick(b, { kind: 'ucast', variation: b.dataset.hbUcast })));
@@ -420,6 +462,12 @@ export function mountControls(host, opts = {}) {
     // kinds: [{kind,unix}]; sel: {kind,variation} currently shown
     setCombos(kinds, sel) { renderViewButtons(kinds, sel); },
     setTargets(state) { paintTargetBlock(state); },
+    setTargetIds(ids) { _targetIds = ids || new Set(); },
+    startRunUI() {
+      // Mark cancel-run as enabled (for external callers / testing).
+      if (cancelRunBtn) cancelRunBtn.disabled = false;
+      runBtns.forEach((b) => { b.disabled = true; });
+    },
     dispose() { el.remove(); },
   };
 }

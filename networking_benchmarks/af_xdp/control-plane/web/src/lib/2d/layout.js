@@ -74,7 +74,7 @@ export function computePositions(ctx) {
   const ratio = [1.0, 0.8, 0.5, 0.35, 0.22];    // diminishing distance by tier
   const SEP = 215;                              // base (account) separation
   const R = nodeRadius();
-  const gaps = pads.map((p, d) => Math.max(SEP * ratio[d], 2 * p + 24));
+  const gaps = pads.map((p, d) => Math.max(SEP * ratio[d], 2 * p + 2 * R + 24));
   const pts = result.map((p) => [p.x, p.y]);
   separateHierarchy(fleet.nodes, pts, 2, R, gaps);
   result.forEach((p, i) => { p.x = pts[i][0]; p.y = pts[i][1]; });
