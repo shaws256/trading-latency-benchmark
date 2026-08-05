@@ -209,14 +209,50 @@ func (r *Runner) RunRTT(p proto.RTTParams) (proto.Metrics, string, error) {
 	if p.XdpRx {
 		flags += " --xdp-rx"
 	}
+
+	// ── Readiness probe: verify the target replicator responds to a control
+	// message before launching the full measurement. A replicator that just
+	// (re)started needs 1-3s for AF_XDP socket bind + XDP attach; subscribing
+	// too early gives rtt a timeout or "connection refused" exit. The probe
+	// sends a lightweight UDP `list` command (same control channel rtt uses to
+	// subscribe) and retries up to 4× with 600ms sleeps — total worst-case
+	// 2.4s, which covers the longest observed replicator startup. Zero-cost on
+	// the happy path (~1ms single UDP round-trip).
+	probeScript := fmt.Sprintf(
+		`for i in 1 2 3 4; do sudo %s %s list >/dev/null 2>&1 && exit 0; sleep 0.6; done; exit 1`,
+		r.bin("replicator_ctl"), p.TargetIP)
+	if _, err := sh(probeScript); err != nil {
+		return proto.Metrics{}, "", fmt.Errorf("target %s replicator not ready after 2.4s (not running?)", p.TargetIP)
+	}
+
 	_ = os.Remove("/tmp/rtt_results.json")
-	// Capture stdout so we can report the actual TX datapath (zero-copy vs the
-	// copy/SKB fallback) per run instead of inferring it from latency.
 	cmd := fmt.Sprintf(`%s %s %d %s %d %d %d %d %d %d%s >/tmp/rtt_out.txt 2>&1`,
 		r.bin("rtt"), p.TargetIP, p.DataPort, p.ListenIP, p.ListenPort,
 		p.Count, p.Rate, p.Warmup, sendCPU, recvCPU, flags)
-	if _, err := sh(cmd); err != nil {
-		return proto.Metrics{}, "", fmt.Errorf("rtt exec: %w", err)
+
+	// ── Retry: if rtt exits non-zero, sleep 1s and retry once. Covers
+	// transient subscribe failures (replicator accepted TCP but hasn't
+	// finished initializing its AF_XDP ring yet — <1s window).
+	var rttErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		_ = os.Remove("/tmp/rtt_results.json")
+		if _, err := sh(cmd); err != nil {
+			rttErr = fmt.Errorf("rtt exec: %w", err)
+			if attempt == 0 {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+		} else {
+			rttErr = nil
+			break
+		}
+	}
+	if rttErr != nil {
+		// Attach stdout for diagnostics.
+		if out, e := os.ReadFile("/tmp/rtt_out.txt"); e == nil && len(out) > 0 {
+			rttErr = fmt.Errorf("%w - %s", rttErr, strings.TrimSpace(string(out)))
+		}
+		return proto.Metrics{}, "", rttErr
 	}
 	txMode := ""
 	if out, e := os.ReadFile("/tmp/rtt_out.txt"); e == nil {

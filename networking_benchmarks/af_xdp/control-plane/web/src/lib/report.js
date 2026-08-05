@@ -39,9 +39,9 @@ export function buildReportHTML(fleet, kind, variation) {
   const isMcast = kind === 'mcast';
 
   // ── Node inventory table (always shown) ─────────────────────────────────────
-  let inventory = '<table class="inv"><tr><th>#</th><th>IP</th><th>Role</th><th>AZ</th><th>PG</th><th>Type</th></tr>';
+  let inventory = '<table class="inv"><tr><th>#</th><th>Private IP</th><th>Public IP</th><th>Role</th><th>AZ</th><th>PG</th><th>Type</th></tr>';
   nodes.forEach((n, i) => {
-    inventory += `<tr><td>${i}</td><td>${label(n)}</td><td class="role-${esc(n.role || '')}">${esc(n.role || '—')}</td>`
+    inventory += `<tr><td>${i}</td><td>${label(n)}</td><td>${esc(n.public_ip || '—')}</td><td class="role-${esc(n.role || '')}">${esc(n.role || '—')}</td>`
       + `<td>${esc(n.az || '—')}</td><td>${esc(n.cpg_name && n.cpg_name !== 'unknown' ? n.cpg_name : '—')}</td>`
       + `<td>${esc(n.type || '—')}</td></tr>`;
   });

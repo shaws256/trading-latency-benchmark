@@ -271,6 +271,7 @@ export class FleetStack extends cdk.Stack {
         const agentUd = UserData.forLinux();
         agentUd.addCommands(
           `echo "AGENT_ROLE=${role}" >> /etc/default/afxdp-agent`,
+          entry.pgName ? `echo "AGENT_PG=${entry.pgName}" >> /etc/default/afxdp-agent` : '# no pgName',
           'systemctl restart afxdp-agent 2>/dev/null || true',
         );
 

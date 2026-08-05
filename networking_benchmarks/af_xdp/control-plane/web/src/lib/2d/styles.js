@@ -87,7 +87,8 @@ export const CSS = `
 .t2d-root .stats .stat .val { color: #f0883e; font-weight: 600; font-family: 'SF Mono',monospace;
   font-size: 13px; text-align: right; overflow-wrap: break-word; word-break: normal; }
 /* Stacked multi-value scope (PGs/Regions): each name on its own right-aligned row. */
-.t2d-root .stats .stat .val.val-list { line-height: 1.5; }
+.t2d-root .stats .stat .val.val-list { line-height: 1.5; text-align: right; }
+.t2d-root .stats .stat:has(.val-list) { align-items: flex-start; }
 .t2d-root .stats .stress { margin-top: 8px; padding-top: 8px; border-top: 1px solid #30363d; font-size: 12px; color: #8b949e; }
 .t2d-root .stats .stress .val { color: #39d353; }
 

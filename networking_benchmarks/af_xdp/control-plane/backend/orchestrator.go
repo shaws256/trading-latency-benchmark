@@ -215,7 +215,7 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	// TX work on that node and shifts its whole p50 distribution into the ms range.
 	// Purging here makes each campaign start from a clean registry.
 	o.hub.Emit("job", map[string]any{"status": "progress", "kind": "ucast", "variation": p.Variation,
-		"phase": "prepare", "msg": "purging stale replicator destinations"})
+		"phase": "prepare", "msg": "initiating test"})
 	var purge sync.WaitGroup
 	for _, n := range nodes {
 		purge.Add(1)
@@ -433,15 +433,25 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 		}
 		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
 			"msg": "replicator in mcast/" + mode + " — destinations joining group + clock sync"})
+		// kernel (XDP_TX) mode is a single-destination passthrough — it cannot
+		// fan out to multiple receivers. Use only the first destination as the
+		// representative measurement; copy/inplace test the full fan-out.
+		modeDests := dests
+		if mode == "kernel" && len(dests) > 1 {
+			modeDests = dests[:1]
+			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
+				"msg": fmt.Sprintf("kernel mode: single-destination only (XDP_TX passthrough) — using %s", dests[0].PrivateIP)})
+			log.Printf("mcast/kernel: limiting to 1 destination (%s) — XDP_TX is single-dest passthrough", dests[0].PrivateIP)
+		}
 		// Destinations (re)join the group behind the replicator + clock-gate.
-		for _, d := range dests {
+		for _, d := range modeDests {
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdJoinGroup,
 				Mcast: &proto.McastParams{ReplicatorIP: replicator.PrivateIP, Group: p.Group}}, runSetup)
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
 		}
 		o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdClockSync}, runSetup)
 		if o.cancelled() {
-			for _, d := range dests {
+			for _, d := range modeDests {
 				o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 			}
 			o.hub.Emit("job", map[string]any{"status": "cancelled", "kind": "mcast", "modes": p.Modes})
@@ -449,7 +459,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			return
 		}
 		o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
-			"msg": fmt.Sprintf("sending %d packets source→replicator→%d dest(s)", p.Count, len(dests))})
+			"msg": fmt.Sprintf("sending %d packets source→replicator→%d dest(s)", p.Count, len(modeDests))})
 
 		// Run (retryable): start each destination receiver (blocks in-agent until
 		// count/timeout), fire the source send, await. On failure, retry the batch
@@ -467,7 +477,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 				break
 			}
 			var wg sync.WaitGroup
-			results = make([]rr, len(dests))
+			results = make([]rr, len(modeDests))
 			// Cancel watcher: if a cancel arrives mid-measurement, kill the in-flight
 			// mcast_receive/mcast_send (cleanup) so the blocking dispatches return.
 			stopWatch := make(chan struct{})
@@ -481,7 +491,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 					case <-t.C:
 						if o.cancelled() {
 							o.DispatchAgent(source.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
-							for _, d := range dests {
+							for _, d := range modeDests {
 								o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 							}
 							return
@@ -489,7 +499,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 					}
 				}
 			}()
-			for i, d := range dests {
+			for i, d := range modeDests {
 				i, d := i, d
 				wg.Add(1)
 				go func() {
@@ -519,13 +529,13 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			}
 			if !ok && attempt < 2 {
 				log.Printf("mcast/%s attempt %d failed; retrying", mode, attempt)
-				for _, d := range dests {
+				for _, d := range modeDests {
 					o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 				}
 			}
 		}
 		if o.cancelled() {
-			for _, d := range dests {
+			for _, d := range modeDests {
 				o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 			}
 			o.hub.Emit("job", map[string]any{"status": "cancelled", "kind": "mcast", "modes": p.Modes})
@@ -537,7 +547,7 @@ func (o *Orchestrator) RunMcastMatrix(p McastMatrixParams) {
 			o.hub.Emit("job", map[string]any{"status": "progress", "kind": "mcast", "mode": mode,
 				"src": source.PrivateIP, "dst": r.dst, "ok": pairOK, "err": firstErr(r.err, r.res.Err)})
 		}
-		for _, d := range dests { // release the queue for the next mode
+		for _, d := range modeDests { // release the queue for the next mode
 			o.DispatchAgent(d.InstanceID, proto.Command{Type: proto.CmdCleanup}, runSetup)
 		}
 		o.hub.Emit("job", map[string]any{"status": "mode_done", "kind": "mcast", "mode": mode, "ok": ok})

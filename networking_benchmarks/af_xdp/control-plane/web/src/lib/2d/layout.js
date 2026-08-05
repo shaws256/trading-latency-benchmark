@@ -78,6 +78,30 @@ export function computePositions(ctx) {
   const pts = result.map((p) => [p.x, p.y]);
   separateHierarchy(fleet.nodes, pts, 2, R, gaps);
   result.forEach((p, i) => { p.x = pts[i][0]; p.y = pts[i][1]; });
+  // ── Node collision resolution: push apart any individual nodes whose bodies
+  // overlap after the group separation. The hierarchy pass guarantees GROUP
+  // boxes don't intersect, but within a group (same PG) nodes can still land on
+  // top of each other when the MDS distances collapse (e.g. p50 ≈ equal for all
+  // pairs in a cluster PG). This is a simple O(N²) iterative push — cheap for
+  // fleet sizes (<100 nodes, <5 iterations).
+  const R2 = nodeRadius() * 2 + 6; // min centre-to-centre distance (2 radii + gap)
+  for (let iter = 0; iter < 10; iter++) {
+    let nudged = false;
+    for (let i = 0; i < result.length; i++) {
+      for (let j = i + 1; j < result.length; j++) {
+        const dx = result[j].x - result[i].x, dy = result[j].y - result[i].y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < R2) {
+          const push = (R2 - dist) / 2 + 1;
+          const nx = dist > 0.01 ? dx / dist : 1, ny = dist > 0.01 ? dy / dist : 0;
+          result[i].x -= nx * push; result[i].y -= ny * push;
+          result[j].x += nx * push; result[j].y += ny * push;
+          nudged = true;
+        }
+      }
+    }
+    if (!nudged) break;
+  }
   // Re-centre + fit to the viewport (separation may have spread things out).
   let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
   result.forEach((p, i) => { const rr = nodeRadius(fleet.nodes[i]); mnx = Math.min(mnx, p.x - rr); mxx = Math.max(mxx, p.x + rr); mny = Math.min(mny, p.y - rr); mxy = Math.max(mxy, p.y + rr); });
