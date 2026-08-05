@@ -84,8 +84,17 @@
     if (reportOverlayEl) reportOverlayEl.innerHTML = '';
   }
 
+  function ensureReportCss() {
+    if (document.getElementById('afxdp-report-css')) return;
+    const st = document.createElement('style');
+    st.id = 'afxdp-report-css';
+    st.textContent = REPORT_CSS;
+    document.head.appendChild(st);
+  }
+
   function rerenderReportOverlay() {
     if (!reportOverlayOpen || !reportOverlayEl) return;
+    ensureReportCss();
     const views = getReportViews();
     if (!views.length) return;
     // Preserve scroll position and IP selection across re-renders
@@ -365,13 +374,6 @@
   });
   afterUpdate(() => {
     if (reportOverlayOpen && reportOverlayEl && !reportOverlayEl.querySelector('.report-content')) {
-      // Inject the report CSS as a scoped style element
-      if (!reportOverlayEl.parentElement.querySelector('style[data-report-css]')) {
-        const s = document.createElement('style');
-        s.setAttribute('data-report-css', '');
-        s.textContent = REPORT_CSS;
-        reportOverlayEl.parentElement.prepend(s);
-      }
       rerenderReportOverlay();
     }
   });

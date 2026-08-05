@@ -103,11 +103,13 @@ export function mountControls(host, opts = {}) {
         </div>
         <div class="cp-hr"></div>
         <div data-target-block>
-          <div class="row center"><span class="cp-section">Targets</span></div>
+          <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>\u25B6</span></div>
+          <div data-targets-content style="display:none">
           <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
           <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
             <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm cp-cancel" data-cancel-targets title="Clear the target set">Cancel</button></div>
           <div class="row"><select class="cp-sel" data-scope></select></div>
+          </div>
         </div>
         <div class="cp-hr"></div>
         <div class="row center"><span class="cp-section">Test Latency</span><span class="cp-panel-caret collapsed" data-fold-latency>\u25B6</span></div>
@@ -213,16 +215,15 @@ export function mountControls(host, opts = {}) {
   let activeViewKind = null;
   const renderViewButtons = (kinds, sel) => {
     lastCombos = kinds; lastSel = sel;
-    const cur = sel ? sel.kind : activeViewKind;
     if (!kinds || !kinds.length) { viewSeg.innerHTML = ''; return; }
+    // Stateless: each button only opens a report tab, so it carries no selected
+    // state - there is nothing in this panel that "is" the chosen kind.
     viewSeg.innerHTML = kinds.map((c) =>
-      `<button data-view-btn="${esc(c.kind)}" class="${c.kind === cur ? 'on' : ''}">${c.kind}</button>`
+      `<button data-view-btn="${esc(c.kind)}">${c.kind}</button>`
     ).join('');
     viewSeg.querySelectorAll('[data-view-btn]').forEach((b) => {
       b.addEventListener('click', () => {
-        activeViewKind = b.dataset.viewBtn;
-        viewSeg.querySelectorAll('[data-view-btn]').forEach((x) => x.classList.toggle('on', x === b));
-        window.open('?report=' + encodeURIComponent(activeViewKind), '_blank');
+        window.open('?report=' + encodeURIComponent(b.dataset.viewBtn), '_blank');
       });
     });
   };
@@ -339,6 +340,16 @@ export function mountControls(host, opts = {}) {
   };
 
   // ── Test Latency fold toggle ────────────────────────────────────────────────
+  const foldTargetsBtn = $('[data-fold-targets]');
+  const targetsContent = $('[data-targets-content]');
+  if (foldTargetsBtn && targetsContent) {
+    foldTargetsBtn.addEventListener('click', () => {
+      const hidden = targetsContent.style.display === 'none';
+      targetsContent.style.display = hidden ? '' : 'none';
+      foldTargetsBtn.classList.toggle('collapsed', !hidden);
+      foldTargetsBtn.textContent = hidden ? '\u25BC' : '\u25B6';
+    });
+  }
   const foldLatencyBtn = $('[data-fold-latency]');
   const latencyContent = $('[data-latency-content]');
   if (foldLatencyBtn && latencyContent) {

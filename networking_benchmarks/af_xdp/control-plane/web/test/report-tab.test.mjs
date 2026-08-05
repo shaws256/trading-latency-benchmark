@@ -1,0 +1,72 @@
+// Regressions for the report tab.
+//
+// The report rendered as unstyled plain text because the stylesheet injection
+// was nested inside a "no .report-content yet" branch, while liveRerender()
+// (driven by the SSE init) created that content first - so the branch never ran.
+// The injection must not depend on render order.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+const app = readFileSync(new URL('../src/App.svelte', import.meta.url), 'utf8');
+const controls = readFileSync(new URL('../src/lib/controls.js', import.meta.url), 'utf8');
+
+test('report CSS injection is not gated on content already existing', () => {
+  // The old shape was:
+  //   if (open && el && !el.querySelector('.report-content')) { ...inject CSS... }
+  // which loses the race against the first data-driven render.
+  const guard = /!\s*reportOverlayEl\.querySelector\('\.report-content'\)[\s\S]{0,400}?REPORT_CSS/;
+  assert.ok(!guard.test(app),
+    'REPORT_CSS must not be injected inside the "no content yet" branch');
+});
+
+test('the stylesheet is injected idempotently and lands in <head>', () => {
+  assert.match(app, /function ensureReportCss\(\)/, 'a dedicated injector must exist');
+  const fn = app.slice(app.indexOf('function ensureReportCss()'),
+    app.indexOf('function rerenderReportOverlay'));
+  assert.match(fn, /getElementById\('afxdp-report-css'\)/, 'must be idempotent by id');
+  assert.match(fn, /document\.head\.appendChild/, 'global styles belong in <head>');
+  assert.match(fn, /REPORT_CSS/);
+});
+
+test('every render path ensures the CSS first', () => {
+  const fn = app.slice(app.indexOf('function rerenderReportOverlay'),
+    app.indexOf('function rerenderReportOverlay') + 400);
+  assert.match(fn, /ensureReportCss\(\)/,
+    'the render function itself must guarantee the stylesheet, whoever calls it');
+});
+
+test('view buttons are stateless: no selected class, no tracked kind', () => {
+  const block = controls.slice(controls.indexOf('const renderViewButtons'),
+    controls.indexOf('tzSel.addEventListener'));
+  assert.ok(!/classList\.toggle\('on'/.test(block),
+    'a button that only opens a tab must not paint itself as active');
+  assert.ok(!/activeViewKind\s*=/.test(block),
+    'no state to track: the panel does not "have" a chosen kind');
+  assert.match(block, /window\.open\('\?report='/, 'it must still open the report tab');
+});
+
+test('Targets folds like Test Latency', () => {
+  assert.match(controls, /data-fold-targets/, 'Targets needs a fold caret');
+  assert.match(controls, /data-targets-content/, 'Targets needs a foldable body');
+  // Same collapsed-by-default treatment as the latency block.
+  // The attribute is valueless, so there is no closing quote after it.
+  assert.match(controls, /data-targets-content style="display:none"/,
+    'Targets starts collapsed, like Test Latency');
+  const h = controls.slice(controls.indexOf("const foldTargetsBtn"),
+    controls.indexOf("const foldLatencyBtn"));
+  assert.match(h, /targetsContent\.style\.display/, 'the caret must toggle the body');
+  assert.match(h, /classList\.toggle\('collapsed'/, 'and reflect state on the caret');
+});
+
+test('the foldable Targets body encloses the whole block', () => {
+  // The preset chips, cancel and scope select all live inside the fold - folding
+  // a header that leaves its controls visible would be worse than not folding.
+  const open = controls.indexOf('data-targets-content');
+  const scope = controls.indexOf('data-scope');
+  const tip = controls.indexOf('data-target-tip');
+  const preset = controls.indexOf('data-preset=');
+  for (const [name, i] of [['tip', tip], ['presets', preset], ['scope', scope]]) {
+    assert.ok(i > open, `${name} must sit inside the foldable body`);
+  }
+});

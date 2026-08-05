@@ -68,9 +68,9 @@ export function computePositions(ctx) {
   // account gets the full separation, region 80%, vpc 50%, az 35% — so the outer
   // structure reads clearly without flinging inner groups apart (composition
   // cohesion). Floored at 2·pad + margin so contour boxes never overlap.
-  // Contour pads: account 46, region 34, vpc 22, az 10 (PAD_BASE 10, STEP 12).
+  // Contour pads: account 80, region 60, vpc 40, az 20 (PAD_BASE 20, STEP 20).
   // PG (5th tier) has no 2D contour — its gap just spaces PG groups within an AZ.
-  const pads = [46, 34, 22, 10, 8];             // [account, region, vpc, az, pg] — sync with contours.js
+  const pads = [80, 60, 40, 20, 14];            // [account, region, vpc, az, pg] — sync with contours.js
   const ratio = [1.0, 0.8, 0.5, 0.35, 0.22];    // diminishing distance by tier
   const SEP = 215;                              // base (account) separation
   const R = nodeRadius();
