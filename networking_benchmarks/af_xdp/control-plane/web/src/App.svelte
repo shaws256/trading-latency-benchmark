@@ -5,7 +5,7 @@
   import { createLive, runCampaign, cancelCampaign } from './lib/live.js';
   import { mountControls } from './lib/controls.js';
   import { buildReportHTML } from './lib/report.js';
-  import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT } from './lib/pairs.js';
+  import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT, resolvePreset } from './lib/pairs.js';
 
   let container;        // viz host (wiped on remount)
   let controlsHost;     // persistent overlay host for the shared panel
@@ -257,7 +257,16 @@
       },
       onRun: doRun,
       onScopeChange: (s) => { scope = s; updateTargetPanel(); remount(); },
-      onPreset: (ids) => { targetIds = new Set(ids); if (scope === SCOPE_AMONG && targetIds.size === 1) scope = SCOPE_FANOUT; updateTargetPanel(); remount(); },
+      onPreset: (name) => {
+        // controls.js hands over the preset NAME. Spreading that string into a
+        // Set yields one entry per character, so it must be resolved first.
+        // The anchor is the first already-selected node, so "Same PG" after
+        // clicking a node means that node's PG.
+        const anchor = targetIds.size ? [...targetIds][0] : null;
+        targetIds = new Set(resolvePreset(name, fleet?.nodes || [], anchor));
+        if (scope === SCOPE_AMONG && targetIds.size === 1) scope = SCOPE_FANOUT;
+        updateTargetPanel(); remount();
+      },
       onClearTargets: () => { targetIds = new Set(); scope = SCOPE_AMONG; updateTargetPanel(); remount(); },
     });
 

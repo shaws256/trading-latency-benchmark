@@ -140,3 +140,27 @@ test('checkboxes are visible once anything is selected, per D1', () => {
     assert.ok(b.classList.contains('visible'), 'non-empty selection: all checkboxes visible');
   }
 });
+
+test('a preset selection ticks the real checkboxes', async () => {
+  // The reported symptom: pressing a preset changed nothing on the map. The ids
+  // a preset returns must be the same key renderNodes compares against, or the
+  // selection is invisible even though the panel count updates.
+  const { resolvePreset } = await import('../src/lib/pairs.js');
+  const dom = fresh();
+  const nodes = [
+    { index: 0, private_ip: '10.0.0.1', public_ip: '1.1.1.1', role: 'source', az: 'a', region: 'r', cpg_name: 'cpg-a', type: 't', online: true },
+    { index: 1, private_ip: '10.0.0.2', public_ip: '1.1.1.2', role: 'destination', az: 'a', region: 'r', cpg_name: 'cpg-a', type: 't', online: true },
+    { index: 2, private_ip: '10.0.0.3', public_ip: '1.1.1.3', role: 'destination', az: 'b', region: 'r', cpg_name: 'cpg-b', type: 't', online: true },
+  ];
+  const picked = resolvePreset('pg', nodes, '10.0.0.1');
+  assert.deepEqual([...picked].sort(), ['10.0.0.1', '10.0.0.2'], 'preset resolves the PG group');
+
+  const { ctx, doc } = makeCtx(dom, { targetIds: new Set(picked), nodes });
+  renderNodes(ctx);
+
+  const checked = [...doc.querySelectorAll('[data-target-box].checked')].length;
+  assert.equal(checked, 2, 'both PG members must render a ticked checkbox');
+  assert.ok(ctx.nodeEls[0].classList.contains('targeted'));
+  assert.ok(ctx.nodeEls[1].classList.contains('targeted'));
+  assert.ok(!ctx.nodeEls[2].classList.contains('targeted'), 'the other PG must stay unselected');
+});

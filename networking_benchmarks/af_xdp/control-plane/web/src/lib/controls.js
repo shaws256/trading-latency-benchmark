@@ -67,7 +67,7 @@ const CSS = `
 
 import { enhancePanel, foldAllPanels, resetAllPanels } from './2d/panels.js';
 import { esc } from './2d/palette.js';
-import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, countPairs } from './pairs.js';
+import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, PRESETS, countPairs } from './pairs.js';
 
 export function mountControls(host, opts = {}) {
   const { onSetMode, onToggleLive, onSelectView, onRun, onPickResult, onHeartbeat, onReport } = opts;
@@ -278,13 +278,21 @@ export function mountControls(host, opts = {}) {
   const scopeSel = $('[data-scope]');
   const targetInfo = $('[data-target-info]');
   const clearBtn = $('[data-clear-targets]');
-  // Populate scope select from SCOPES.
-  scopeSel.innerHTML = SCOPES.map((s) =>
-    `<option value="${s.id}">${s.label}${s.id === 'fanin' ? ' (costly)' : ''}</option>`
-  ).join('');
+  // Scope options carry a live pair count, so each one states what it will
+  // actually run instead of leaving the arrow notation to be decoded.
+  const paintScopeOptions = (count, totalNodes) => {
+    const prev = scopeSel.value;
+    scopeSel.innerHTML = SCOPES.map((s) => {
+      const n = count ? countPairs(totalNodes, count, s.id) : 0;
+      const suffix = count ? ` \u2014 ${n} pair${n === 1 ? '' : 's'}` : '';
+      return `<option value="${s.id}" title="${s.hint}">${s.label}${suffix}</option>`;
+    }).join('');
+    if (prev) scopeSel.value = prev;
+  };
+  paintScopeOptions(0, 0);
   scopeSel.addEventListener('change', () => { onScopeChange && onScopeChange(scopeSel.value); });
   clearBtn.addEventListener('click', () => { onClearTargets && onClearTargets(); });
-  // Presets call onPreset with an array of instance IDs.
+  // Chips pass the preset NAME; App resolves it against the fleet.
   el.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
     onPreset && onPreset(b.dataset.preset);
   }));
@@ -292,6 +300,7 @@ export function mountControls(host, opts = {}) {
   let _lastTargetState = { count: 0, pairs: 0, scope: 'among', totalNodes: 0 };
   const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes }) => {
     _lastTargetState = { count, pairs, scope: sc, totalNodes };
+    paintScopeOptions(count, totalNodes);
     scopeSel.value = sc;
     if (count === 0) {
       const fullPairs = countPairs(totalNodes, 0, 'among');
