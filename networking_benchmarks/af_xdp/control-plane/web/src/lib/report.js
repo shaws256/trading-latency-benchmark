@@ -37,11 +37,15 @@ export function buildReportHTML(fleet, kind, variation) {
 
   const gen = new Date().toISOString();
   const isMcast = kind === 'mcast';
+  // Report name: spell out the transport and name the fwd/variation as a mode.
+  const kindName = isMcast ? 'multicast' : kind === 'ucast' ? 'unicast' : esc(kind);
+  const reportName = `Latency Report - ${kindName} ${esc(variation)} mode`;
 
   // ── Node inventory table (always shown) ─────────────────────────────────────
-  let inventory = '<table class="inv sortable" id="inv-table"><tr><th>#</th><th>Private IP</th><th>Public IP</th><th>Role</th><th>AZ</th><th>PG</th><th>Type</th></tr>';
+  let inventory = '<table class="inv sortable" id="inv-table"><tr><th>#</th><th>Private IP</th><th>Public IP</th><th>Role</th><th>VPC ID</th><th>AZ</th><th>PG</th><th>Type</th></tr>';
   nodes.forEach((n, i) => {
     inventory += `<tr data-ip="${esc(n.private_ip || '')}"><td>${i}</td><td>${label(n)}</td><td>${esc(n.public_ip || '—')}</td><td class="role-${esc(n.role || '')}">${esc(n.role || '—')}</td>`
+      + `<td>${esc(n.vpc_id && n.vpc_id !== 'unknown' ? n.vpc_id : '—')}</td>`
       + `<td>${esc(n.az || '—')}</td><td>${esc(n.cpg_name && n.cpg_name !== 'unknown' ? n.cpg_name : '—')}</td>`
       + `<td>${esc(n.type || '—')}</td></tr>`;
   });
@@ -96,9 +100,9 @@ export function buildReportHTML(fleet, kind, variation) {
       const sn = nodes[i], dn = nodes[j];
       const sPg = sn.cpg_name && sn.cpg_name !== 'unknown' ? sn.cpg_name : '—';
       const dPg = dn.cpg_name && dn.cpg_name !== 'unknown' ? dn.cpg_name : '—';
-      rows += `<tr data-src="${esc(sn.private_ip || '')}" data-dst="${esc(dn.private_ip || '')}"><td>${label(sn)}</td><td>${esc(sn.role || '—')}</td><td>${esc(sPg)}</td>`
-        + `<td>${label(dn)}</td><td>${esc(dn.role || '—')}</td>`
-        + `<td>${esc(dn.az || '—')}</td><td>${esc(dPg)}</td>`
+      rows += `<tr data-src="${esc(sn.private_ip || '')}" data-dst="${esc(dn.private_ip || '')}"><td>${label(sn)}</td><td>${esc(sn.role || '—')}</td>`
+        + `<td>${label(dn)}</td><td>${esc(dn.role || '—')}</td><td>${esc(dn.az || '—')}</td>`
+        + `<td>${esc(sPg)}</td><td>${esc(dPg)}</td>`
         + `<td>${fmtLat(c.p50)}</td><td>${fmtLat(c.p90)}</td><td>${fmtLat(c.p99)}</td><td>${fmtLat(c.p999)}</td><td>${fmtLat(c.max)}</td><td>${esc(c.loss ?? 0)}%</td></tr>`;
     }
 
@@ -128,9 +132,9 @@ export function buildReportHTML(fleet, kind, variation) {
       const sn = nodes[i], dn = nodes[j];
       const sPg = sn.cpg_name && sn.cpg_name !== 'unknown' ? sn.cpg_name : '—';
       const dPg = dn.cpg_name && dn.cpg_name !== 'unknown' ? dn.cpg_name : '—';
-      rows += `<tr data-src="${esc(sn.private_ip || '')}" data-dst="${esc(dn.private_ip || '')}"><td>${label(sn)}</td><td>${esc(sn.role || '—')}</td><td>${esc(sPg)}</td>`
-        + `<td>${label(dn)}</td><td>${esc(dn.role || '—')}</td>`
-        + `<td>${esc(dn.az || '—')}</td><td>${esc(dPg)}</td>`
+      rows += `<tr data-src="${esc(sn.private_ip || '')}" data-dst="${esc(dn.private_ip || '')}"><td>${label(sn)}</td><td>${esc(sn.role || '—')}</td>`
+        + `<td>${label(dn)}</td><td>${esc(dn.role || '—')}</td><td>${esc(dn.az || '—')}</td>`
+        + `<td>${esc(sPg)}</td><td>${esc(dPg)}</td>`
         + `<td>${fmtLat(c.p50)}</td><td>${fmtLat(c.p90)}</td><td>${fmtLat(c.p99)}</td><td>${fmtLat(c.p999)}</td><td>${fmtLat(c.max)}</td><td>${esc(c.loss ?? 0)}%</td></tr>`;
     }
   }
@@ -145,9 +149,9 @@ export function buildReportHTML(fleet, kind, variation) {
     xdp: 'TX via AF_XDP zero-copy on a non-RSS TX queue; RX is still the kernel busy-poll socket, with the ingress time stamped at the XDP hook. <code>--xdp-rx</code> is instrumented kernel RX, NOT a bypass receive.',
   };
   const methodology = isMcast ? `
-  <div class="method">
-    <h3>How this was measured</h3>
-    <div class="metric-kind">Reported value is a <b>ONE-WAY</b> delay: source → replicator → destination. It is not a round trip, and is not comparable with the ucast RTT figures.</div>
+  <div class="metric-kind">Reported value is a <b>ONE-WAY</b> delay: source → replicator → destination. It is not a round trip, and is not comparable with the ucast RTT figures.</div>
+  <details class="method">
+    <summary>How this was measured</summary>
     <dl>
       <dt>Path</dt><dd>EC2 VPCs do not forward raw multicast, so an 8-byte <code>m2u</code> header rides inside a plain unicast UDP datagram. The source sends to the replicator, which emits one unicast copy per registered destination. Two hops, both measured.</dd>
       <dt>Datapath</dt><dd>Source: AF_XDP zero-copy TX. Replicator: the <code>mcast.o</code> XDP program redirects the matching frame to an AF_XDP socket and userspace re-emits per destination (fwd mode <code>${esc(variation)}</code>). Destination: its own <code>mcast.o</code> redirects to an XSK, so the kernel IP stack is not involved after the XDP redirect.</dd>
@@ -156,10 +160,10 @@ export function buildReportHTML(fleet, kind, variation) {
       <dt>Gate</dt><dd>A run aborts when the inter-node offset exceeds the configured ceiling: a destination clock behind the source produces an invalid, possibly negative, one-way delay. Percentiles derive only from datagrams that arrived.</dd>
       <dt>On <code>kernel</code> fwd mode</dt><dd><code>XDP_TX</code> is a single-destination passthrough rather than a fan-out, so that mode measures one representative destination.</dd>
     </dl>
-  </div>` : `
-  <div class="method">
-    <h3>How this was measured</h3>
-    <div class="metric-kind">Reported value is a <b>ROUND-TRIP TIME</b> (RTT) through the remote replicator's echo, at queue depth 1 — one datagram in flight at a time.</div>
+  </details>` : `
+  <div class="metric-kind">Reported value is a <b>ROUND-TRIP TIME</b> (RTT) through the remote replicator's echo, at queue depth 1 — one datagram in flight at a time.</div>
+  <details class="method">
+    <summary>How this was measured</summary>
     <dl>
       <dt>Path</dt><dd>The measuring node sends to a peer whose replicator echoes the datagram straight back. Ordered pairs are measured one source at a time, and that source's own replicator is stopped for the duration so no AF_XDP socket owns the RX queue the echoes return on.</dd>
       <dt>Variation <code>${esc(variation)}</code></dt><dd>${UCAST_VARIATION_NOTES[variation] || 'See tools/rtt.cpp for this variation.'}</dd>
@@ -168,12 +172,12 @@ export function buildReportHTML(fleet, kind, variation) {
       <dt>Statistic</dt><dd>Service-time RTT = <code>recv − actual_send</code>, which excludes coordinated omission. Warmup datagrams are discarded before percentiles are computed, and percentiles derive only from datagrams that returned: a run over the loss ceiling is rejected rather than published, since its surviving subset is not comparable with a clean run.</dd>
       <dt>Host tuning</dt><dd>The <code>kernel</code> baseline is not the generic stack: <code>SO_BUSY_POLL</code> + <code>SO_PREFER_BUSY_POLL</code>, <code>SCHED_FIFO</code>, isolated-core pinning, ENA IRQ affinity, <code>napi_defer_hard_irqs</code>, <code>gro_flush_timeout=10us</code>, coalescing off.</dd>
     </dl>
-  </div>`;
+  </details>`;
 
-  const tableHeader = '<tr><th>src</th><th>src role</th><th>src PG</th><th>dst</th><th>dst role</th><th>dst AZ</th><th>dst PG</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th><th>max</th><th>loss</th></tr>';
+  const tableHeader = '<tr><th>src IP</th><th>src role</th><th>dst IP</th><th>dst role</th><th>dst AZ</th><th>src PG</th><th>dst PG</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th><th>max</th><th>loss</th></tr>';
 
   return `<!doctype html><html><head><meta charset="utf-8">
-<title>AF_XDP report — ${esc(kind)}/${esc(variation)}</title>
+<title>${reportName}</title>
 <style>
   body{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;padding:24px;margin:0}
   h1{font-size:18px;margin:0 0 4px} h2{font-size:15px;margin:24px 0 4px;color:#58a6ff}
@@ -194,7 +198,14 @@ export function buildReportHTML(fleet, kind, variation) {
   .method{font-size:12px;margin:8px 0 14px;padding:10px 12px;background:#161b22;
     border:1px solid #30363d;border-left:3px solid #58a6ff;border-radius:6px;
     color:#adbac7;line-height:1.65}
-  .method h3{margin:0 0 6px;font-size:13px;color:#58a6ff}
+  .method summary{font-size:13px;color:#58a6ff;cursor:pointer;font-weight:600;
+    list-style:none;user-select:none}
+  .method summary::-webkit-details-marker{display:none}
+  .method summary::before{content:'\u25b6';display:inline-block;margin-right:6px;
+    font-size:10px;transition:transform .12s}
+  .method[open] summary::before{transform:rotate(90deg)}
+  .method summary:hover{color:#79c0ff}
+  .method[open] summary{margin-bottom:4px}
   .method dt{color:#e6edf3;font-weight:600;margin-top:6px}
   .method dd{margin:0 0 0 14px}
   .method code{background:#0d1117;padding:1px 4px;border-radius:3px;color:#79c0ff}
@@ -225,7 +236,7 @@ export function buildReportHTML(fleet, kind, variation) {
   #lat-table tr.sel-dst td{background:#1d3326 !important;box-shadow:inset 3px 0 0 #3fb950}
   #lat-table tr.sel-both td{background:#3a2f14 !important;box-shadow:inset 3px 0 0 #d29922}
 </style></head><body>
-  <h1>AF_XDP latency report — ${esc(kind)} / ${esc(variation)} — ${isMcast ? 'one-way' : 'round-trip (RTT)'}</h1>
+  <h1>${reportName}</h1>
   <div class="meta">Region: ${esc(fleet.region || '?')} · Nodes: ${N} · Pairs: ${pairs} · Generated: ${gen}</div>
   ${methodology}
   ${isMcast ? '' : `<div class="coverage">Coverage: <b>${pairs}</b> of <b>${N * (N - 1)}</b> possible ordered pairs measured.${pairs < N * (N - 1) ? ` <b>${N * (N - 1) - pairs} missing.</b> A blank cell is either a pair that never ran, or one <b>rejected by the loss gate</b> — rtt derives percentiles only from datagrams that returned, so a lossy run describes its surviving subset and is not comparable to a clean run. Rejected pairs are recorded as failures rather than published as results; check the run log / error list for the reason.` : ''}</div>`}
@@ -332,8 +343,10 @@ export function buildReportHTML(fleet, kind, variation) {
     document.querySelectorAll('#lat-table tr[data-src]').forEach((tr) => {
       tr.style.cursor = 'pointer';
       tr.addEventListener('click', (ev) => {
+        // Column order: 0 src IP, 1 src role, 2 dst IP, ... so index 2 is the
+        // destination endpoint; anywhere else on the row selects the source.
         const ci = ev.target.cellIndex;
-        toggle(ci === 3 ? tr.dataset.dst : tr.dataset.src);
+        toggle(ci === 2 ? tr.dataset.dst : tr.dataset.src);
       });
     });
     document.getElementById('selclear').addEventListener('click', () => { sel.clear(); paint(); });
