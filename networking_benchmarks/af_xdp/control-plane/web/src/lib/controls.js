@@ -70,7 +70,7 @@ import { esc } from './2d/palette.js';
 import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, PRESETS, countPairs } from './pairs.js';
 
 export function mountControls(host, opts = {}) {
-  const { onSetMode, onToggleLive, onSelectView, onRun, onPickResult, onHeartbeat, onReport, onReportAll } = opts;
+  const { onSetMode, onToggleLive, onSelectView, onRun, onPickResult, onHeartbeat, onReport } = opts;
   if (!document.getElementById(STYLE_ID)) {
     const s = document.createElement('style'); s.id = STYLE_ID; s.textContent = CSS; document.head.appendChild(s);
   }
@@ -93,13 +93,13 @@ export function mountControls(host, opts = {}) {
       <div data-normal>
         <div class="row"><span class="cp-lbl">Show</span>
           <select class="cp-sel" data-view><option value="">(no data yet)</option></select>
-          <button class="cp-icon" data-report title="Download report (heatmap + all latencies) for the shown run">\u2913</button><button class="cp-icon" data-report-all title="Download ONE report covering every measured mode, with per-cell mode badges">\u29c9</button>
+          <button class="cp-icon" data-report title="Download the report for the shown kind (all its modes, heatmaps + delta + all latencies)">\u2913</button>
         </div>
         <div class="cp-hr"></div>
         <div data-target-block>
           <div class="row"><span class="cp-section">Target Set</span></div>
           <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span><button class="cp-btn cp-btn-sm" data-clear-targets style="display:none">Clear</button></div>
-          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">Same PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">Same VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">Same AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Same Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button></div>
+          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button></div>
           <div class="row"><select class="cp-sel" data-scope></select></div>
         </div>
         <div class="cp-hr"></div>
@@ -272,7 +272,6 @@ export function mountControls(host, opts = {}) {
 
   // Download report (heatmap + all latencies) for the currently-shown run.
   $('[data-report]').addEventListener('click', () => onReport && onReport());
-  $('[data-report-all]').addEventListener('click', () => onReportAll && onReportAll());
 
   // ── Target set: scope select, presets, clear ────────────────────────────────
   const { onScopeChange, onPreset, onClearTargets } = opts;

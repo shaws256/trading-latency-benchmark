@@ -1,7 +1,7 @@
 // Preset resolution: a preset NAME must become the set of node ids to select.
 //
 // The chip handler passed the preset name straight into `new Set(...)`, so
-// pressing "Same PG" produced Set{'p','g'} - a set of characters matching no
+// pressing "PG" produced Set{'p','g'} - a set of characters matching no
 // node. Nothing ticked and the pair count was nonsense.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -49,7 +49,7 @@ test('clear selects nothing', () => {
   assert.deepEqual(resolvePreset('clear', fleet, null), []);
 });
 
-test('same PG uses the anchor node group', () => {
+test('PG uses the anchor node group', () => {
   assert.deepEqual(ids(resolvePreset('pg', fleet, '10.0.0.3')), ['10.0.0.3', '10.0.0.4']);
   assert.deepEqual(ids(resolvePreset('pg', fleet, '10.0.0.1')), ['10.0.0.1', '10.0.0.2']);
 });

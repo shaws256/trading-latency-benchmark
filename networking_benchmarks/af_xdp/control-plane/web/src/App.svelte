@@ -4,7 +4,6 @@
   import { mountTopology3D } from './lib/topology3d.js';
   import { createLive, runCampaign, cancelCampaign } from './lib/live.js';
   import { mountControls } from './lib/controls.js';
-  import { buildReportHTML } from './lib/report.js';
   import { buildCombinedReportHTML } from './lib/report-combined.js';
   import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT, resolvePreset } from './lib/pairs.js';
 
@@ -246,21 +245,10 @@
       onSelectView: ({ kind: k, variation: v }) => { kind = k; variation = v; liveRerender(); },
       onPickResult: (p) => { if (p) load(`/api/fleet?path=${encodeURIComponent(p)}`, p); },
       onReport: () => {
-        if (!fleet || !(fleet.nodes || []).length) { panel?.setStatus('no data to report yet'); return; }
-        const html = buildReportHTML(fleet, kind, variation);
-        const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-        const a = Object.assign(document.createElement('a'), {
-          href: url, download: `afxdp-report-${kind}-${variation}-${Date.now()}.html`,
-        });
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-        panel?.setStatus(`downloaded report ${kind}/${variation}`);
-      },
-      // Parallel to onReport: ONE document covering every measured mode.
-      onReportAll: () => {
-        // combos() lists every {kind,variation} present; toFleet() reduces to one
-        // mode at a time, so the combined report is built from all of them.
-        const combos = conn ? conn.combos() : [];
+        // One report per KIND: every variation of the shown kind in a single
+        // document, so at most two exist at any time (ucast and mcast).
+        // combos() lists what has been measured; toFleet() reduces to one mode.
+        const combos = (conn ? conn.combos() : []).filter((c) => c.kind === kind);
         const views = combos.length
           ? combos.map((c) => ({ ...c, fleet: conn.toFleet(c.kind, c.variation) }))
           : (fleet ? [{ kind, variation, fleet }] : []);   // static ?data= fallback
@@ -268,18 +256,18 @@
         const html = buildCombinedReportHTML(views);
         const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
         const a = Object.assign(document.createElement('a'), {
-          href: url, download: `afxdp-report-all-${Date.now()}.html`,
+          href: url, download: `afxdp-report-${kind}-${Date.now()}.html`,
         });
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 5000);
-        panel?.setStatus(`downloaded combined report (${views.length} mode(s))`);
+        panel?.setStatus(`downloaded ${kind} report (${views.length} mode(s))`);
       },
       onRun: doRun,
       onScopeChange: (s) => { scope = s; updateTargetPanel(); remount(); },
       onPreset: (name) => {
         // controls.js hands over the preset NAME. Spreading that string into a
         // Set yields one entry per character, so it must be resolved first.
-        // The anchor is the first already-selected node, so "Same PG" after
+        // The anchor is the first already-selected node, so "PG" after
         // clicking a node means that node's PG.
         const anchor = targetIds.size ? [...targetIds][0] : null;
         targetIds = new Set(resolvePreset(name, fleet?.nodes || [], anchor));

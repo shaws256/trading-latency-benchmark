@@ -13,6 +13,7 @@
 //     cell, says so, and badges every cell with the mode that produced it.
 
 import { fmtLat, latencyColor, esc } from './2d/palette.js';
+import { buildCompareHTML } from './report.js';
 
 /** Short per-mode badge: K/X for ucast kernel/xdp, C/I/K for mcast fwd modes. */
 export const MODE_BADGE = {
@@ -26,12 +27,13 @@ export const MODE_BADGE = {
 const modeKey = (v) => `${v.kind}/${v.variation}`;
 const badgeOf = (key) => MODE_BADGE[key] || key.split('/')[1].slice(0, 2).toUpperCase();
 const label = (n) => esc(n.private_ip || n.ec2_name || '#' + n.index);
-const relAge = (unix) => {
-  if (!unix) return 'unknown age';
-  const s = Math.max(0, Math.floor(Date.now() / 1000 - unix));
-  if (s < 90) return `${s}s ago`;
-  if (s < 5400) return `${Math.round(s / 60)} min ago`;
-  return `${Math.round(s / 3600)} h ago`;
+const p2 = (v) => String(v).padStart(2, '0');
+/** hh:mm, dd-mm-yyyy. A saved report outlives any relative age. */
+const stamp = (unix) => {
+  if (!unix) return 'unknown';
+  const d = new Date(unix * 1000);
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}, `
+    + `${p2(d.getDate())}-${p2(d.getMonth() + 1)}-${d.getFullYear()}`;
 };
 
 /**
@@ -77,8 +79,8 @@ function overviewGrid(nodes, best) {
       if (rn === cn) { h += `<td class="na"${dat}>\u00b7</td>`; return; }
       const b = best.get(`${rn.private_ip}|${cn.private_ip}`);
       if (!b) { h += `<td class="na"${dat}>\u00b7</td>`; return; }
-      const tip = `${fmtLat(b.cell.p50)} \u00b7 ${b.key} \u00b7 ${relAge(b.unix)}`;
-      h += `<td${dat} style="background:${latencyColor(b.cell.p50, mn, mx)};color:#0d1117;font-weight:700"`
+      const tip = `${fmtLat(b.cell.p50)} \u00b7 ${b.key} \u00b7 ${stamp(b.unix)}`;
+      h += `<td${dat} style="color:${latencyColor(b.cell.p50, mn, mx)};font-weight:700"`
         + ` title="${esc(tip)}">${fmtLat(b.cell.p50)}`
         + `<span class="mode-badge">${badgeOf(b.key)}</span></td>`;
     });
@@ -106,7 +108,7 @@ function modeHeatmap(v) {
       const dat = ` data-row-ip="${rip}" data-col-ip="${cip}"`;
       const c = matrix[i] && matrix[i][j];
       if (!c) { h += `<td class="na"${dat}>\u00b7</td>`; return; }
-      h += `<td${dat} style="background:${latencyColor(c.p50, mn, mx)};color:#0d1117;font-weight:700"`
+      h += `<td${dat} style="color:${latencyColor(c.p50, mn, mx)};font-weight:700"`
         + ` title="${esc(fmtLat(c.p50) + ' \u00b7 ' + key)}">${fmtLat(c.p50)}</td>`;
     });
     h += '</tr>';
@@ -137,7 +139,7 @@ function methodology(v) {
 function latencyTable(rows) {
   const head = '<tr><th>mode</th><th>src IP</th><th>src role</th><th>dst IP</th><th>dst role</th>'
     + '<th>dst AZ</th><th>src PG</th><th>dst PG</th><th>p50</th><th>p90</th><th>p99</th>'
-    + '<th>p99.9</th><th>max</th><th>loss</th><th>age</th></tr>';
+    + '<th>p99.9</th><th>max</th><th>loss</th><th>measured</th></tr>';
   const pg = (n) => esc(n.cpg_name && n.cpg_name !== 'unknown' ? n.cpg_name : '\u2014');
   const body = rows
     .slice()
@@ -147,13 +149,13 @@ function latencyTable(rows) {
       const c = r.cell;
       return `<tr data-src="${esc(r.src.private_ip || '')}" data-dst="${esc(r.dst.private_ip || '')}"`
         + ` data-mode="${esc(r.key)}">`
-        + `<td><span class="mode-badge">${badgeOf(r.key)}</span> ${esc(r.key)}</td>`
+        + `<td>${esc(r.key)}</td>`
         + `<td>${label(r.src)}</td><td>${esc(r.src.role || '\u2014')}</td>`
         + `<td>${label(r.dst)}</td><td>${esc(r.dst.role || '\u2014')}</td>`
         + `<td>${esc(r.dst.az || '\u2014')}</td><td>${pg(r.src)}</td><td>${pg(r.dst)}</td>`
         + `<td>${fmtLat(c.p50)}</td><td>${fmtLat(c.p90)}</td><td>${fmtLat(c.p99)}</td>`
         + `<td>${fmtLat(c.p999)}</td><td>${fmtLat(c.max)}</td><td>${esc(c.loss ?? 0)}%</td>`
-        + `<td>${esc(relAge(r.unix))}</td></tr>`;
+        + `<td>${esc(stamp(r.unix))}</td></tr>`;
     })
     .join('');
   return `<table class="sortable" id="lat-table">${head}${body}</table>`;
@@ -180,7 +182,7 @@ function ages(rows) {
   const newest = Math.max(...us), oldest = Math.min(...us);
   const stale = rows.filter((r) => r.unix && newest - r.unix > 300).length;
   return '<div class="coverage"><h3 style="margin:0 0 4px;font-size:13px;color:#58a6ff">Measurement ages</h3>'
-    + `newest ${esc(relAge(newest))} \u00b7 oldest ${esc(relAge(oldest))}`
+    + `newest ${esc(stamp(newest))} \u00b7 oldest ${esc(stamp(oldest))}`
     + (stale ? ` \u00b7 <b>${stale}</b> measurement(s) more than 5 min older than the newest` : '')
     + ' \u2014 a scoped-run grid is a mosaic of measurement ages, not one snapshot.</div>';
 }
@@ -207,6 +209,19 @@ export function buildCombinedReportHTML(views) {
   ${methodology(v)}
   ${modeHeatmap(v)}`).join('\n');
 
+  // Delta grid last, and only with two variations to compare: with one there is
+  // nothing to subtract, and an empty diverging grid would imply "no difference"
+  // rather than "not measured". Oldest variation is the baseline.
+  const delta = vs.length >= 2 ? (() => {
+    const a = vs[vs.length - 1], b = vs[0];   // vs is newest-first from combos()
+    return `
+  <h2>Delta \u2014 ${esc(modeKey(b))} minus ${esc(modeKey(a))}</h2>
+  <div class="warn">Per-cell <b>p50 difference</b> on a diverging scale centred on zero. Cells
+  missing either mode are hatched rather than coloured, so an unmeasured pair cannot read as
+  "no change".</div>
+  ${buildCompareHTML(nodes, a.fleet.matrix, b.fleet.matrix)}`;
+  })() : '';
+
   return `<!doctype html><html><head><meta charset="utf-8">
   <title>Latency Report \u2014 all modes</title>
   <style>
@@ -218,7 +233,7 @@ export function buildCombinedReportHTML(views) {
   th,td{border:1px solid #30363d;padding:3px 7px;text-align:right;white-space:nowrap}
   th{background:#161b22;color:#8b949e;font-weight:600;cursor:pointer;user-select:none}
   .inv td,.inv th{text-align:left}
-  .heat td{font-family:'SF Mono',monospace;color:#0d1117;font-weight:700}
+  .heat td{font-family:'SF Mono',monospace;font-weight:700;background:#0d1117}
   .heat th{font-family:'SF Mono',monospace}
   td.na{background:#161b22;color:#484f58;font-weight:400}
   #lat-table td{color:#e6edf3}
@@ -234,7 +249,7 @@ export function buildCombinedReportHTML(views) {
     border:1px solid #30363d;border-left:3px solid #58a6ff;border-radius:6px;color:#adbac7;line-height:1.6}
   .method summary{font-size:13px;color:#58a6ff;cursor:pointer;font-weight:600;list-style:none}
   .method summary::-webkit-details-marker{display:none}
-  .method summary::before{content:'\\u25b6';display:inline-block;margin-right:6px;font-size:10px}
+  .method summary::before{content:'▶';display:inline-block;margin-right:6px;font-size:10px}
   .method[open] summary::before{transform:rotate(90deg)}
   .method dt{color:#e6edf3;font-weight:600;margin-top:6px}.method dd{margin:0 0 0 14px}
   .method code{background:#0d1117;padding:1px 4px;border-radius:3px;color:#79c0ff}
@@ -263,6 +278,7 @@ export function buildCombinedReportHTML(views) {
   <h2>Fleet inventory</h2>
   ${inventory(nodes)}
   ${sections}
+  ${delta}
 
   <h2>All measured latencies \u2014 every mode</h2>
   ${latencyTable(rows)}

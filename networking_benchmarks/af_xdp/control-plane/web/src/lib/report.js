@@ -280,7 +280,7 @@ export function buildReportHTML(fleet, kind, variation) {
   .method summary{font-size:13px;color:#58a6ff;cursor:pointer;font-weight:600;
     list-style:none;user-select:none}
   .method summary::-webkit-details-marker{display:none}
-  .method summary::before{content:'\u25b6';display:inline-block;margin-right:6px;
+  .method summary::before{content:'▶';display:inline-block;margin-right:6px;
     font-size:10px;transition:transform .12s}
   .method[open] summary::before{transform:rotate(90deg)}
   .method summary:hover{color:#79c0ff}

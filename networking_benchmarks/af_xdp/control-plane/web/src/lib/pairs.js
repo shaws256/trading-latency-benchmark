@@ -32,10 +32,10 @@ export const SCOPES = [
  * ids, so the same chip works in 2D, 3D and the panel.
  */
 export const PRESETS = [
-  { id: 'pg', label: 'Same PG', attr: 'cpg_name' },
-  { id: 'vpc', label: 'Same VPC', attr: 'vpc_id' },
-  { id: 'az', label: 'Same AZ', attr: 'az' },
-  { id: 'region', label: 'Same region', attr: 'region' },
+  { id: 'pg', label: 'PG', attr: 'cpg_name' },
+  { id: 'vpc', label: 'VPC', attr: 'vpc_id' },
+  { id: 'az', label: 'AZ', attr: 'az' },
+  { id: 'region', label: 'Region', attr: 'region' },
   { id: 'all', label: 'All' },
 ];
 

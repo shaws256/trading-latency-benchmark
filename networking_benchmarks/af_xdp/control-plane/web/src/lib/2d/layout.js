@@ -80,7 +80,7 @@ export function computePositions(ctx) {
   result.forEach((p, i) => { p.x = pts[i][0]; p.y = pts[i][1]; });
   // ── Node collision resolution: push apart any individual nodes whose bodies
   // overlap after the group separation. The hierarchy pass guarantees GROUP
-  // boxes don't intersect, but within a group (same PG) nodes can still land on
+  // boxes don't intersect, but within a group (PG) nodes can still land on
   // top of each other when the MDS distances collapse (e.g. p50 ≈ equal for all
   // pairs in a cluster PG). This is a simple O(N²) iterative push — cheap for
   // fleet sizes (<100 nodes, <5 iterations).
