@@ -251,13 +251,18 @@ func (db *DB) QueryLatency(p QueryLatencyParams) (ToolResult, error) {
 
 // CompareRuns computes per-cell p50 delta between two runs.
 func (db *DB) CompareRuns(runA, runB int64) (ToolResult, error) {
+	// Pair on the EDGE, not on variation. Two runs are frequently different
+	// variations (kernel baseline vs xdp), and that is the main reason to compare
+	// two campaigns at all -- joining on variation would return nothing there.
+	// Each side's variation is returned so the caller can see whether a delta is
+	// a change over time or a difference between datapaths.
 	q := `SELECT a.src_ip, a.dst_ip,
+		a.variation AS variation_a, b.variation AS variation_b,
 		a.p50 AS p50_a, b.p50 AS p50_b, (b.p50 - a.p50) AS delta_p50,
 		a.p99 AS p99_a, b.p99 AS p99_b, (b.p99 - a.p99) AS delta_p99
 	FROM measurements a
 	INNER JOIN measurements b
-		ON a.src_ip = b.src_ip AND a.dst_ip = b.dst_ip
-		AND a.kind = b.kind AND a.variation = b.variation
+		ON a.src_ip = b.src_ip AND a.dst_ip = b.dst_ip AND a.kind = b.kind
 	WHERE a.run_id = ? AND b.run_id = ?
 	ORDER BY a.src_ip, a.dst_ip`
 
@@ -269,20 +274,23 @@ func (db *DB) CompareRuns(runA, runB int64) (ToolResult, error) {
 
 	var results []any
 	for rows.Next() {
-		var srcIP, dstIP string
+		var srcIP, dstIP, varA, varB string
 		var p50A, p50B, deltaP50, p99A, p99B, deltaP99 int64
-		if err := rows.Scan(&srcIP, &dstIP, &p50A, &p50B, &deltaP50, &p99A, &p99B, &deltaP99); err != nil {
+		if err := rows.Scan(&srcIP, &dstIP, &varA, &varB,
+			&p50A, &p50B, &deltaP50, &p99A, &p99B, &deltaP99); err != nil {
 			return ToolResult{SQL: q}, fmt.Errorf("scan: %w", err)
 		}
 		results = append(results, map[string]any{
-			"src_ip":    srcIP,
-			"dst_ip":    dstIP,
-			"p50_a":     p50A,
-			"p50_b":     p50B,
-			"delta_p50": deltaP50,
-			"p99_a":     p99A,
-			"p99_b":     p99B,
-			"delta_p99": deltaP99,
+			"src_ip":      srcIP,
+			"dst_ip":      dstIP,
+			"variation_a": varA,
+			"variation_b": varB,
+			"p50_a":       p50A,
+			"p50_b":       p50B,
+			"delta_p50":   deltaP50,
+			"p99_a":       p99A,
+			"p99_b":       p99B,
+			"delta_p99":   deltaP99,
 		})
 	}
 	if results == nil {
