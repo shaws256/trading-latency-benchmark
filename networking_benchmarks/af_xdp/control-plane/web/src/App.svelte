@@ -1,10 +1,10 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, afterUpdate } from 'svelte';
   import { mountTopology2D } from './lib/2d/index.js';
   import { mountTopology3D } from './lib/topology3d.js';
   import { createLive, runCampaign, cancelCampaign } from './lib/live.js';
   import { mountControls } from './lib/controls.js';
-  import { buildCombinedReportHTML } from './lib/report-combined.js';
+  import { buildCombinedReportHTML, buildCombinedReportBody, REPORT_CSS, reportInteractions } from './lib/report-combined.js';
   import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT, resolvePreset } from './lib/pairs.js';
 
   let container;        // viz host (wiped on remount)
@@ -20,10 +20,15 @@
 
   let runs = [];
 
+  // ── Live report overlay state ──
+  let reportOverlayOpen = false;
+  let reportOverlayEl = null;
+
   // ── Target set — scopes the next run to a subset of nodes ──
   let targetIds = new Set();
   let scope = 'among';
-  let activePreset = null;   // highlighted chip; pressing it again clears
+  let activePreset = null;   // highlighted chip
+  let targetAnchor = null;   // the marked instance presets cluster around
 
   // ── backend connection (SSE) — the DATA source. Always open when a backend is
   //    present; independent of "Live mode" (which is the heartbeat mode below). ──
@@ -46,6 +51,57 @@
   function resolveJobDone() { const ws = jobDoneWaiters; jobDoneWaiters = []; ws.forEach((fn) => fn()); }
   function waitForDone(timeoutMs = 180000) {
     return new Promise((res) => { const t = setTimeout(res, timeoutMs); jobDoneWaiters.push(() => { clearTimeout(t); res(); }); });
+  }
+
+  // ── Live report overlay ──
+  function getReportViews() {
+    const combos = (conn ? conn.combos() : []).filter((c) => c.kind === kind);
+    const views = combos.length
+      ? combos.map((c) => ({ ...c, fleet: conn.toFleet(c.kind, c.variation) }))
+      : (fleet ? [{ kind, variation, fleet }] : []);
+    return views;
+  }
+
+  function openReportOverlay() {
+    reportOverlayOpen = true;
+    rerenderReportOverlay();
+  }
+
+  function closeReportOverlay() {
+    reportOverlayOpen = false;
+    if (reportOverlayEl) reportOverlayEl.innerHTML = '';
+  }
+
+  function rerenderReportOverlay() {
+    if (!reportOverlayOpen || !reportOverlayEl) return;
+    const views = getReportViews();
+    if (!views.length) return;
+    // Preserve scroll position and IP selection across re-renders
+    const scrollTop = reportOverlayEl.scrollTop;
+    const selectedIPs = new Set();
+    reportOverlayEl.querySelectorAll('#inv-table tr.sel').forEach((tr) => {
+      if (tr.dataset.ip) selectedIPs.add(tr.dataset.ip);
+    });
+
+    const body = buildCombinedReportBody(views);
+    const contentEl = reportOverlayEl.querySelector('.report-content');
+    if (contentEl) {
+      contentEl.innerHTML = body;
+    } else {
+      reportOverlayEl.innerHTML = `<div class="report-content">${body}</div>`;
+    }
+
+    const root = reportOverlayEl.querySelector('.report-content');
+    reportInteractions(root);
+
+    // Restore IP selection
+    if (selectedIPs.size > 0) {
+      root.querySelectorAll('#inv-table tr[data-ip]').forEach((tr) => {
+        if (selectedIPs.has(tr.dataset.ip)) tr.click();
+      });
+    }
+    // Restore scroll
+    reportOverlayEl.scrollTop = scrollTop;
   }
 
   function remount() {
@@ -116,6 +172,7 @@
     loading = false; error = ''; remount();
     const s = conn.stats();
     panel?.setStats({ ...s, updated: Date.now() });
+    rerenderReportOverlay();
   }
   function scheduleRerender() {
     if (rerenderTimer) return;
@@ -135,6 +192,8 @@
   function onToggleTarget(instanceId) {
     // A manual pick no longer corresponds to a preset, so drop the highlight.
     activePreset = null;
+    // This instance becomes the anchor the group presets expand from.
+    targetAnchor = targetIds.has(instanceId) ? null : instanceId;
     if (targetIds.has(instanceId)) targetIds.delete(instanceId);
     else targetIds.add(instanceId);
     // D3: auto-switch scope when among yields 0 pairs (k<2).
@@ -245,7 +304,7 @@
       onToggleLive: (on) => { heartbeatOn = on; if (!on) { stopHeartbeat(); panel?.setStatus('live monitoring off'); } },
       // A heartbeat mode was chosen (or cleared) in the live panel.
       onHeartbeat: (sel) => { if (!sel) { stopHeartbeat(); panel?.setStatus('heartbeat stopped'); } else { startHeartbeat(sel); } },
-      onSelectView: ({ kind: k }) => { kind = k; variation = null; liveRerender(); },
+      onSelectView: ({ kind: k }) => { kind = k; variation = null; liveRerender(); openReportOverlay(); },
       onPickResult: (p) => { if (p) load(`/api/fleet?path=${encodeURIComponent(p)}`, p); },
       onReport: () => {
         // One report per KIND: every variation of the shown kind in a single
@@ -268,13 +327,18 @@
       onRun: doRun,
       onScopeChange: (s) => { scope = s; updateTargetPanel(); remount(); },
       onPreset: (name) => {
-        // Pressing the active chip again clears, so the highlight doubles as the
-        // Clear affordance rather than needing a separate popup button.
+        // Presets are group expansions of the MARKED instance: PG selects every
+        // instance sharing its placement group, AZ every one in its AZ, and so
+        // on. Pressing the active preset again collapses back to just that
+        // instance, keeping the anchor so another grouping can be tried without
+        // re-marking. The buttons are disabled while nothing is marked.
+        const anchor = targetAnchor || (targetIds.size ? [...targetIds][0] : null);
+        if (!anchor) return;
         if (activePreset === name) {
-          targetIds = new Set(); activePreset = null; scope = SCOPE_AMONG;
+          targetIds = new Set([anchor]);
+          activePreset = null;
           updateTargetPanel(); remount(); return;
         }
-        const anchor = targetIds.size ? [...targetIds][0] : null;
         targetIds = new Set(resolvePreset(name, fleet?.nodes || [], anchor));
         activePreset = targetIds.size ? name : null;
         if (scope === SCOPE_AMONG && targetIds.size === 1) scope = SCOPE_FANOUT;
@@ -290,24 +354,71 @@
 
     try { const res = await fetch('/api/results'); if (res.ok) { runs = await res.json(); panel?.setResults(runs); } } catch { /* no dev API */ }
   });
+  afterUpdate(() => {
+    if (reportOverlayOpen && reportOverlayEl && !reportOverlayEl.querySelector('.report-content')) {
+      // Inject the report CSS as a scoped style element
+      if (!reportOverlayEl.parentElement.querySelector('style[data-report-css]')) {
+        const s = document.createElement('style');
+        s.setAttribute('data-report-css', '');
+        s.textContent = REPORT_CSS;
+        reportOverlayEl.parentElement.prepend(s);
+      }
+      rerenderReportOverlay();
+    }
+  });
+
   onDestroy(() => { if (handle) handle.dispose(); stopHeartbeat(); if (conn) conn.close(); if (panel) panel.dispose(); });
 </script>
 
 <div class="controls-host" bind:this={controlsHost}></div>
 <div class="root" bind:this={container}></div>
 
+{#if reportOverlayOpen}
+<div class="report-overlay" data-report-overlay>
+  <div class="report-toolbar">
+    <button class="report-toolbar-btn" on:click={closeReportOverlay}>✕ Close</button>
+    <button class="report-toolbar-btn" on:click={() => window.print()}>Save as PDF</button>
+  </div>
+  <div class="report-body" bind:this={reportOverlayEl}></div>
+</div>
+{/if}
+
 {#if loading}<div class="msg">Loading topology…</div>{/if}
 {#if error}<div class="msg err">Failed to load: {error}</div>{/if}
 
 <style>
   .root { position: fixed; inset: 0; }
-  /* controls-host MUST be highest z-index — above the 3D CSS2DRenderer overlay
-     (which is position:absolute with high z-index) and above all canvas elements.
-     pointer-events:none lets clicks through to the canvas; .cp-panel is auto. */
   .controls-host { position: fixed; inset: 0; pointer-events: none; z-index: 9999; }
   .controls-host :global(.cp-panel) { pointer-events: auto; }
   .msg { position: fixed; bottom: 16px; right: 16px; z-index: 9999; color: #e6edf3;
     background: rgba(22,27,34,.92); border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px;
     font: 13px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   .msg.err { color: #f85149; border-color: #f85149; }
+
+  .report-overlay { position: fixed; inset: 0; z-index: 10000; display: flex; flex-direction: column;
+    background: #0d1117; }
+  .report-toolbar { display: flex; gap: 8px; padding: 8px 16px; background: #161b22;
+    border-bottom: 1px solid #30363d; flex-shrink: 0; }
+  .report-toolbar-btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+    border-radius: 6px; padding: 6px 14px; cursor: pointer; font: 600 13px system-ui; }
+  .report-toolbar-btn:hover { background: #30363d; color: #fff; }
+  .report-body { flex: 1; overflow: auto; padding: 22px;
+    font-family: system-ui, -apple-system, sans-serif; color: #e6edf3; }
+
+  @media print {
+    .controls-host, .root, .report-toolbar, .msg { display: none !important; }
+    .report-overlay { position: static; background: #fff; }
+    .report-body { overflow: visible; padding: 0; color: #111; background: #fff; }
+    .report-body :global(table) { break-inside: avoid; page-break-inside: avoid; }
+    .report-body :global(details) { display: block; }
+    .report-body :global(details[open]), .report-body :global(details) { open: true; }
+    .report-body :global(details > *) { display: block; }
+    .report-body :global(details > summary) { display: list-item; }
+    .report-body :global(.coverage) { background: #fefce8; color: #92400e; border-color: #d4d4d4; }
+    .report-body :global(.method) { background: #f8fafc; color: #1e293b; border-color: #d4d4d4; }
+    .report-body :global(th) { background: #f1f5f9; color: #334155; }
+    .report-body :global(td), .report-body :global(th) { border-color: #cbd5e1; }
+    .report-body :global(.meta) { color: #475569; }
+    .report-body :global(h1), .report-body :global(h2) { color: #111; }
+  }
 </style>

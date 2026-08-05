@@ -52,7 +52,8 @@ const CSS = `
 .cp-target-info{color:#8b949e;font:12px inherit;flex:1}
 .cp-target-info.active{color:#ffd700}
 .cp-presets{gap:4px}
-.cp-presets button.on{background:rgba(88,166,255,.18);color:#58a6ff;border-color:#1f6feb}
+.cp-tip{color:#6e7681;font:10px inherit;font-style:italic}
+.cp-presets button.on{background:rgba(240,136,62,.22);color:#f0883e;border-color:#f0883e}
 .cp-cost-hint{color:#f0883e;font:10px inherit;margin-left:4px}
 .cp-icon{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;padding:4px 9px;cursor:pointer;font:600 14px inherit;line-height:1;flex:0 0 auto}
 .cp-icon:hover{background:#30363d;color:#fff}
@@ -90,17 +91,18 @@ export function mountControls(host, opts = {}) {
       <div class="row"><span class="cp-lbl">Timezone</span><select class="cp-sel cp-tz" data-tz title="Display timezone for the log + Show list"></select></div>
       <div class="cp-hr"></div>
 
-      <!-- NORMAL mode: Show selector + one-shot Run Tests -->
+      <!-- NORMAL mode: View buttons + one-shot Run Tests -->
       <div data-normal>
-        <div class="row"><span class="cp-lbl">Show</span>
-          <select class="cp-sel" data-view><option value="">(no data yet)</option></select>
+        <div class="row"><span class="cp-lbl">View</span>
+          <span class="cp-seg" data-view-seg></span>
           <button class="cp-icon" data-report title="Download the report for the shown kind (all its modes, heatmaps + delta + all latencies)">\u2913</button>
         </div>
         <div class="cp-hr"></div>
         <div data-target-block>
           <div class="row"><span class="cp-section">Target Set</span></div>
           <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
-          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button></div>
+          <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
+            <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button></div>
           <div class="row"><select class="cp-sel" data-scope></select></div>
         </div>
         <div class="cp-hr"></div>
@@ -176,7 +178,7 @@ export function mountControls(host, opts = {}) {
     if (allFolded) { resetAllPanels(); allFolded = false; foldAllBtn.textContent = '\u29C9'; }
     else { foldAllPanels(true); allFolded = true; foldAllBtn.textContent = '\u29C7'; }
   });
-  const viewSel = $('[data-view]');
+  const viewSeg = $('[data-view-seg]');
   const statsEl = $('[data-stats]');
   const statusEl = $('[data-status]');
   const num = (s) => Math.max(1, parseInt($(s).value, 10) || 0);
@@ -201,18 +203,23 @@ export function mountControls(host, opts = {}) {
     try { return new Intl.DateTimeFormat([], o).format(new Date(ms)); } catch { return new Date(ms).toLocaleTimeString(); }
   };
   let lastCombos = null, lastSel = null;
-  const renderCombos = (combos, sel) => {
-    lastCombos = combos; lastSel = sel;
-    const cur = sel ? sel.kind : viewSel.value;
-    if (!combos || !combos.length) { viewSel.innerHTML = '<option value="">(no data yet)</option>'; return; }
-    // One entry per KIND, at most ucast and mcast. Each unifies every variation
-    // of that kind, so there is no per-run entry to pick between.
-    viewSel.innerHTML = combos.map((c) => {
-      const t = c.unix ? fmtTime(c.unix * 1000) + ' · ' : '';
-      return `<option value="${c.kind}"${c.kind === cur ? ' selected' : ''}>${t}${c.kind}</option>`;
-    }).join('');
+  let activeViewKind = null;
+  const renderViewButtons = (kinds, sel) => {
+    lastCombos = kinds; lastSel = sel;
+    const cur = sel ? sel.kind : activeViewKind;
+    if (!kinds || !kinds.length) { viewSeg.innerHTML = ''; return; }
+    viewSeg.innerHTML = kinds.map((c) =>
+      `<button data-view-btn="${esc(c.kind)}" class="${c.kind === cur ? 'on' : ''}">${c.kind}</button>`
+    ).join('');
+    viewSeg.querySelectorAll('[data-view-btn]').forEach((b) => {
+      b.addEventListener('click', () => {
+        activeViewKind = b.dataset.viewBtn;
+        viewSeg.querySelectorAll('[data-view-btn]').forEach((x) => x.classList.toggle('on', x === b));
+        onSelectView && onSelectView({ kind: activeViewKind, variation: null });
+      });
+    });
   };
-  tzSel.addEventListener('change', () => { selectedTz = tzSel.value; if (lastCombos) renderCombos(lastCombos, lastSel); });
+  tzSel.addEventListener('change', () => { selectedTz = tzSel.value; if (lastCombos) renderViewButtons(lastCombos, lastSel); });
 
   let mode = opts.initialMode || '2d';
   let liveOn = !!opts.initialLive;
@@ -231,15 +238,6 @@ export function mountControls(host, opts = {}) {
 
   segBtns.forEach((b) => b.addEventListener('click', () => { mode = b.dataset.mode; paintMode(); onSetMode && onSetMode(mode); }));
   liveBtn.addEventListener('click', () => { liveOn = !liveOn; paintLive(); syncSections(); onToggleLive && onToggleLive(liveOn); });
-  viewSel.addEventListener('change', () => {
-    // A browse-result option carries data-run (a results/ subdir path); a live
-    // combo option carries a "kind|variation" value. The Show dropdown hosts both.
-    const opt = viewSel.selectedOptions[0];
-    if (opt && opt.dataset.run !== undefined) { onPickResult && onPickResult(opt.dataset.run); return; }
-    const v = viewSel.value; if (!v) return;
-    // The value is a kind; variation stays null so the view unifies them.
-    onSelectView && onSelectView({ kind: v, variation: null });
-  });
   // Track the currently running one-shot button. While a run is active it stays
   // orange; every other run button is disabled (gray) until the run finishes.
   const runBtns = [...el.querySelectorAll('[data-run-ucast],[data-run-mcast]')];
@@ -278,6 +276,7 @@ export function mountControls(host, opts = {}) {
   const { onScopeChange, onPreset } = opts;
   const scopeSel = $('[data-scope]');
   const targetInfo = $('[data-target-info]');
+  const targetTip = $('[data-target-tip]');
   // Scope options carry a live pair count, so each one states what it will
   // actually run instead of leaving the arrow notation to be decoded.
   const paintScopeOptions = (count, totalNodes) => {
@@ -299,13 +298,21 @@ export function mountControls(host, opts = {}) {
   let _lastTargetState = { count: 0, pairs: 0, scope: 'among', totalNodes: 0 };
   const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes, preset }) => {
     _lastTargetState = { count, pairs, scope: sc, totalNodes, preset };
-    el.querySelectorAll('[data-preset]').forEach((b) =>
-      b.classList.toggle('on', !!preset && b.dataset.preset === preset));
+    // Each preset expands the marked instance into its group, so there is
+    // nothing for them to act on until an instance is marked.
+    el.querySelectorAll('[data-preset]').forEach((b) => {
+      b.disabled = count === 0;
+      b.classList.toggle('on', !!preset && b.dataset.preset === preset);
+      b.title = count === 0
+        ? 'Mark an instance first'
+        : `Select every instance in the same ${b.textContent.trim()} as the marked one`;
+    });
+    if (targetTip) targetTip.style.display = count === 0 ? '' : 'none';
     paintScopeOptions(count, totalNodes);
     scopeSel.value = sc;
     if (count === 0) {
       const fullPairs = countPairs(totalNodes, 0, 'among');
-      targetInfo.textContent = `No selection \u2014 full mesh (${fullPairs} pairs)`;
+      targetInfo.textContent = `Full mesh (${fullPairs} pairs).`;
       targetInfo.classList.remove('active');
     } else {
       targetInfo.textContent = `${count} selected \u00b7 ${pairs} pairs`;
@@ -345,13 +352,11 @@ export function mountControls(host, opts = {}) {
     },
     // Populate the Show dropdown with saved-run browse results (dev-only API).
     setResults(runs) {
+      // Browse results are no longer shown in a dropdown - log only.
       if (!runs || !runs.length) return;
-      viewSel.innerHTML = ['<option value="" disabled selected>Browse results\u2026 (' + runs.length + ')</option>']
-        .concat(runs.map((r) => '<option data-run="' + esc(r.path) + '" value="run:' + esc(r.path) + '">' + esc(r.path) + '</option>'))
-        .join('');
     },
-    // combos: [{kind,variation,unix}]; sel: {kind,variation} currently shown
-    setCombos(combos, sel) { renderCombos(combos, sel); },
+    // kinds: [{kind,unix}]; sel: {kind,variation} currently shown
+    setCombos(kinds, sel) { renderViewButtons(kinds, sel); },
     setTargets(state) { paintTargetBlock(state); },
     dispose() { el.remove(); },
   };

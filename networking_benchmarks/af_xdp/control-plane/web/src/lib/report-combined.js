@@ -1,4 +1,4 @@
-// report-combined.js - ONE self-contained HTML report covering every mode that
+// Combined report: ONE self-contained HTML report covering every mode that
 // has been measured, with per-cell mode metadata.
 //
 // Runs in parallel with report.js buildReportHTML(), which still produces a
@@ -182,53 +182,8 @@ function ages(rows) {
     + '</div>';
 }
 
-/**
- * Build the combined report.
- * @param {Array<{kind:string,variation:string,unix?:number,fleet:object}>} views
- */
-export function buildCombinedReportHTML(views) {
-  const vs = (views || []).filter((v) => v && v.fleet && (v.fleet.nodes || []).length);
-  const gen = new Date().toISOString();
-  if (!vs.length) {
-    return `<!doctype html><html><head><meta charset="utf-8"><title>Latency Report</title></head>`
-      + `<body style="background:#0d1117;color:#e6edf3;font-family:system-ui;padding:24px">`
-      + `<h1>Latency Report</h1><p>No measurements yet \u2014 run a campaign first.</p></body></html>`;
-  }
-  const nodes = vs[0].fleet.nodes;
-  const region = vs[0].fleet.region || '?';
-  const { rows, best } = collate(vs);
-  const modeList = vs.map((v) => modeKey(v));
-  // One scale for every grid in the document, so a given latency always gets the
-  // same colour. Scaling each grid to its own range made 31us red beside 90us and
-  // green beside 32us, which reads as a difference in the network rather than in
-  // the normalisation.
-  const allP50 = rows.map((r) => r.cell.p50).filter((v) => v != null);
-  const scale = {
-    mn: allP50.length ? Math.min(...allP50) : 0,
-    mx: allP50.length ? Math.max(...allP50) : 1,
-  };
-
-  const sections = vs.map((v) => `
-  <h2>${esc(modeKey(v))} \u2014 ${v.kind === 'mcast' ? 'one-way' : 'round-trip (RTT)'}</h2>
-  ${methodology(v)}
-  ${modeHeatmap(v, scale)}`).join('\n');
-
-  // Delta grid last, and only with two variations to compare: with one there is
-  // nothing to subtract, and an empty diverging grid would imply "no difference"
-  // rather than "not measured". Oldest variation is the baseline.
-  const delta = vs.length >= 2 ? (() => {
-    const a = vs[vs.length - 1], b = vs[0];   // vs is newest-first from combos()
-    return `
-  <h2>Delta \u2014 ${esc(modeKey(b))} minus ${esc(modeKey(a))}</h2>
-  <div class="warn">Per-cell <b>p50 difference</b> on a diverging scale centred on zero. Cells
-  missing either mode are hatched rather than coloured, so an unmeasured pair cannot read as
-  "no change".</div>
-  ${buildCompareHTML(nodes, a.fleet.matrix, b.fleet.matrix)}`;
-  })() : '';
-
-  return `<!doctype html><html><head><meta charset="utf-8">
-  <title>Latency Report \u2014 all modes</title>
-  <style>
+/** The report stylesheet - extracted for reuse in the in-app view. */
+export const REPORT_CSS = `
   body{background:#0d1117;color:#e6edf3;font-family:system-ui,-apple-system,sans-serif;padding:22px;margin:0}
   h1{font-size:19px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 6px;color:#e6edf3}
   h3{font-size:13px}
@@ -253,7 +208,7 @@ export function buildCombinedReportHTML(views) {
     border:1px solid #30363d;border-left:3px solid #58a6ff;border-radius:6px;color:#adbac7;line-height:1.6}
   .method summary{font-size:13px;color:#58a6ff;cursor:pointer;font-weight:600;list-style:none}
   .method summary::-webkit-details-marker{display:none}
-  .method summary::before{content:'▶';display:inline-block;margin-right:6px;font-size:10px}
+  .method summary::before{content:'\u25b6';display:inline-block;margin-right:6px;font-size:10px}
   .method[open] summary::before{transform:rotate(90deg)}
   .method dt{color:#e6edf3;font-weight:600;margin-top:6px}.method dd{margin:0 0 0 14px}
   .method code{background:#0d1117;padding:1px 4px;border-radius:3px;color:#79c0ff}
@@ -266,8 +221,45 @@ export function buildCombinedReportHTML(views) {
   .heat th.sel-row,.heat th.sel-col{background:#243b53;color:#e6edf3}
   #lat-table tr.sel-src{background:#132a3f}#lat-table tr.sel-dst{background:#12301c}
   #lat-table tr.sel-both{background:#3a2d10}
-  </style></head><body>
-  <h1>Latency Report \u2014 all modes</h1>
+`;
+
+/**
+ * Build the report body HTML - everything between <body> and </body> except scripts.
+ * Reusable both in the standalone document and the in-app overlay.
+ * @param {Array<{kind:string,variation:string,unix?:number,fleet:object}>} views
+ */
+export function buildCombinedReportBody(views) {
+  const vs = (views || []).filter((v) => v && v.fleet && (v.fleet.nodes || []).length);
+  const gen = new Date().toISOString();
+  if (!vs.length) {
+    return `<h1>Latency Report</h1><p>No measurements yet \u2014 run a campaign first.</p>`;
+  }
+  const nodes = vs[0].fleet.nodes;
+  const region = vs[0].fleet.region || '?';
+  const { rows, best } = collate(vs);
+  const modeList = vs.map((v) => modeKey(v));
+  const allP50 = rows.map((r) => r.cell.p50).filter((v) => v != null);
+  const scale = {
+    mn: allP50.length ? Math.min(...allP50) : 0,
+    mx: allP50.length ? Math.max(...allP50) : 1,
+  };
+
+  const sections = vs.map((v) => `
+  <h2>${esc(modeKey(v))} \u2014 ${v.kind === 'mcast' ? 'one-way' : 'round-trip (RTT)'}</h2>
+  ${methodology(v)}
+  ${modeHeatmap(v, scale)}`).join('\n');
+
+  const delta = vs.length >= 2 ? (() => {
+    const a = vs[vs.length - 1], b = vs[0];
+    return `
+  <h2>Delta \u2014 ${esc(modeKey(b))} minus ${esc(modeKey(a))}</h2>
+  <div class="warn">Per-cell <b>p50 difference</b> on a diverging scale centred on zero. Cells
+  missing either mode are hatched rather than coloured, so an unmeasured pair cannot read as
+  "no change".</div>
+  ${buildCompareHTML(nodes, a.fleet.matrix, b.fleet.matrix)}`;
+  })() : '';
+
+  return `<h1>Latency Report \u2014 all modes</h1>
   <div class="meta">Region: ${esc(region)} \u00b7 Nodes: ${nodes.length} \u00b7 Modes: ${esc(modeList.join(', '))} \u00b7 Measurements: ${rows.length} \u00b7 Generated: ${esc(gen)}</div>
   ${ages(rows)}
 
@@ -281,76 +273,102 @@ export function buildCombinedReportHTML(views) {
   ${delta}
 
   <h2>All measured latencies \u2014 every mode</h2>
-  ${latencyTable(rows)}
+  ${latencyTable(rows)}`;
+}
 
-  <script>
-  (function () {
-    // Sorting: unit-aware. Backslashes are doubled because this lives inside a
-    // template literal, where a lone \\d would be eaten by escape processing.
-    function sortKey(s) {
-      const u = s.match(/^([\\d.]+)\\s*(ms|s|\u00b5s|\u03bcs)$/);
-      if (u) { const v = parseFloat(u[1]); return u[2] === 's' ? v*1e6 : u[2] === 'ms' ? v*1e3 : v; }
-      const p = s.match(/^([\\d.]+)%$/); if (p) return parseFloat(p[1]);
-      if (/^\\d+(\\.\\d+)?$/.test(s)) return parseFloat(s);
-      return NaN;
-    }
-    document.querySelectorAll('table.sortable').forEach((table) => {
-      const dir = {};
-      table.querySelectorAll('tr:first-child th').forEach((th, col) => {
-        th.addEventListener('click', () => {
-          const rows = [...table.querySelectorAll('tr')].slice(1);
-          const asc = !(dir[col] = !dir[col]);
-          rows.sort((a, b) => {
-            const x = (a.cells[col] || {}).textContent?.trim() ?? '';
-            const y = (b.cells[col] || {}).textContent?.trim() ?? '';
-            const nx = sortKey(x), ny = sortKey(y);
-            const c = (!isNaN(nx) && !isNaN(ny)) ? nx - ny
-              : x.localeCompare(y, undefined, { numeric: true });
-            return asc ? c : -c;
-          });
-          rows.forEach((r) => table.appendChild(r));
+/**
+ * Self-contained interaction handler for sorting and cross-table IP selection.
+ * Scoped to `root` - uses root.querySelectorAll, not document.querySelectorAll.
+ * No closure over module scope, no imports - safe to serialise with .toString().
+ */
+export function reportInteractions(root) {
+  // Sorting: unit-aware.
+  function sortKey(s) {
+    var u = s.match(/^([\d.]+)\s*(ms|s|\u00b5s|\u03bcs)$/);
+    if (u) { var v = parseFloat(u[1]); return u[2] === 's' ? v*1e6 : u[2] === 'ms' ? v*1e3 : v; }
+    var p = s.match(/^([\d.]+)%$/); if (p) return parseFloat(p[1]);
+    if (/^\d+(\.\d+)?$/.test(s)) return parseFloat(s);
+    return NaN;
+  }
+  root.querySelectorAll('table.sortable').forEach(function(table) {
+    var dir = {};
+    table.querySelectorAll('tr:first-child th').forEach(function(th, col) {
+      th.addEventListener('click', function() {
+        var rows = Array.prototype.slice.call(table.querySelectorAll('tr'), 1);
+        var asc = !(dir[col] = !dir[col]);
+        rows.sort(function(a, b) {
+          var x = (a.cells[col] || {}).textContent ? a.cells[col].textContent.trim() : '';
+          var y = (b.cells[col] || {}).textContent ? b.cells[col].textContent.trim() : '';
+          var nx = sortKey(x), ny = sortKey(y);
+          var c = (!isNaN(nx) && !isNaN(ny)) ? nx - ny
+            : x.localeCompare(y, undefined, { numeric: true });
+          return asc ? c : -c;
         });
+        rows.forEach(function(r) { table.appendChild(r); });
       });
     });
+  });
 
-    // Cross-table selection by instance IP, spanning every mode section.
-    const sel = new Set();
-    function paint() {
-      document.querySelectorAll('#inv-table tr[data-ip]').forEach((tr) =>
-        tr.classList.toggle('sel', sel.has(tr.dataset.ip)));
-      document.querySelectorAll('table.heat td, table.heat th').forEach((el) => {
-        el.classList.toggle('sel-row', !!el.dataset.rowIp && sel.has(el.dataset.rowIp));
-        el.classList.toggle('sel-col', !!el.dataset.colIp && sel.has(el.dataset.colIp));
-      });
-      document.querySelectorAll('#lat-table tr[data-src]').forEach((tr) => {
-        const s = sel.has(tr.dataset.src), d = sel.has(tr.dataset.dst);
-        tr.classList.toggle('sel-both', s && d);
-        tr.classList.toggle('sel-src', s && !d);
-        tr.classList.toggle('sel-dst', d && !s);
-      });
-      const info = document.getElementById('selinfo');
+  // Cross-table selection by instance IP, spanning every mode section.
+  var sel = new Set();
+  function paint() {
+    root.querySelectorAll('#inv-table tr[data-ip]').forEach(function(tr) {
+      tr.classList.toggle('sel', sel.has(tr.dataset.ip));
+    });
+    root.querySelectorAll('table.heat td, table.heat th').forEach(function(el) {
+      el.classList.toggle('sel-row', !!el.dataset.rowIp && sel.has(el.dataset.rowIp));
+      el.classList.toggle('sel-col', !!el.dataset.colIp && sel.has(el.dataset.colIp));
+    });
+    root.querySelectorAll('#lat-table tr[data-src]').forEach(function(tr) {
+      var s = sel.has(tr.dataset.src), d = sel.has(tr.dataset.dst);
+      tr.classList.toggle('sel-both', s && d);
+      tr.classList.toggle('sel-src', s && !d);
+      tr.classList.toggle('sel-dst', d && !s);
+    });
+    var info = root.querySelector('#selinfo');
+    if (info) {
       info.textContent = sel.size
-        ? sel.size + ' instance' + (sel.size > 1 ? 's' : '') + ' selected: ' + [...sel].join(', ')
+        ? sel.size + ' instance' + (sel.size > 1 ? 's' : '') + ' selected: ' + Array.from(sel).join(', ')
         : 'Click an IP anywhere to highlight that instance everywhere.';
     }
-    const toggle = (ip) => { if (!ip) return; sel.has(ip) ? sel.delete(ip) : sel.add(ip); paint(); };
-    document.querySelectorAll('#inv-table tr[data-ip]').forEach((tr) => {
-      tr.style.cursor = 'pointer';
-      tr.addEventListener('click', () => toggle(tr.dataset.ip));
+  }
+  var toggle = function(ip) { if (!ip) return; sel.has(ip) ? sel.delete(ip) : sel.add(ip); paint(); };
+  root.querySelectorAll('#inv-table tr[data-ip]').forEach(function(tr) {
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', function() { toggle(tr.dataset.ip); });
+  });
+  root.querySelectorAll('table.heat th[data-row-ip], table.heat th[data-col-ip]').forEach(function(th) {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', function() { toggle(th.dataset.rowIp || th.dataset.colIp); });
+  });
+  root.querySelectorAll('#lat-table tr[data-src]').forEach(function(tr) {
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', function(ev) {
+      toggle(ev.target.cellIndex === 3 ? tr.dataset.dst : tr.dataset.src);
     });
-    document.querySelectorAll('table.heat th[data-row-ip], table.heat th[data-col-ip]').forEach((th) => {
-      th.style.cursor = 'pointer';
-      th.addEventListener('click', () => toggle(th.dataset.rowIp || th.dataset.colIp));
-    });
-    document.querySelectorAll('#lat-table tr[data-src]').forEach((tr) => {
-      tr.style.cursor = 'pointer';
-      tr.addEventListener('click', (ev) => {
-        // Column order: 0 mode, 1 src IP, 2 src role, 3 dst IP, ...
-        toggle(ev.target.cellIndex === 3 ? tr.dataset.dst : tr.dataset.src);
-      });
-    });
-    document.getElementById('selclear').addEventListener('click', () => { sel.clear(); paint(); });
-    paint();
-  })();
-  </script></body></html>`;
+  });
+  var clearBtn = root.querySelector('#selclear');
+  if (clearBtn) clearBtn.addEventListener('click', function() { sel.clear(); paint(); });
+  paint();
+}
+
+/**
+ * Build the combined report as a self-contained HTML document.
+ * @param {Array<{kind:string,variation:string,unix?:number,fleet:object}>} views
+ */
+export function buildCombinedReportHTML(views) {
+  const vs = (views || []).filter((v) => v && v.fleet && (v.fleet.nodes || []).length);
+  if (!vs.length) {
+    return `<!doctype html><html><head><meta charset="utf-8"><title>Latency Report</title></head>`
+      + `<body style="background:#0d1117;color:#e6edf3;font-family:system-ui;padding:24px">`
+      + `<h1>Latency Report</h1><p>No measurements yet \u2014 run a campaign first.</p></body></html>`;
+  }
+
+  const body = buildCombinedReportBody(views);
+
+  return `<!doctype html><html><head><meta charset="utf-8">
+  <title>Latency Report \u2014 all modes</title>
+  <style>${REPORT_CSS}</style></head><body>
+  ${body}
+  <script>(${reportInteractions.toString()})(document);</script></body></html>`;
 }
