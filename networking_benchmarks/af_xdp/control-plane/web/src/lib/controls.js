@@ -48,6 +48,11 @@ const CSS = `
 .cp-btn:hover{background:#30363d;color:#fff}
 .cp-btn:active,.cp-btn.running{background:rgba(240,136,62,.22);color:#f0883e;border-color:#f0883e}
 .cp-btn:disabled{opacity:.4;cursor:not-allowed;color:#6e7681;background:#1a1f26;border-color:#21262d}
+.cp-btn-sm{padding:3px 7px;font-size:11px}
+.cp-target-info{color:#8b949e;font:12px inherit;flex:1}
+.cp-target-info.active{color:#ffd700}
+.cp-presets{gap:4px}
+.cp-cost-hint{color:#f0883e;font:10px inherit;margin-left:4px}
 .cp-icon{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;padding:4px 9px;cursor:pointer;font:600 14px inherit;line-height:1;flex:0 0 auto}
 .cp-icon:hover{background:#30363d;color:#fff}
 .cp-num{width:58px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 5px;font:12px inherit}
@@ -62,6 +67,7 @@ const CSS = `
 
 import { enhancePanel, foldAllPanels, resetAllPanels } from './2d/panels.js';
 import { esc } from './2d/palette.js';
+import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, countPairs } from './pairs.js';
 
 export function mountControls(host, opts = {}) {
   const { onSetMode, onToggleLive, onSelectView, onRun, onPickResult, onHeartbeat, onReport } = opts;
@@ -88,6 +94,13 @@ export function mountControls(host, opts = {}) {
         <div class="row"><span class="cp-lbl">Show</span>
           <select class="cp-sel" data-view><option value="">(no data yet)</option></select>
           <button class="cp-icon" data-report title="Download report (heatmap + all latencies) for the shown run">\u2913</button>
+        </div>
+        <div class="cp-hr"></div>
+        <div data-target-block>
+          <div class="row"><span class="cp-section">Target Set</span></div>
+          <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span><button class="cp-btn cp-btn-sm" data-clear-targets style="display:none">Clear</button></div>
+          <div class="row"><span class="cp-lbl">Scope</span><select class="cp-sel" data-scope></select></div>
+          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">Same PG</button><button class="cp-btn cp-btn-sm" data-preset="az">Same AZ</button><button class="cp-btn cp-btn-sm" data-preset="vpc">Same VPC</button><button class="cp-btn cp-btn-sm" data-preset="region">Same Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm" data-preset="clear">Clear</button></div>
         </div>
         <div class="cp-hr"></div>
         <div class="row center"><span class="cp-section">Test Latency</span></div>
@@ -260,6 +273,38 @@ export function mountControls(host, opts = {}) {
   // Download report (heatmap + all latencies) for the currently-shown run.
   $('[data-report]').addEventListener('click', () => onReport && onReport());
 
+  // ── Target set: scope select, presets, clear ────────────────────────────────
+  const { onScopeChange, onPreset, onClearTargets } = opts;
+  const scopeSel = $('[data-scope]');
+  const targetInfo = $('[data-target-info]');
+  const clearBtn = $('[data-clear-targets]');
+  // Populate scope select from SCOPES.
+  scopeSel.innerHTML = SCOPES.map((s) =>
+    `<option value="${s.id}">${s.label}${s.id === 'fanin' ? ' (costly)' : ''}</option>`
+  ).join('');
+  scopeSel.addEventListener('change', () => { onScopeChange && onScopeChange(scopeSel.value); });
+  clearBtn.addEventListener('click', () => { onClearTargets && onClearTargets(); });
+  // Presets call onPreset with an array of instance IDs.
+  el.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
+    onPreset && onPreset(b.dataset.preset);
+  }));
+
+  let _lastTargetState = { count: 0, pairs: 0, scope: 'among', totalNodes: 0 };
+  const paintTargetBlock = ({ count, pairs, scope: sc, totalNodes }) => {
+    _lastTargetState = { count, pairs, scope: sc, totalNodes };
+    scopeSel.value = sc;
+    if (count === 0) {
+      const fullPairs = countPairs(totalNodes, 0, 'among');
+      targetInfo.textContent = `No selection \u2014 full mesh (${fullPairs} pairs)`;
+      targetInfo.classList.remove('active');
+      clearBtn.style.display = 'none';
+    } else {
+      targetInfo.textContent = `${count} selected \u00b7 ${pairs} pairs`;
+      targetInfo.classList.add('active');
+      clearBtn.style.display = '';
+    }
+  };
+
   // ── Live heartbeat: choose a mode -> App re-runs it every interval (min 30s) ──
   const hbIntervalSec = () => {
     const input = $('[data-hb-interval]');
@@ -299,6 +344,7 @@ export function mountControls(host, opts = {}) {
     },
     // combos: [{kind,variation,unix}]; sel: {kind,variation} currently shown
     setCombos(combos, sel) { renderCombos(combos, sel); },
+    setTargets(state) { paintTargetBlock(state); },
     dispose() { el.remove(); },
   };
 }

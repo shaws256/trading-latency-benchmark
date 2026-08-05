@@ -23,6 +23,8 @@ func main() {
 	addr := flag.String("addr", envOr("CP_HTTP_ADDR", ":8080"), "HTTP listen address")
 	webDir := flag.String("web", envOr("CP_WEB_DIR", ""), "static web dir (default: auto-detect web/dist)")
 	staleSec := flag.Int64("stale", 20, "seconds without a heartbeat before a node is marked offline")
+	dbPath := flag.String("db-path", envOr("CP_DB_PATH", "/var/lib/af-xdp-cp/measurements.db"), "SQLite path (empty disables persistence)")
+	retentionDays := flag.Int("retention-days", 7, "measurement retention in days")
 	flag.Parse()
 
 	natsOpts := []nats.Option{
@@ -45,11 +47,28 @@ func main() {
 	reg := NewRegistry(*staleSec)
 	coll := NewCollector()
 	hub := NewHub()
-	if err := startIngest(nc, reg, coll, hub); err != nil {
+
+	// Open SQLite persistence (nil if --db-path="").
+	var store *Store
+	if *dbPath != "" {
+		var err error
+		store, err = OpenStore(*dbPath, *retentionDays)
+		if err != nil {
+			log.Fatalf("store: %v", err)
+		}
+		defer store.Close()
+		// Seed the collector from disk BEFORE the HTTP listener starts so
+		// reconnecting browsers see historical data and we don't flood SSE.
+		if err := store.SeedCollector(coll, edgeHistoryLen); err != nil {
+			log.Printf("store: seed: %v (continuing with empty matrix)", err)
+		}
+	}
+
+	if err := startIngest(nc, reg, coll, hub, store); err != nil {
 		log.Fatalf("ingest: %v", err)
 	}
 	errReg := NewErrorRegistry(nc, hub)
-	orch, err := NewOrchestrator(nc, reg, hub)
+	orch, err := NewOrchestrator(nc, reg, hub, store)
 	if err != nil {
 		log.Fatalf("orchestrator: %v", err)
 	}

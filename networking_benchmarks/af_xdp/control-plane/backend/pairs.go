@@ -187,3 +187,16 @@ func countPairs(n, k int, scope string) int {
 		return k * (k - 1)
 	}
 }
+
+// scopeName is the scope as persisted in the runs table: "full" for a full mesh,
+// otherwise the requested scope id. Distinct from scopeDescription, which is
+// prose for the UI log.
+func scopeName(scope string, k int) string {
+	if k == 0 {
+		return "full"
+	}
+	if scope == "" {
+		return ScopeAmong
+	}
+	return scope
+}

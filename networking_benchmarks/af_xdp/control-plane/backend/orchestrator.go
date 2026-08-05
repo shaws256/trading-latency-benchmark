@@ -19,9 +19,10 @@ import (
 // CmdID. It also runs multi-node campaigns that encode the hard constraints
 // learned operationally (serial senders for ucast; mode barriers; clock gates).
 type Orchestrator struct {
-	nc  *nats.Conn
-	reg *Registry
-	hub *Hub
+	nc    *nats.Conn
+	reg   *Registry
+	hub   *Hub
+	store *Store // durable measurement history; nil when persistence is disabled
 
 	mu      sync.Mutex
 	pending map[string]chan proto.CommandResult
@@ -34,8 +35,9 @@ type Orchestrator struct {
 
 // NewOrchestrator creates an orchestrator and subscribes to fleet.result.* so
 // it can correlate results by CmdID regardless of which subscription delivered the command.
-func NewOrchestrator(nc *nats.Conn, reg *Registry, hub *Hub) (*Orchestrator, error) {
-	o := &Orchestrator{nc: nc, reg: reg, hub: hub, pending: map[string]chan proto.CommandResult{}}
+func NewOrchestrator(nc *nats.Conn, reg *Registry, hub *Hub, store *Store) (*Orchestrator, error) {
+	o := &Orchestrator{nc: nc, reg: reg, hub: hub, store: store,
+		pending: map[string]chan proto.CommandResult{}}
 	if _, err := nc.Subscribe(proto.SubjectResultWildcard, o.onResult); err != nil {
 		return nil, err
 	}
@@ -213,6 +215,24 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 		log.Printf("ucast/%s: skipping offline/unknown selected nodes: %v", p.Variation, skipped)
 	}
 	o.hub.Emit("job", ev)
+
+	// Anchor the campaign in the runs table so its measurements are attributable
+	// to it later. Telemetry arrives on the ingest goroutine, which reads the
+	// current run id from the store.
+	targetJSON := ""
+	if len(p.Nodes) > 0 {
+		if b, err := json.Marshal(p.Nodes); err == nil {
+			targetJSON = string(b)
+		}
+	}
+	runID, rErr := o.store.InsertRun("ucast", p.Variation, scopeName(p.Scope, len(p.Nodes)), targetJSON, total,
+		map[string]any{"count": p.Count, "rate": p.Rate, "warmup": p.Warmup, "max_loss_pct": p.MaxLossPct})
+	if rErr != nil {
+		log.Printf("store: could not open run row: %v", rErr)
+	}
+	o.store.SetCurrentRun(runID)
+	defer o.store.SetCurrentRun(0)
+
 	log.Printf("campaign ucast/%s — %s: %d pairs over %d source(s), %d node(s) to converge, max %d concurrent per source",
 		p.Variation, desc, total, len(nodes), len(prep), p.MaxParallel)
 
@@ -449,6 +469,9 @@ func (o *Orchestrator) RunUcastMatrix(p UcastMatrixParams) {
 	o.hub.Emit("job", map[string]any{"status": "done", "kind": "ucast", "variation": p.Variation,
 		"done": atomic.LoadInt64(&done), "total": total,
 		"rejected_loss": rej, "max_loss_pct": p.MaxLossPct, "timing": timing})
+	// pairs_ok excludes loss-gate rejections: those ran but produced no usable
+	// numbers, so counting them would overstate the campaign's coverage.
+	o.store.FinishRun(runID, int(atomic.LoadInt64(&done)-rej))
 	log.Printf("TIMING ucast/%s total=%dms prepare=%dms client_transition=%dms measure=%dms restore=%dms drain=%dms overhead=%.1f%%",
 		p.Variation, msTotal, msPrepare, msClientTransition, msMeasure, msRestore, msRestoreDrain,
 		100*float64(msPrepare+msClientTransition+msRestore)/float64(max64(msTotal, 1)))

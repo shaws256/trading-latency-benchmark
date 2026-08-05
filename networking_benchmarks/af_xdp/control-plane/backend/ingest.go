@@ -15,7 +15,7 @@ var reregisterCmd, _ = json.Marshal(proto.Command{Type: proto.CmdReregister})
 
 // startIngest wires the agent-outbound streams into the registry, collector,
 // and SSE hub. This is the read side; the orchestrator is the write side.
-func startIngest(nc *nats.Conn, reg *Registry, coll *Collector, hub *Hub) error {
+func startIngest(nc *nats.Conn, reg *Registry, coll *Collector, hub *Hub, store *Store) error {
 	if _, err := nc.Subscribe(proto.SubjectRegister, func(m *nats.Msg) {
 		var r proto.Registration
 		if json.Unmarshal(m.Data, &r) == nil {
@@ -49,6 +49,7 @@ func startIngest(nc *nats.Conn, reg *Registry, coll *Collector, hub *Hub) error 
 		if json.Unmarshal(m.Data, &t) == nil {
 			e := coll.Apply(t)
 			hub.Emit("edge", e)
+			RecordMeasurement(store, t, store.CurrentRun())
 		}
 	}); err != nil {
 		return err

@@ -380,17 +380,29 @@ export function mountTopology3D(container, fleet, opts = {}) {
   function render(hover) {
     const hasSel = selected.size > 0;
     const vis = hasSel ? neighborsOf(selected) : null;
+    const tids = opts.targetIds || new Set();
+    const hasTargets = tids.size > 0;
     nodeMeshes.forEach((m, i) => {
       m.visible = !hasSel || vis.has(i);
       const sel = selected.has(i), e = nodeEdges[i];
+      const node = fleet.nodes[i];
+      const iid = node.instance_id || node.private_ip;
+      const targeted = tids.has(iid);
       e.front.visible = e.back.visible = m.visible;
       if (sel) {
         m.material.color.set(GOLD); m.material.emissive.set(GOLD).multiplyScalar(0.45);
         e.front.material.color.set(GOLD); e.back.material.color.set(GOLD);
+      } else if (targeted) {
+        // Gold wireframe outline for targeted nodes (distinct from selected).
+        m.material.color.copy(m.userData.baseColor);
+        m.material.emissive.copy(m.userData.baseEmissive).multiplyScalar(i === hover ? 1.6 : 1);
+        e.front.material.color.set(GOLD); e.back.material.color.set(GOLD);
+        e.front.material.opacity = 1.0; e.back.material.opacity = 0.4;
       } else {
         m.material.color.copy(m.userData.baseColor);
         m.material.emissive.copy(m.userData.baseEmissive).multiplyScalar(i === hover ? 1.6 : 1);
         e.front.material.color.set(EDGE_GREY); e.back.material.color.set(EDGE_GREY);
+        e.front.material.opacity = 0.9; e.back.material.opacity = 0.20;
       }
     });
     edges.forEach(e => {
@@ -470,6 +482,13 @@ export function mountTopology3D(container, fleet, opts = {}) {
 
   renderer.domElement.addEventListener('click', (ev) => {
     const i = pick(ev); if (i === -1) return;
+    // Shift+click = target-set toggle (1.5).
+    if (ev.shiftKey) {
+      const node = fleet.nodes[i];
+      const instanceId = node.instance_id || node.private_ip;
+      if (opts.onToggleTarget) opts.onToggleTarget(instanceId);
+      return;
+    }
     if (selected.has(i)) { selected.delete(i); unpinPanel(i); }
     else { selected.add(i); pinPanel(i); nodeTip.classList.remove('visible'); }
     render(hoverIdx);
@@ -490,6 +509,7 @@ export function mountTopology3D(container, fleet, opts = {}) {
     + '<div class="hint-row"><b>Hover</b> a node \u2014 highlight its edges + latency table</div>'
     + '<div class="hint-row"><b>Hover</b> a boundary plane \u2014 draw contours to its member nodes</div>'
     + '<div class="hint-row"><b>Click</b> a node \u2014 select it + its 1-hop neighbours; click again to deselect</div>'
+    + '<div class="hint-row"><b>Shift+Click</b> a node \u2014 toggle target-set membership (gold outline)</div>'
     + '<div class="hint-row"><b>Deselect all</b> \u2014 restore the full view</div>'
     + '<div class="hint-row"><b>Drag</b> = rotate &middot; <b>scroll</b> = zoom &middot; <b>right-drag</b> = pan</div>'
     + '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold</div>'
