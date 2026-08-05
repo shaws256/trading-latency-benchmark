@@ -140,6 +140,37 @@ export function jitterColor(sigma, minSigma, maxSigma) {
 
 // p50 latency → green (#39d353) → orange (#f0883e) → red (#f85149).
 // Lower latency = greener. t=0 at minP50, t=1 at maxP50.
+// Cross-region pairs are millisecond-scale WAN hops. Mixing them into the
+// latency ramp compresses every microsecond-scale cell onto the green stop, so
+// they are excluded from the scale and drawn in this neutral grey instead.
+export const CROSS_REGION_COLOR = 'rgb(110,118,129)';
+
+/** True when two endpoints sit in different regions. Unknown region = same. */
+export function isCrossRegion(a, b) {
+  const ra = a && a.region, rb = b && b.region;
+  return !!(ra && rb && ra !== rb);
+}
+
+/**
+ * p50 min/max over intra-region cells only. Each cell is {a, b, p50} where a
+ * and b are the endpoint nodes. Null and zero p50 are ignored.
+ */
+export function latencyRange(cells) {
+  let mn = Infinity, mx = -Infinity;
+  for (const c of cells || []) {
+    if (!c || c.p50 == null || !(c.p50 > 0)) continue;
+    if (isCrossRegion(c.a, c.b)) continue;
+    if (c.p50 < mn) mn = c.p50;
+    if (c.p50 > mx) mx = c.p50;
+  }
+  return (mn === Infinity) ? { mn: 0, mx: 0 } : { mn, mx };
+}
+
+/** Latency ramp for intra-region cells, neutral grey for cross-region ones. */
+export function cellColor(p50, mn, mx, crossRegion) {
+  return crossRegion ? CROSS_REGION_COLOR : latencyColor(p50, mn, mx);
+}
+
 export function latencyColor(p50, minP50, maxP50) {
   const t = (maxP50 === minP50) ? 0 : Math.max(0, Math.min(1, (p50 - minP50) / (maxP50 - minP50)));
   const stops = [[57, 211, 83], [240, 136, 62], [248, 81, 73]];

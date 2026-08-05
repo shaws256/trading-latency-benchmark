@@ -4,7 +4,7 @@
 // render at low base opacity (0.15) so the dominant fast-path edges stay legible.
 // Any edge touching a hovered or selected node always lifts to full opacity.
 
-import { fmtLat, edgeSigma, jitterColor, latencyColor, esc } from './palette.js';
+import { fmtLat, edgeSigma, jitterColor, cellColor, isCrossRegion, esc } from './palette.js';
 import { relativeAge, ageFade } from '../lineage.js';
 
 const EDGE_WIDTH = 2.5;
@@ -20,7 +20,8 @@ export function renderEdges(ctx) {
   const { fleet, matrix, N, root, svg, positions, edgeElements, edgeLabelEls, W, H } = ctx;
   const { minSigma, maxSigma, minP50, maxP50 } = ctx.ranges;
   // Edge colour = p50 latency (green = fast, red = slow) out of the global range.
-  const lc = (avg) => latencyColor(avg, minP50, maxP50);
+  const nodesArr = fleet.nodes || [];
+  const lc = (avg, i, j) => cellColor(avg, minP50, maxP50, isCrossRegion(nodesArr[i], nodesArr[j]));
   const jc = (sig) => jitterColor(sig, minSigma, maxSigma);  // kept for label colour
 
   // Reuse the pre-sorted allP50 from ctx.ranges (computed once in index.js)
@@ -42,7 +43,7 @@ export function renderEdges(ctx) {
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     line.setAttribute('x1', positions[i].x); line.setAttribute('y1', positions[i].y);
     line.setAttribute('x2', positions[j].x); line.setAttribute('y2', positions[j].y);
-    line.setAttribute('stroke', lc(avgP50));
+    line.setAttribute('stroke', lc(avgP50, i, j));
     line.setAttribute('stroke-width', EDGE_WIDTH);
     line.setAttribute('opacity', op);
     line.dataset.baseOp = op;
@@ -94,7 +95,7 @@ export function renderEdges(ctx) {
     const el = document.createElement('div'); el.className = 'edge-label';
     el.style.left = mx + 'px'; el.style.top = my + 'px';
     el.style.transform = 'translate(-50%,-50%) rotate(' + ang + 'deg)';
-    el.style.color = lc(avgP50);
+    el.style.color = lc(avgP50, i, j);
     el.textContent = fmtLat(avgP50) + ' \u00b1' + fmtLat(edgeSigma(ab, ba));
     el.style.opacity = '0'; el.style.pointerEvents = 'none';
     const ci = i, cj = j; edgeLabelEls.push({ el, i: ci, j: cj });

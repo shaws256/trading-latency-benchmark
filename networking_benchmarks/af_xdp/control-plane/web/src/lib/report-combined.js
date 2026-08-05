@@ -12,7 +12,7 @@
 //   - The overview grid, which does mix modes to show the freshest value per
 //     cell, says so, and badges every cell with the mode that produced it.
 
-import { fmtLat, latencyColor, esc } from './2d/palette.js';
+import { fmtLat, cellColor, isCrossRegion, esc } from './2d/palette.js';
 import { buildCompareHTML } from './report.js';
 
 /** Short per-mode badge: K/X for ucast kernel/xdp, C/I/K for mcast fwd modes. */
@@ -89,7 +89,7 @@ function overviewGrid(nodes, best, scale, tz) {
       const b = best.get(`${rn.private_ip}|${cn.private_ip}`);
       if (!b) { h += `<td class="na"${dat}>\u00b7</td>`; return; }
       const tip = `${fmtLat(b.cell.p50)} \u00b7 ${b.key} \u00b7 ${stampTz(b.unix, tz)}`;
-      h += `<td${dat} style="color:${latencyColor(b.cell.p50, mn, mx)};font-weight:700"`
+      h += `<td${dat} style="color:${cellColor(b.cell.p50, mn, mx, isCrossRegion(rn, cn))};font-weight:700"`
         + ` title="${esc(tip)}">${fmtLat(b.cell.p50)}`
         + `<span class="mode-badge">${badgeOf(b.key)}</span></td>`;
     });
@@ -114,7 +114,7 @@ function modeHeatmap(v, scale) {
       const dat = ` data-row-ip="${rip}" data-col-ip="${cip}"`;
       const c = matrix[i] && matrix[i][j];
       if (!c) { h += `<td class="na"${dat}>\u00b7</td>`; return; }
-      h += `<td${dat} style="color:${latencyColor(c.p50, mn, mx)};font-weight:700"`
+      h += `<td${dat} style="color:${cellColor(c.p50, mn, mx, isCrossRegion(rn, cn))};font-weight:700"`
         + ` title="${esc(fmtLat(c.p50) + ' \u00b7 ' + key)}">${fmtLat(c.p50)}</td>`;
     });
     h += '</tr>';
@@ -283,7 +283,9 @@ export function buildCombinedReportBody(views, tz) {
   const region = vs[0].fleet.region || '?';
   const { rows, best } = collate(vs);
   const modeList = vs.map((v) => modeKey(v));
-  const allP50 = rows.map((r) => r.cell.p50).filter((v) => v != null);
+  // Cross-region rows are millisecond-scale and stay out of the colour scale.
+  const allP50 = rows.filter((r) => !isCrossRegion(r.src, r.dst))
+    .map((r) => r.cell.p50).filter((v) => v != null);
   const scale = {
     mn: allP50.length ? Math.min(...allP50) : 0,
     mx: allP50.length ? Math.max(...allP50) : 1,

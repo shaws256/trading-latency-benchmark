@@ -209,8 +209,11 @@ export class FleetStack extends cdk.Stack {
     sg.addIngressRule(Peer.anyIpv4(), Port.tcp(22), 'SSH');
     sg.addIngressRule(sg, Port.allTraffic(), 'All intra-group traffic');
     if (props.peerVpcCidr) {
-      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.udp(dataPort), 'UDP data from peer region');
-      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.udp(CONTROL_PORT), 'UDP control from peer region');
+      // Mirror the intra-group allowance for the peer VPC. An SG self-reference
+      // does not span cross-region peering, so enumerating only the data and
+      // control ports left the rtt echo port (19020) closed: requests arrived,
+      // echoes were dropped, and every cross-region pair reported 100% loss.
+      sg.addIngressRule(Peer.ipv4(props.peerVpcCidr), Port.allTraffic(), 'All traffic from peer region');
     }
     this.sg = sg;
 

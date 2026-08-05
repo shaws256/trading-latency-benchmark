@@ -7,7 +7,7 @@
 //           edgeElements, edgeLabelEls, disposers, unpinAll }
 
 import { CSS } from './styles.js';
-import { edgeSigma } from './palette.js';
+import { edgeSigma, isCrossRegion} from './palette.js';
 import { computePositions } from './layout.js';
 import { renderContours } from './contours.js';
 import { renderEdges } from './edges.js';
@@ -40,7 +40,13 @@ export function mountTopology2D(container, fleet, opts = {}) {
 
   // ── global ranges ──────────────────────────────────────────────────────────
   const allP50 = [], allP99 = [], allSigma = [];
-  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) if (matrix[i] && matrix[i][j]) { allP50.push(matrix[i][j].p50); allP99.push(matrix[i][j].p99); }
+  // Cross-region cells are millisecond-scale; including them would crush every
+    // intra-region cell onto the green stop, so they stay out of the range.
+    const nodesArr = fleet.nodes || [];
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) if (matrix[i] && matrix[i][j]) {
+      if (isCrossRegion(nodesArr[i], nodesArr[j])) continue;
+      allP50.push(matrix[i][j].p50); allP99.push(matrix[i][j].p99);
+    }
   for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) { const ab = matrix[i] && matrix[i][j], ba = matrix[j] && matrix[j][i]; if (!ab && !ba) continue; allSigma.push(edgeSigma(ab, ba)); }
   // Loop-based min/max avoids stack overflow from Math.min(...100k+ element array).
   const arrMin = (a) => { let m = Infinity;  for (let k = 0; k < a.length; k++) if (a[k] < m) m = a[k]; return a.length ? m : 0; };
