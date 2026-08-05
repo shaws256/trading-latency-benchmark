@@ -114,7 +114,7 @@ export function mountControls(host, opts = {}) {
         <div data-targets-content style="display:none">
         <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
         <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
-          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm cp-cancel" data-cancel-targets title="Clear the target set">Cancel</button></div>
+          <div class="row cp-presets"><button class="cp-btn cp-btn-sm" data-preset="pg">PG</button><button class="cp-btn cp-btn-sm" data-preset="vpc">VPC</button><button class="cp-btn cp-btn-sm" data-preset="az">AZ</button><button class="cp-btn cp-btn-sm" data-preset="region">Region</button><button class="cp-btn cp-btn-sm" data-preset="all">All</button><button class="cp-btn cp-btn-sm cp-cancel" data-cancel-targets title="Clear the target set">Deselect</button></div>
         <div class="row"><select class="cp-sel" data-scope></select></div>
         </div>
       </div>
@@ -253,11 +253,30 @@ export function mountControls(host, opts = {}) {
   const paintLive = () => { liveBtn.classList.toggle('on', liveOn); liveBtn.textContent = liveOn ? '\u25CF Live' : 'Live'; };
   // Live mode swaps the panel body: hide the Show row + one-shot Run Tests, show
   // the heartbeat section (distinct settings). Clears any active heartbeat on exit.
+  // Fold state is authoritative: any path that changes section visibility must
+  // re-apply it, or a folded panel springs open on the next live update. Reads
+  // storage directly so it does not depend on declaration order.
+  function applyFoldState() {
+    let st = {};
+    try { st = JSON.parse(localStorage.getItem('cp-fold-state')) || {}; } catch { st = {}; }
+    const pairs = [['targets', '[data-fold-targets]', '[data-targets-content]'],
+                   ['latency', '[data-fold-latency]', '[data-latency-content]']];
+    for (const [key, btnSel, contentSel] of pairs) {
+      const btn = el.querySelector(btnSel), content = el.querySelector(contentSel);
+      if (!btn || !content) continue;
+      const open = !!st[key];
+      content.style.display = open ? '' : 'none';
+      btn.classList.toggle('collapsed', !open);
+      btn.textContent = open ? '\u2212' : '+';
+    }
+  }
+
   function syncSections() {
-    const nrm = $('[data-normal]'), lv = $('[data-live-section]');
-    if (nrm) nrm.style.display = liveOn ? 'none' : '';
+    el.querySelectorAll('[data-normal]').forEach((n) => { n.style.display = liveOn ? 'none' : ''; });
+    const lv = $('[data-live-section]');
     if (lv) lv.style.display = liveOn ? '' : 'none';
     if (!liveOn && activeHb) { activeHb.classList.remove('running'); activeHb = null; }
+    applyFoldState();
   }
   paintMode(); paintLive(); syncSections();
 

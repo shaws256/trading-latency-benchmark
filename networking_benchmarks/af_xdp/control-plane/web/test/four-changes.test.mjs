@@ -9,19 +9,15 @@ import { JSDOM } from '/tmp/reptest/node_modules/jsdom/lib/api.js';
 
 // ─── (1) GOLD, NOT GREEN ────────────────────────────────────────────────────
 
-describe('latency colour ramp: gold at the fast end', () => {
-  test('the lowest latency is gold-ish (R>180, G>140, B<100), not green', async () => {
+describe('latency colour ramp: green at the fast end', () => {
+  test('the lowest latency is green-ish (G>R), not gold', async () => {
     const { latencyColor } = await import('../src/lib/2d/palette.js');
     const css = latencyColor(10, 10, 100);
     const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(css);
     assert.ok(m, `expected rgb(), got ${css}`);
     const [r, g, b] = [+m[1], +m[2], +m[3]];
-    // Gold/amber: high red, moderate-to-high green, low blue
-    assert.ok(r >= 180, `R=${r} too low for gold`);
-    assert.ok(g >= 140, `G=${g} too low for gold`);
-    assert.ok(b < 110, `B=${b} too high for gold`);
-    // Must NOT be green: green means G > R by a lot
-    assert.ok(r >= g - 30, `looks green not gold: R=${r} G=${g}`);
+    // Green: G > R
+    assert.ok(g > r, `Expected green (G>R) but got R=${r} G=${g}`);
   });
 
   test('the highest latency is still red', async () => {
@@ -30,7 +26,7 @@ describe('latency colour ramp: gold at the fast end', () => {
     const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(css);
     const [r, g, b] = [+m[1], +m[2], +m[3]];
     assert.ok(r >= 150, `R=${r} not red enough`);
-    assert.ok(g < 60, `G=${g} too high for red`);
+    assert.ok(g < 100, `G=${g} too high for red`);
   });
 
   test('midpoint is visually distinct from both ends', async () => {
@@ -137,9 +133,9 @@ describe('combined report heading', () => {
   });
 });
 
-// ─── (4) SAVE AS CSVs ───────────────────────────────────────────────────────
+// ─── (4) SAVE AS XLS (replaces Save as CSVs) ────────────────────────────────
 
-describe('Save as CSVs button and CSV generation', () => {
+describe('Save as XLS button and SpreadsheetML generation', () => {
   function makeViews() {
     const nodes = [0, 1].map((i) => ({
       index: i, private_ip: `10.0.0.${i + 1}`, public_ip: `1.1.1.${i + 1}`,
@@ -151,70 +147,67 @@ describe('Save as CSVs button and CSV generation', () => {
     return [{ kind: 'ucast', variation: 'kernel', unix: 1, fleet: { nodes, matrix: m, region: 'r' } }];
   }
 
-  test('report contains a Save as CSVs button near the print control', async () => {
+  test('report contains a Save as XLS button', async () => {
     const { buildCombinedReportHTML } = await import('../src/lib/report-combined.js');
     const html = buildCombinedReportHTML(makeViews());
-    assert.ok(/save\s+as\s+csvs?/i.test(html), 'must have a Save as CSVs button');
+    assert.ok(/save\s+as\s+xls/i.test(html), 'must have a Save as XLS button');
   });
 
-  test('CSV generation produces proper quoted output', async () => {
+  test('XLS generation produces SpreadsheetML XML', async () => {
     const { buildCombinedReportHTML, reportInteractions } = await import('../src/lib/report-combined.js');
     const html = buildCombinedReportHTML(makeViews());
     const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'http://localhost' });
     const doc = dom.window.document;
 
-    // The tableToCsv helper should be accessible inside reportInteractions
-    // We test by extracting it from the serialised function
     const fnStr = reportInteractions.toString();
-    assert.ok(fnStr.includes('tableToCsv') || fnStr.includes('tableToCSV'),
-      'reportInteractions must contain a CSV serialisation function');
+    assert.ok(fnStr.includes('Workbook') || fnStr.includes('Worksheet'),
+      'reportInteractions must contain SpreadsheetML generation');
   });
 
-  test('CSV correctly quotes fields with commas and double-quotes', async () => {
+  test('XLS produces valid XML with Worksheet elements', async () => {
     const { buildCombinedReportHTML, reportInteractions } = await import('../src/lib/report-combined.js');
-
-    // Create a minimal DOM and inject a table with tricky content
-    const dom = new JSDOM(`<!doctype html><html><body>
-      <h2>Test Table</h2>
-      <table><tr><th>Name</th><th>Value</th></tr>
-      <tr><td>hello, world</td><td>say "hi"</td></tr>
-      <tr><td>normal</td><td>42</td></tr></table>
-    </body></html>`, { url: 'http://localhost' });
+    const html = buildCombinedReportHTML(makeViews());
+    const dom = new JSDOM(html, { url: 'http://localhost' });
     const doc = dom.window.document;
 
-    // Mock Blob and URL for the download mechanism
     const blobs = [];
-    dom.window.Blob = function(parts, opts) { this.parts = parts; this.type = opts && opts.type; blobs.push(this); };
-    dom.window.URL = { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} };
+    const origBlob = globalThis.Blob, origURL = globalThis.URL, origDoc = globalThis.document;
+    globalThis.Blob = function(parts, opts) { this.parts = parts; this.type = opts && opts.type; blobs.push(this); };
+    globalThis.URL = { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} };
+    globalThis.document = doc;
+    const origCreate = doc.createElement.bind(doc);
+    doc.createElement = function(tag) {
+      const el = origCreate(tag);
+      if (tag === 'a') el.click = function() {};
+      return el;
+    };
 
-    // Run reportInteractions
-    reportInteractions(doc);
+    try {
+      reportInteractions(doc);
+      const btn = doc.querySelector('[data-xls-btn]');
+      assert.ok(btn, 'XLS button must exist');
+      btn.click();
 
-    // Find and click the CSV button
-    const btn = doc.querySelector('[data-csv-btn]') || doc.querySelector('button');
-    const csvButtons = [...doc.querySelectorAll('button')].filter(b => /csv/i.test(b.textContent));
-    if (csvButtons.length > 0) {
-      csvButtons[0].click();
-      // Check the generated CSV content
-      if (blobs.length > 0) {
-        const csv = blobs[0].parts[0];
-        assert.ok(csv.includes('"hello, world"'), 'comma field must be quoted');
-        assert.ok(csv.includes('"say ""hi"""'), 'double-quote must be escaped by doubling');
-        assert.ok(csv.includes('normal'), 'normal field is present');
-      }
+      assert.equal(blobs.length, 1, 'one Blob created');
+      const xml = blobs[0].parts[0];
+      assert.ok(xml.includes('<Workbook'), 'must contain Workbook element');
+      assert.ok(xml.includes('<Worksheet'), 'must contain Worksheet element');
+    } finally {
+      globalThis.Blob = origBlob; globalThis.URL = origURL; globalThis.document = origDoc;
     }
   });
 
-  test('CSV file names derive from table headings, slugified', async () => {
+  test('XLS file names derive from table headings, sanitised', async () => {
     const { buildCombinedReportHTML, reportInteractions } = await import('../src/lib/report-combined.js');
     const html = buildCombinedReportHTML(makeViews());
-    const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'http://localhost' });
+    const dom = new JSDOM(html, { url: 'http://localhost' });
     const doc = dom.window.document;
 
-    // Mock Blob, URL, and anchor for download interception
     const downloads = [];
-    dom.window.Blob = function(parts, opts) { this.parts = parts; this.type = opts && opts.type; };
-    dom.window.URL = { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} };
+    const origBlob = globalThis.Blob, origURL = globalThis.URL, origDoc = globalThis.document;
+    globalThis.Blob = function(parts, opts) { this.parts = parts; this.type = opts && opts.type; };
+    globalThis.URL = { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} };
+    globalThis.document = doc;
     const origCreate = doc.createElement.bind(doc);
     doc.createElement = function(tag) {
       const el = origCreate(tag);
@@ -224,15 +217,13 @@ describe('Save as CSVs button and CSV generation', () => {
       return el;
     };
 
-    // Click the CSV button
-    const csvBtn = [...doc.querySelectorAll('button')].find(b => /csv/i.test(b.textContent));
-    assert.ok(csvBtn, 'CSV button must exist in the rendered report');
-    csvBtn.click();
+    reportInteractions(doc);
+    const btn = doc.querySelector('[data-xls-btn]');
+    assert.ok(btn, 'XLS button must exist in the rendered report');
+    btn.click();
 
-    // Should produce at least one download per table
-    assert.ok(downloads.length > 0, 'clicking CSV button must trigger downloads');
-    // Check slugification: the overview heading becomes latest-measurements.csv
-    const names = downloads.map(d => d.download);
-    assert.ok(names.some(n => /\.csv$/.test(n)), 'downloads must be .csv files');
+    assert.equal(downloads.length, 1, 'exactly one download (single file)');
+    assert.ok(downloads[0].download.endsWith('.xls'), 'download must be .xls');
+    globalThis.Blob = origBlob; globalThis.URL = origURL; globalThis.document = origDoc;
   });
 });

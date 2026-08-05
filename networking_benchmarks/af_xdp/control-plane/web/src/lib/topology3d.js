@@ -12,7 +12,7 @@ import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 // Shared, single-source-of-truth helpers (identical maths as the 2D map): number
 // formatting, per-edge jitter, latency→colour, capability→colour, fixed node size.
-import { fmtLat, edgeSigma, latencyColor, capabilityColor, buildCapabilityScale, nodeRadius3D, CAP_GRADIENT_CSS } from './2d/palette.js';
+import { fmtLat, edgeSigma, latencyColor, cellColor, capabilityColor, buildCapabilityScale, nodeRadius3D, CAP_GRADIENT_CSS } from './2d/palette.js';
 import { enhancePanel, placePanel, enhancePinned, buildBoundaryToggles, buildSummaryHTML, buildInstanceTypesHTML } from './2d/panels.js';
 import { nodeTipHTML } from './2d/tables.js';
 import { HIER, pathKeyOf, separateHierarchy } from './grouplayout.js';
@@ -46,6 +46,7 @@ export function mountTopology3D(container, fleet, opts = {}) {
   const arrMax = (a) => { let m=-Infinity; for(let k=0;k<a.length;k++) if(a[k]>m) m=a[k]; return a.length?m:0; };
   allP50.sort((a,b)=>a-b);
   const minP50=arrMin(allP50), maxP50=arrMax(allP50);
+  const gold3d = allP50.length ? allP50[Math.floor(allP50.length * 0.01)] : undefined;
   const minP99=arrMin(allP99), maxP99=arrMax(allP99);
   const minSig=arrMin(allSig), maxSig=arrMax(allSig);
   // Edge colour is the shared p50→green/orange/red scale (latencyColor), matching 2D.
@@ -200,7 +201,7 @@ export function mountTopology3D(container, fleet, opts = {}) {
     if (!(mat[i]&&mat[i][j]) && !(mat[j]&&mat[j][i])) continue;
     const ab = mat[i]&&mat[i][j], ba = mat[j]&&mat[j][i];
     const avgP50 = Math.round(((ab?ab.p50:0)+(ba?ba.p50:0))/((ab?1:0)+(ba?1:0)||1));
-    const css = latencyColor(avgP50, minP50, maxP50);
+    const css = cellColor(avgP50, minP50, maxP50, false, gold3d);
     const col = new THREE.Color(css);
     const op = edgeOpacity(avgP50);
     const geo = new THREE.BufferGeometry().setFromPoints([positions[i], positions[j]]);

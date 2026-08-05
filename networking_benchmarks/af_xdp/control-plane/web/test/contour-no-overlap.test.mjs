@@ -59,6 +59,19 @@ function assertNoOverlap(nodes, boxes, positions, label) {
     }
   }
 
+  // (d) No two node bodies may overlap. The viewport fit scales positions while
+  // radii stay fixed, so this only holds if collisions are resolved last.
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const need = nodeRadius(nodes[i]) + nodeRadius(nodes[j]);
+      const dx = positions[i].x - positions[j].x, dy = positions[i].y - positions[j].y;
+      const dist = Math.hypot(dx, dy);
+      assert.ok(dist >= need,
+        `${label}: nodes ${nodes[i].private_ip} and ${nodes[j].private_ip} overlap `
+        + `(${dist.toFixed(1)}px apart, need ${need})`);
+    }
+  }
+
   // (c) A node's rendered footprint must sit wholly inside every box it belongs
   // to and wholly outside every box it does not - so no border cuts a node.
   for (const b of boxes) {

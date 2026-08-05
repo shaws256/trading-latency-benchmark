@@ -19,14 +19,16 @@ function meanP50(ab, ba) {
 export function renderEdges(ctx) {
   const { fleet, matrix, N, root, svg, positions, edgeElements, edgeLabelEls, W, H } = ctx;
   const { minSigma, maxSigma, minP50, maxP50 } = ctx.ranges;
+  // Gold threshold: 1st percentile of intra-region p50 values.
+  const sortedP50 = ctx.ranges.allP50;
+  const gold = sortedP50.length ? sortedP50[Math.floor(sortedP50.length * 0.01)] : undefined;
   // Edge colour = p50 latency (green = fast, red = slow) out of the global range.
   const nodesArr = fleet.nodes || [];
-  const lc = (avg, i, j) => cellColor(avg, minP50, maxP50, isCrossRegion(nodesArr[i], nodesArr[j]));
+  const lc = (avg, i, j) => cellColor(avg, minP50, maxP50, isCrossRegion(nodesArr[i], nodesArr[j]), gold);
   const jc = (sig) => jitterColor(sig, minSigma, maxSigma);  // kept for label colour
 
   // Reuse the pre-sorted allP50 from ctx.ranges (computed once in index.js)
-  // to derive the opacity p60 threshold — avoids a redundant O(N²) collect + sort.
-  const sortedP50 = ctx.ranges.allP50;
+  // to derive the opacity p60 threshold.
   const p60 = sortedP50.length ? sortedP50[Math.floor(sortedP50.length * 0.6)] : Infinity;
   const pMin = sortedP50[0] || 0;
   const baseOpacity = (avg) => {

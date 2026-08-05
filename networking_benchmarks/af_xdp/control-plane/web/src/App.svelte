@@ -17,6 +17,7 @@
   let mode = '2d';
   let handle = null;
   let view3d = null;   // persisted 3D camera view, kept across live-update remounts
+  let view2d = null;   // persisted 2D zoom/pan, kept across live-update remounts
 
   let runs = [];
 
@@ -172,13 +173,17 @@
 
   function remount() {
     if (!fleet || !container) return;
-    // Preserve the 3D camera across remounts so live updates don't reset zoom/pan.
-    if (mode === '3d' && handle && handle.getView) { try { view3d = handle.getView(); } catch (_) { /* keep last */ } }
+    // Preserve zoom/pan across remounts in both views so a live update does not
+    // throw away the viewport the user set up.
+    if (handle && handle.getView) {
+      try { if (mode === '3d') view3d = handle.getView(); else view2d = handle.getView(); }
+      catch (_) { /* keep last */ }
+    }
     if (handle) handle.dispose();
     container.innerHTML = '';
     try {
       handle = (mode === '2d')
-        ? mountTopology2D(container, fleet, { targetIds, onToggleTarget })
+        ? mountTopology2D(container, fleet, { view: view2d, targetIds, onToggleTarget })
         : mountTopology3D(container, fleet, { view: view3d, targetIds, onToggleTarget });
     } catch (e) {
       console.error('Viz mount failed:', e);
