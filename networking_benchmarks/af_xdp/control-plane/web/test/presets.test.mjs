@@ -102,5 +102,5 @@ test('a preset ignores nodes missing the attribute', () => {
 test('preset order matches the control panel', () => {
   // The panel markup and this list must agree, or the chips resolve to the
   // wrong grouping after a reorder.
-  assert.deepEqual(PRESETS.map((p) => p.id), ['pg', 'vpc', 'az', 'region', 'all', 'clear']);
+  assert.deepEqual(PRESETS.map((p) => p.id), ['pg', 'vpc', 'az', 'region', 'all']);
 });

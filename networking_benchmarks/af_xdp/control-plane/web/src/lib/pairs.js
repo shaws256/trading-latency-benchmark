@@ -37,7 +37,6 @@ export const PRESETS = [
   { id: 'az', label: 'Same AZ', attr: 'az' },
   { id: 'region', label: 'Same region', attr: 'region' },
   { id: 'all', label: 'All' },
-  { id: 'clear', label: 'Clear' },
 ];
 
 // Values that mean "unknown" rather than a real group. Grouping on these would

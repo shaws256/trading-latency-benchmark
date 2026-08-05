@@ -110,13 +110,13 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1117;
   position: absolute; top: -14px; left: -16px;
   width: 11px; height: 11px; border-radius: 50%;
   box-sizing: border-box;
-  border: 1px solid #6e7681;
-  background: radial-gradient(circle at 32% 30%, #7d8590 0%, #3a4149 60%, #23282e 100%);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  border: 1px solid #0d1117;
+  background: radial-gradient(circle at 32% 28%, #ffffff 0%, #c9d1d9 45%, #6e7681 100%);
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.35), 0 1px 3px rgba(0,0,0,0.8);
   cursor: pointer; pointer-events: auto;
   opacity: 0; transition: opacity .12s, transform .12s;
 }
-.node-label .target-sphere.visible { opacity: 0.85; }
+.node-label .target-sphere.visible { opacity: 1; }
 .node-label .target-sphere:hover { transform: scale(1.25); opacity: 1; }
 .node-label .target-sphere.checked {
   opacity: 1;

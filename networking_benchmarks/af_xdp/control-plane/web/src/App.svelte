@@ -5,6 +5,7 @@
   import { createLive, runCampaign, cancelCampaign } from './lib/live.js';
   import { mountControls } from './lib/controls.js';
   import { buildReportHTML } from './lib/report.js';
+  import { buildCombinedReportHTML } from './lib/report-combined.js';
   import { prunedTargets, countPairs, SCOPE_AMONG, SCOPE_FANOUT, resolvePreset } from './lib/pairs.js';
 
   let container;        // viz host (wiped on remount)
@@ -254,6 +255,24 @@
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 5000);
         panel?.setStatus(`downloaded report ${kind}/${variation}`);
+      },
+      // Parallel to onReport: ONE document covering every measured mode.
+      onReportAll: () => {
+        // combos() lists every {kind,variation} present; toFleet() reduces to one
+        // mode at a time, so the combined report is built from all of them.
+        const combos = conn ? conn.combos() : [];
+        const views = combos.length
+          ? combos.map((c) => ({ ...c, fleet: conn.toFleet(c.kind, c.variation) }))
+          : (fleet ? [{ kind, variation, fleet }] : []);   // static ?data= fallback
+        if (!views.length) { panel?.setStatus('no data to report yet'); return; }
+        const html = buildCombinedReportHTML(views);
+        const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+        const a = Object.assign(document.createElement('a'), {
+          href: url, download: `afxdp-report-all-${Date.now()}.html`,
+        });
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        panel?.setStatus(`downloaded combined report (${views.length} mode(s))`);
       },
       onRun: doRun,
       onScopeChange: (s) => { scope = s; updateTargetPanel(); remount(); },
