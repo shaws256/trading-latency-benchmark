@@ -56,24 +56,29 @@ export function buildReportHTML(fleet, kind, variation) {
     const replIdx = nodes.findIndex(n => n.role === 'replicator');
     const dstIdxs = nodes.map((n, i) => n.role === 'destination' ? i : -1).filter(i => i >= 0);
 
-    // Mcast heatmap: single-column (source → each destination via replicator)
-    heat = '<table class="heat sortable" id="fanout-table"><tr><th>Destination</th><th>Role</th><th>AZ</th><th>PG</th><th>p50</th><th>p99</th><th>loss</th></tr>';
+    // Mcast path table: one row per source -> replicator -> destination path.
+    heat = '<table class="heat sortable" id="fanout-table"><tr>'
+      + '<th>Source</th><th>Replicator</th><th>Destination</th><th>Dst AZ</th>'
+      + '<th>p50</th><th>p99</th><th>loss</th></tr>';
     dstIdxs.forEach(di => {
       // The live model renders mcast as two physical hops and attributes the
-      // end-to-end one-way metric to the measured last leg (replicator → dest),
-      // so read that cell. Fall back to source → dest for a saved fleet.json that
-      // stored the direct edge instead.
+      // end-to-end one-way metric to the measured last leg (replicator -> dest),
+      // so read that cell. Fall back to source -> dest for a saved fleet.json
+      // that stored the direct edge instead.
       const c = (replIdx >= 0 && matrix[replIdx] && matrix[replIdx][di])
         || (srcIdx >= 0 && matrix[srcIdx] && matrix[srcIdx][di])
         || null;
       const n = nodes[di];
-      const pg = n.cpg_name && n.cpg_name !== 'unknown' ? n.cpg_name : '—';
+      const sIp = srcIdx >= 0 ? label(nodes[srcIdx]) : '\u2014';
+      const rIp = replIdx >= 0 ? label(nodes[replIdx]) : '\u2014';
+      const head = `<tr data-ip="${esc(n.private_ip || '')}">`
+        + `<td>${sIp}</td><td>${rIp}</td><td>${label(n)}</td><td>${esc(n.az || '\u2014')}</td>`;
       if (c) {
-        heat += `<tr data-ip="${esc(n.private_ip || '')}"><td>${label(n)}</td><td>${esc(n.role || '')}</td><td>${esc(n.az || '')}</td><td>${esc(pg)}</td>`
+        heat += head
           + `<td style="background:${latencyColor(c.p50, mn, mx)};color:#0d1117;font-weight:700">${fmtLat(c.p50)}</td>`
           + `<td>${fmtLat(c.p99)}</td><td>${esc(c.loss ?? 0)}%</td></tr>`;
       } else {
-        heat += `<tr data-ip="${esc(n.private_ip || '')}"><td>${label(n)}</td><td>${esc(n.role || '')}</td><td>${esc(n.az || '')}</td><td>${esc(pg)}</td><td class="na">·</td><td class="na">·</td><td class="na">·</td></tr>`;
+        heat += head + '<td class="na">\u00b7</td><td class="na">\u00b7</td><td class="na">\u00b7</td></tr>';
       }
     });
     heat += '</table>';
@@ -130,6 +135,41 @@ export function buildReportHTML(fleet, kind, variation) {
     }
   }
 
+  // ── Measurement methodology ───────────────────────────────────────
+  // Stated per mode: ucast and mcast measure different quantities on different
+  // clock bases. A round trip inside ONE realtime domain needs no clock sync; a
+  // one-way delay spans hosts and is only meaningful because chrony disciplines
+  // every node to the ENA PHC hardware clock.
+  const UCAST_VARIATION_NOTES = {
+    kernel: 'TX <code>sendto()</code>; RX kernel busy-poll <code>recvmsg()</code>. No AF_XDP socket on the measuring node.',
+    xdp: 'TX via AF_XDP zero-copy on a non-RSS TX queue; RX is still the kernel busy-poll socket, with the ingress time stamped at the XDP hook. <code>--xdp-rx</code> is instrumented kernel RX, NOT a bypass receive.',
+  };
+  const methodology = isMcast ? `
+  <div class="method">
+    <h3>How this was measured</h3>
+    <div class="metric-kind">Reported value is a <b>ONE-WAY</b> delay: source → replicator → destination. It is not a round trip, and is not comparable with the ucast RTT figures.</div>
+    <dl>
+      <dt>Path</dt><dd>EC2 VPCs do not forward raw multicast, so an 8-byte <code>m2u</code> header rides inside a plain unicast UDP datagram. The source sends to the replicator, which emits one unicast copy per registered destination. Two hops, both measured.</dd>
+      <dt>Datapath</dt><dd>Source: AF_XDP zero-copy TX. Replicator: the <code>mcast.o</code> XDP program redirects the matching frame to an AF_XDP socket and userspace re-emits per destination (fwd mode <code>${esc(variation)}</code>). Destination: its own <code>mcast.o</code> redirects to an XSK, so the kernel IP stack is not involved after the XDP redirect.</dd>
+      <dt>Stamps</dt><dd><code>ts_ns</code> at the source immediately before TX ring submit, <code>replicator_ns</code> at replicator RX entry, <code>rx_ns</code> at destination RX. One-way = <code>rx_ns − ts_ns</code>, split as <code>replicator_ns − ts_ns</code> (source→replicator) and <code>rx_ns − replicator_ns</code> (replicator→destination).</dd>
+      <dt>Clock</dt><dd><code>CLOCK_REALTIME</code> on all three nodes — necessarily, since a one-way delay spans hosts. chrony disciplines each node to the <b>ENA PHC hardware clock</b> (<code>refclock PHC /dev/ptp0</code>, <code>phc_enable=1</code>), reading the Nitro clock directly rather than over NTP-UDP; AWS Time Sync (<code>169.254.169.123</code>, <code>xleave</code>, <code>minpoll 2</code>) is the fallback until PHC is up. Observed RMS offset is tens of nanoseconds, well below the microsecond figures reported here.</dd>
+      <dt>Gate</dt><dd>A run aborts when the inter-node offset exceeds the configured ceiling: a destination clock behind the source produces an invalid, possibly negative, one-way delay. Percentiles derive only from datagrams that arrived.</dd>
+      <dt>On <code>kernel</code> fwd mode</dt><dd><code>XDP_TX</code> is a single-destination passthrough rather than a fan-out, so that mode measures one representative destination.</dd>
+    </dl>
+  </div>` : `
+  <div class="method">
+    <h3>How this was measured</h3>
+    <div class="metric-kind">Reported value is a <b>ROUND-TRIP TIME</b> (RTT) through the remote replicator's echo, at queue depth 1 — one datagram in flight at a time.</div>
+    <dl>
+      <dt>Path</dt><dd>The measuring node sends to a peer whose replicator echoes the datagram straight back. Ordered pairs are measured one source at a time, and that source's own replicator is stopped for the duration so no AF_XDP socket owns the RX queue the echoes return on.</dd>
+      <dt>Variation <code>${esc(variation)}</code></dt><dd>${UCAST_VARIATION_NOTES[variation] || 'See tools/rtt.cpp for this variation.'}</dd>
+      <dt>Stamps</dt><dd>TX: <code>CLOCK_REALTIME</code> sampled immediately before the send. RX: kernel software timestamp (<code>SOF_TIMESTAMPING_RX_SOFTWARE</code>) recorded in the NAPI receive path just after the driver builds the skb — before the socket receive-queue enqueue, so socket-queue and scheduler jitter are excluded. Falls back to a userspace read if no cmsg timestamp is present.</dd>
+      <dt>Clock</dt><dd>A single <code>CLOCK_REALTIME</code> domain on one host, so <b>no inter-node clock sync is required</b> and none of its error enters the result. (<code>--xdp-rx</code> uses <code>CLOCK_MONOTONIC</code> on both ends instead, to match the XDP <code>bpf_ktime_get_ns()</code> stamp.) No TSC and no PHC are used for RTT — ENA has no TX hardware timestamp.</dd>
+      <dt>Statistic</dt><dd>Service-time RTT = <code>recv − actual_send</code>, which excludes coordinated omission. Warmup datagrams are discarded before percentiles are computed, and percentiles derive only from datagrams that returned: a run over the loss ceiling is rejected rather than published, since its surviving subset is not comparable with a clean run.</dd>
+      <dt>Host tuning</dt><dd>The <code>kernel</code> baseline is not the generic stack: <code>SO_BUSY_POLL</code> + <code>SO_PREFER_BUSY_POLL</code>, <code>SCHED_FIFO</code>, isolated-core pinning, ENA IRQ affinity, <code>napi_defer_hard_irqs</code>, <code>gro_flush_timeout=10us</code>, coalescing off.</dd>
+    </dl>
+  </div>`;
+
   const tableHeader = '<tr><th>src</th><th>src role</th><th>src PG</th><th>dst</th><th>dst role</th><th>dst AZ</th><th>dst PG</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th><th>max</th><th>loss</th></tr>';
 
   return `<!doctype html><html><head><meta charset="utf-8">
@@ -146,6 +186,20 @@ export function buildReportHTML(fleet, kind, variation) {
   th.sorted-asc::after{content:' ▲';font-size:10px}
   th.sorted-desc::after{content:' ▼';font-size:10px}
   .heat td{font-family:'SF Mono',monospace;color:#0d1117;font-weight:700}
+  /* The NxN heatmap tints every cell, so dark text is right there. The fan-out
+     table has plain cells, where #0d1117 on the dark page is invisible. */
+  #fanout-table td{color:#e6edf3;font-weight:400}
+  #fanout-table td[style]{font-weight:700}
+  /* Measurement methodology block */
+  .method{font-size:12px;margin:8px 0 14px;padding:10px 12px;background:#161b22;
+    border:1px solid #30363d;border-left:3px solid #58a6ff;border-radius:6px;
+    color:#adbac7;line-height:1.65}
+  .method h3{margin:0 0 6px;font-size:13px;color:#58a6ff}
+  .method dt{color:#e6edf3;font-weight:600;margin-top:6px}
+  .method dd{margin:0 0 0 14px}
+  .method code{background:#0d1117;padding:1px 4px;border-radius:3px;color:#79c0ff}
+  .metric-kind{font-size:13px;color:#e6edf3;margin:2px 0 8px}
+  .metric-kind b{color:#f0883e}
   .heat .diag,.heat .na{background:#161b22;color:#6e7681;font-weight:400}
   .inv td,.inv th{text-align:left;padding:3px 8px}
   td{font-family:'SF Mono',monospace}
@@ -171,15 +225,16 @@ export function buildReportHTML(fleet, kind, variation) {
   #lat-table tr.sel-dst td{background:#1d3326 !important;box-shadow:inset 3px 0 0 #3fb950}
   #lat-table tr.sel-both td{background:#3a2f14 !important;box-shadow:inset 3px 0 0 #d29922}
 </style></head><body>
-  <h1>AF_XDP latency report — ${esc(kind)} / ${esc(variation)}</h1>
+  <h1>AF_XDP latency report — ${esc(kind)} / ${esc(variation)} — ${isMcast ? 'one-way' : 'round-trip (RTT)'}</h1>
   <div class="meta">Region: ${esc(fleet.region || '?')} · Nodes: ${N} · Pairs: ${pairs} · Generated: ${gen}</div>
+  ${methodology}
   ${isMcast ? '' : `<div class="coverage">Coverage: <b>${pairs}</b> of <b>${N * (N - 1)}</b> possible ordered pairs measured.${pairs < N * (N - 1) ? ` <b>${N * (N - 1) - pairs} missing.</b> A blank cell is either a pair that never ran, or one <b>rejected by the loss gate</b> — rtt derives percentiles only from datagrams that returned, so a lossy run describes its surviving subset and is not comparable to a clean run. Rejected pairs are recorded as failures rather than published as results; check the run log / error list for the reason.` : ''}</div>`}
   <div class="selbar" id="selbar-wrap"><span id="selbar"></span><button id="selclear">Clear</button></div>
   <h2>Fleet inventory</h2>
   ${inventory}
-  <h2>${isMcast ? 'Fan-out latency — source → replicator → destinations' : 'Heatmap — p50 (green = fast, red = slow)'}</h2>
+  <h2>${isMcast ? 'Multicast paths — one-way latency, source → replicator → destination' : 'Heatmap — round-trip p50 (green = fast, red = slow)'}</h2>
   ${heat}
-  <h2>All measured latencies</h2>
+  <h2>All measured latencies — ${isMcast ? 'one-way' : 'round-trip (RTT)'}</h2>
   <table id="lat-table" class="sortable">${tableHeader}${rows}</table>
   <script>
   (function(){
