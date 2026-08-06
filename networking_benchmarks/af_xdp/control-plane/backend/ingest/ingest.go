@@ -24,7 +24,13 @@ func StartIngest(nc *nats.Conn, reg *registry.Registry, coll *collector.Collecto
 		var r proto.Registration
 		if json.Unmarshal(m.Data, &r) == nil {
 			n := reg.Upsert(r)
-			log.Printf("register: %s (%s, %s, pg=%q)", n.InstanceID, n.PrivateIP, n.AZ, n.PlacementGroup)
+			log.Printf("register: %s (%s, %s, pg=%q/%s)", n.InstanceID, n.PrivateIP, n.AZ,
+				n.PlacementGroup, n.PlacementGroupStrategy)
+			// Persist placement and hardware alongside the measurements, so a
+			// stored result stays interpretable after the fleet is gone.
+			if err := st.UpsertNode(r.Node, r.AgentVersion, r.IsolCPUs, r.StartedUnix); err != nil {
+				log.Printf("store: upsert node %s: %v", n.InstanceID, err)
+			}
 			hub.Emit("node", n)
 		}
 	}); err != nil {
@@ -42,6 +48,8 @@ func StartIngest(nc *nats.Conn, reg *registry.Registry, coll *collector.Collecto
 			nc.Publish(proto.SubjectCmdAgent(hb.InstanceID), reregisterCmd)
 			return
 		}
+		// Liveness in the store follows the heartbeat, not just registration.
+		st.TouchNode(hb.InstanceID, hb.Unix)
 		if changed { // suppress the every-tick broadcast; only emit on real change
 			hub.Emit("node", n)
 		}

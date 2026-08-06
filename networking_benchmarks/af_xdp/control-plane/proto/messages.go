@@ -14,7 +14,11 @@ type NodeInfo struct {
 	Region         string `json:"region"`
 	InstanceType   string `json:"instance_type"`
 	PlacementGroup string `json:"placement_group,omitempty"` // "" = no PG
+	// Strategy of PlacementGroup: cluster|spread|partition. IMDS exposes only the
+	// group name, so this comes from ec2:DescribePlacementGroups.
+	PlacementGroupStrategy string `json:"placement_group_strategy,omitempty"`
 	VpcID          string `json:"vpc_id,omitempty"`
+	SubnetID       string `json:"subnet_id,omitempty"`
 	Role           string `json:"role,omitempty"`            // source|replicator|destination
 	Stack          string `json:"stack,omitempty"`           // CFN stack name, if tagged
 	Hostname       string `json:"hostname,omitempty"`

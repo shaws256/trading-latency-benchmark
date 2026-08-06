@@ -147,10 +147,26 @@ func (s *Server) handleToolsList(req JSONRPCRequest) JSONRPCResponse {
 		},
 		{
 			"name":        "topology_summary",
-			"description": "Fleet topology with the newest measurement sample per edge",
+			"description": "Fleet topology with the newest measurement sample per edge, including each endpoint's AZ, VPC, subnet, placement group and placement-group strategy",
 			"inputSchema": map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
+			},
+		},
+		{
+			"name":        "list_nodes",
+			"description": "Fleet inventory: identity, role, placement (region, AZ, VPC, subnet, placement group and its strategy) and hardware (instance type, vCPUs, memory, bandwidth, ENIs, Nitro generation) per node",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"instance_id": map[string]any{"type": "string", "description": "Exact instance id"},
+					"private_ip":  map[string]any{"type": "string", "description": "Exact private IP"},
+					"role":        map[string]any{"type": "string", "description": "source, replicator or destination"},
+					"az":          map[string]any{"type": "string", "description": "Availability zone"},
+					"region":      map[string]any{"type": "string", "description": "Region"},
+					"pg_strategy": map[string]any{"type": "string", "description": "cluster, spread or partition"},
+					"limit":       map[string]any{"type": "integer", "description": "Max rows (default 200)"},
+				},
 			},
 		},
 	}
@@ -244,6 +260,17 @@ func (s *Server) handleToolsCall(req JSONRPCRequest) JSONRPCResponse {
 
 	case "topology_summary":
 		result, err = s.db.TopologySummary()
+
+	case "list_nodes":
+		result, err = s.db.ListNodes(ListNodesParams{
+			InstanceID: getString(call.Arguments, "instance_id"),
+			PrivateIP:  getString(call.Arguments, "private_ip"),
+			Role:       getString(call.Arguments, "role"),
+			AZ:         getString(call.Arguments, "az"),
+			Region:     getString(call.Arguments, "region"),
+			PGStrategy: getString(call.Arguments, "pg_strategy"),
+			Limit:      int(getInt64(call.Arguments, "limit")),
+		})
 
 	default:
 		return JSONRPCResponse{

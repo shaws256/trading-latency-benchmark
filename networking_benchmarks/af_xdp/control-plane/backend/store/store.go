@@ -169,11 +169,91 @@ func createSchema(db *sql.DB) error {
 		cmd_id    TEXT
 	);
 
+	CREATE TABLE IF NOT EXISTS nodes (
+		instance_id      TEXT PRIMARY KEY,
+		private_ip       TEXT NOT NULL,
+		public_ip        TEXT,
+		hostname         TEXT,
+		role             TEXT,
+		stack            TEXT,
+		region           TEXT,
+		az               TEXT,
+		vpc_id           TEXT,
+		subnet_id        TEXT,
+		placement_group  TEXT,
+		pg_strategy      TEXT,
+		instance_type    TEXT,
+		vcpus            INTEGER,
+		mem_gb           REAL,
+		bw_gbps          REAL,
+		pps_mpps         REAL,
+		enis             INTEGER,
+		nitro_gen        TEXT,
+		metal            INTEGER,
+		agent_version    TEXT,
+		isolcpus         TEXT,
+		first_seen_unix  INTEGER,
+		last_seen_unix   INTEGER
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_nodes_ip ON nodes(private_ip);
+
 	CREATE INDEX IF NOT EXISTS idx_m_edge ON measurements(kind, variation, src_ip, dst_ip, unix DESC);
 	CREATE INDEX IF NOT EXISTS idx_m_time ON measurements(unix);
 	CREATE INDEX IF NOT EXISTS idx_m_run  ON measurements(run_id);
 	`
 	_, err := db.Exec(schema)
+	return err
+}
+
+// UpsertNode records a node's identity, placement and hardware so a measurement
+// can be interpreted long after the fleet is gone. Keyed by instance id; every
+// re-registration refreshes the row and bumps last_seen. first_seen is kept.
+func (s *Store) UpsertNode(n proto.NodeInfo, agentVersion, isolCPUs string, seenUnix int64) error {
+	if s == nil {
+		return nil // persistence disabled
+	}
+	if n.InstanceID == "" {
+		return nil
+	}
+	if seenUnix == 0 {
+		seenUnix = time.Now().Unix()
+	}
+	metal := 0
+	if n.Metal {
+		metal = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO nodes (
+			instance_id, private_ip, public_ip, hostname, role, stack,
+			region, az, vpc_id, subnet_id, placement_group, pg_strategy,
+			instance_type, vcpus, mem_gb, bw_gbps, pps_mpps, enis, nitro_gen, metal,
+			agent_version, isolcpus, first_seen_unix, last_seen_unix
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(instance_id) DO UPDATE SET
+			private_ip=excluded.private_ip, public_ip=excluded.public_ip,
+			hostname=excluded.hostname, role=excluded.role, stack=excluded.stack,
+			region=excluded.region, az=excluded.az, vpc_id=excluded.vpc_id,
+			subnet_id=excluded.subnet_id, placement_group=excluded.placement_group,
+			pg_strategy=excluded.pg_strategy, instance_type=excluded.instance_type,
+			vcpus=excluded.vcpus, mem_gb=excluded.mem_gb, bw_gbps=excluded.bw_gbps,
+			pps_mpps=excluded.pps_mpps, enis=excluded.enis, nitro_gen=excluded.nitro_gen,
+			metal=excluded.metal, agent_version=excluded.agent_version,
+			isolcpus=excluded.isolcpus, last_seen_unix=excluded.last_seen_unix`,
+		n.InstanceID, n.PrivateIP, n.PublicIP, n.Hostname, n.Role, n.Stack,
+		n.Region, n.AZ, n.VpcID, n.SubnetID, n.PlacementGroup, n.PlacementGroupStrategy,
+		n.InstanceType, n.VCPUs, n.MemGB, n.BwGbps, n.PpsMpps, n.ENIs, n.NitroGen, metal,
+		agentVersion, isolCPUs, seenUnix, seenUnix)
+	return err
+}
+
+// TouchNode advances last_seen for a node already known, so liveness survives a
+// backend restart without a full re-registration.
+func (s *Store) TouchNode(instanceID string, seenUnix int64) error {
+	if s == nil || instanceID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE nodes SET last_seen_unix=? WHERE instance_id=?`, seenUnix, instanceID)
 	return err
 }
 

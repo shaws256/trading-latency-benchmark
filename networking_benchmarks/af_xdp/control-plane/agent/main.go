@@ -42,6 +42,7 @@ func main() {
 
 	node := gatherNodeInfo()
 	enrichFromEC2(&node)
+	enrichPlacementGroup(&node)
 	a := &agent{run: NewRunner(*binDir), node: node, state: "idle"}
 	log.Printf("agent %s: instance=%s ip=%s az=%s type=%s pg=%q role=%q",
 		agentVersion, node.InstanceID, node.PrivateIP, node.AZ, node.InstanceType, node.PlacementGroup, node.Role)

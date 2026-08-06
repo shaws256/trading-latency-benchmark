@@ -90,3 +90,37 @@ func inferNitroGen(instType string) string {
 	}
 	return ""
 }
+
+// enrichPlacementGroup resolves the strategy of the instance's placement group.
+// IMDS reports only the group name, and the strategy is what distinguishes a
+// cluster group (single low-latency segment) from spread or partition, so it
+// takes an API call. Best-effort: a failure leaves the strategy empty.
+func enrichPlacementGroup(n *proto.NodeInfo) {
+	if n.PlacementGroup == "" || n.Region == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "aws", "ec2", "describe-placement-groups",
+		"--group-names", n.PlacementGroup,
+		"--region", n.Region,
+		"--output", "json",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("ec2meta: describe-placement-groups failed: %v", err)
+		return
+	}
+	var resp struct {
+		PlacementGroups []struct {
+			Strategy string `json:"Strategy"`
+		} `json:"PlacementGroups"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		log.Printf("ec2meta: placement-group parse failed: %v", err)
+		return
+	}
+	if len(resp.PlacementGroups) > 0 {
+		n.PlacementGroupStrategy = resp.PlacementGroups[0].Strategy
+	}
+}

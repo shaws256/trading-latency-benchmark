@@ -457,15 +457,131 @@ func (db *DB) Regressions(p RegressionsParams) (ToolResult, error) {
 // --- topology_summary ---
 
 // TopologySummary returns the newest measurement per edge across all kinds.
+// ListNodesParams filters the fleet inventory.
+type ListNodesParams struct {
+	InstanceID  string `json:"instance_id"`
+	PrivateIP   string `json:"private_ip"`
+	Role        string `json:"role"`
+	AZ          string `json:"az"`
+	Region      string `json:"region"`
+	PGStrategy  string `json:"pg_strategy"`
+	Limit       int    `json:"limit"`
+}
+
+// hasNodes reports whether this database carries the fleet inventory. Databases
+// written before nodes were recorded still answer every other tool, so the
+// metadata joins degrade instead of failing.
+func (db *DB) hasNodes() bool {
+	var n int
+	err := db.conn.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='nodes'`).Scan(&n)
+	return err == nil && n > 0
+}
+
+// ListNodes returns the recorded identity, placement and hardware of each node.
+func (db *DB) ListNodes(p ListNodesParams) (ToolResult, error) {
+	if !db.hasNodes() {
+		return ToolResult{Rows: []any{}, SQL: "nodes table absent in this database"}, nil
+	}
+	var clauses []string
+	var args []any
+	for _, f := range []struct {
+		col string
+		val string
+	}{
+		{"instance_id", p.InstanceID}, {"private_ip", p.PrivateIP}, {"role", p.Role},
+		{"az", p.AZ}, {"region", p.Region}, {"pg_strategy", p.PGStrategy},
+	} {
+		if f.val != "" {
+			clauses = append(clauses, f.col+" = ?")
+			args = append(args, f.val)
+		}
+	}
+	q := `SELECT instance_id, private_ip, public_ip, hostname, role, stack,
+		region, az, vpc_id, subnet_id, placement_group, pg_strategy,
+		instance_type, vcpus, mem_gb, bw_gbps, enis, nitro_gen, metal,
+		agent_version, isolcpus, first_seen_unix, last_seen_unix FROM nodes`
+	if len(clauses) > 0 {
+		q += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	q += " ORDER BY region, az, private_ip"
+	if p.Limit <= 0 || p.Limit > 1000 {
+		p.Limit = 200
+	}
+	q += " LIMIT ?"
+	args = append(args, p.Limit)
+
+	rows, err := db.conn.Query(q, args...)
+	if err != nil {
+		return ToolResult{SQL: q}, fmt.Errorf("list_nodes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []any
+	for rows.Next() {
+		var instanceID, privateIP string
+		var publicIP, hostname, role, stack, region, az, vpcID, subnetID sql.NullString
+		var pg, pgStrategy, instType, nitroGen, agentVer, isolCPUs sql.NullString
+		var vcpus, enis, metal, firstSeen, lastSeen sql.NullInt64
+		var memGB, bwGbps sql.NullFloat64
+		if err := rows.Scan(&instanceID, &privateIP, &publicIP, &hostname, &role, &stack,
+			&region, &az, &vpcID, &subnetID, &pg, &pgStrategy,
+			&instType, &vcpus, &memGB, &bwGbps, &enis, &nitroGen, &metal,
+			&agentVer, &isolCPUs, &firstSeen, &lastSeen); err != nil {
+			return ToolResult{SQL: q}, fmt.Errorf("list_nodes scan: %w", err)
+		}
+		out = append(out, map[string]any{
+			"instance_id": instanceID, "private_ip": privateIP,
+			"public_ip": nullStr(publicIP), "hostname": nullStr(hostname),
+			"role": nullStr(role), "stack": nullStr(stack),
+			"region": nullStr(region), "az": nullStr(az),
+			"vpc_id": nullStr(vpcID), "subnet_id": nullStr(subnetID),
+			"placement_group": nullStr(pg), "pg_strategy": nullStr(pgStrategy),
+			"instance_type": nullStr(instType), "vcpus": nullInt(vcpus),
+			"mem_gb": nullFloat(memGB), "bw_gbps": nullFloat(bwGbps),
+			"enis": nullInt(enis), "nitro_gen": nullStr(nitroGen),
+			"metal": nullInt(metal), "agent_version": nullStr(agentVer),
+			"isolcpus": nullStr(isolCPUs),
+			"first_seen_unix": nullInt(firstSeen), "last_seen_unix": nullInt(lastSeen),
+		})
+	}
+	if out == nil {
+		out = []any{}
+	}
+	return ToolResult{Rows: out, SQL: q}, rows.Err()
+}
+
+func nullStr(n sql.NullString) any {
+	if !n.Valid {
+		return nil
+	}
+	return n.String
+}
+
 func (db *DB) TopologySummary() (ToolResult, error) {
-	q := `SELECT kind, variation, src_ip, dst_ip, unix, p50, p90, p99, p999, messages, lost, loss_pct
-	FROM (
+	// Each edge carries its endpoints' placement so a latency figure can be read
+	// without a second lookup: AZ, VPC, subnet, placement group and its strategy
+	// are what explain the difference between 23us and 12ms.
+	meta := db.hasNodes()
+	sel := `SELECT m.kind, m.variation, m.src_ip, m.dst_ip, m.unix,
+		m.p50, m.p90, m.p99, m.p999, m.messages, m.lost, m.loss_pct`
+	join := ""
+	if meta {
+		sel += `, s.instance_id, s.role, s.az, s.vpc_id, s.subnet_id,
+			s.placement_group, s.pg_strategy, s.instance_type,
+			d.instance_id, d.role, d.az, d.vpc_id, d.subnet_id,
+			d.placement_group, d.pg_strategy, d.instance_type`
+		join = ` LEFT JOIN nodes s ON s.private_ip = m.src_ip
+			LEFT JOIN nodes d ON d.private_ip = m.dst_ip`
+	}
+	q := sel + ` FROM (
 		SELECT *, ROW_NUMBER() OVER (
 			PARTITION BY kind, variation, src_ip, dst_ip ORDER BY unix DESC
 		) AS rn
 		FROM measurements
-	) WHERE rn = 1
-	ORDER BY kind, variation, src_ip, dst_ip`
+	) m` + join + `
+	WHERE m.rn = 1
+	ORDER BY m.kind, m.variation, m.src_ip, m.dst_ip`
 
 	rows, err := db.conn.Query(q)
 	if err != nil {
@@ -479,10 +595,21 @@ func (db *DB) TopologySummary() (ToolResult, error) {
 		var unix, p50 int64
 		var p90, p99, p999, messages, lost sql.NullInt64
 		var lossPct sql.NullFloat64
-		if err := rows.Scan(&kind, &variation, &srcIP, &dstIP, &unix, &p50, &p90, &p99, &p999, &messages, &lost, &lossPct); err != nil {
+		var sID, sRole, sAZ, sVPC, sSubnet, sPG, sPGS, sType sql.NullString
+		var dID, dRole, dAZ, dVPC, dSubnet, dPG, dPGS, dType sql.NullString
+
+		dest := []any{&kind, &variation, &srcIP, &dstIP, &unix, &p50, &p90, &p99, &p999,
+			&messages, &lost, &lossPct}
+		if meta {
+			dest = append(dest,
+				&sID, &sRole, &sAZ, &sVPC, &sSubnet, &sPG, &sPGS, &sType,
+				&dID, &dRole, &dAZ, &dVPC, &dSubnet, &dPG, &dPGS, &dType)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return ToolResult{SQL: q}, fmt.Errorf("scan: %w", err)
 		}
-		results = append(results, map[string]any{
+
+		row := map[string]any{
 			"kind":      kind,
 			"variation": variation,
 			"src_ip":    srcIP,
@@ -495,7 +622,36 @@ func (db *DB) TopologySummary() (ToolResult, error) {
 			"messages":  nullInt(messages),
 			"lost":      nullInt(lost),
 			"loss_pct":  nullFloat(lossPct),
-		})
+		}
+		if meta {
+			row["src_instance_id"] = nullStr(sID)
+			row["src_role"] = nullStr(sRole)
+			row["src_az"] = nullStr(sAZ)
+			row["src_vpc_id"] = nullStr(sVPC)
+			row["src_subnet_id"] = nullStr(sSubnet)
+			row["src_placement_group"] = nullStr(sPG)
+			row["src_pg_strategy"] = nullStr(sPGS)
+			row["src_instance_type"] = nullStr(sType)
+			row["dst_instance_id"] = nullStr(dID)
+			row["dst_role"] = nullStr(dRole)
+			row["dst_az"] = nullStr(dAZ)
+			row["dst_vpc_id"] = nullStr(dVPC)
+			row["dst_subnet_id"] = nullStr(dSubnet)
+			row["dst_placement_group"] = nullStr(dPG)
+			row["dst_pg_strategy"] = nullStr(dPGS)
+			row["dst_instance_type"] = nullStr(dType)
+			// Derived, because "is this pair co-located" is the usual question.
+			if sAZ.Valid && dAZ.Valid {
+				row["same_az"] = sAZ.String == dAZ.String
+			}
+			if sVPC.Valid && dVPC.Valid {
+				row["same_vpc"] = sVPC.String == dVPC.String
+			}
+			if sPG.Valid && dPG.Valid && sPG.String != "" {
+				row["same_placement_group"] = sPG.String == dPG.String
+			}
+		}
+		results = append(results, row)
 	}
 	if results == nil {
 		results = []any{}
