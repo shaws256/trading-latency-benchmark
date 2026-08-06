@@ -375,7 +375,15 @@ export function renderPanels(ctx) {
         root.querySelectorAll('.peering-line, .peering-hit').forEach((c) => { c.style.display = disp; });
         if (!on) root.querySelectorAll('.peering-label').forEach((c) => { c.style.display = 'none'; });
       }
-    }, {}, [{ label: 'Links', checked: true, onChange: (on) => { ctx.linksHidden = !on; applySel(ctx, -1); } }]));
+    }, {}, [
+      { label: 'Links', checked: true, onChange: (on) => { ctx.linksHidden = !on; applySel(ctx, -1); } },
+      // Matches the 3D legend: IPs and the role badge hide together, so the two
+      // views expose the same control.
+      { label: 'Node data', checked: true, onChange: (on) => {
+        const disp = on ? '' : 'none';
+        root.querySelectorAll('.node .ip, .node .role-badge').forEach((c) => { c.style.display = disp; });
+      } },
+    ]));
     
   // Instructions collapse behind their own chevron header.
   wireInstructions(el);

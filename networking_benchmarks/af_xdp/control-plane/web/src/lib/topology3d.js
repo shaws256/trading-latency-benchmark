@@ -173,9 +173,14 @@ export function mountTopology3D(container, fleet, opts = {}) {
     const div = document.createElement('div'); div.className = 'node-label' + (n.role && n.role !== 'unknown' ? ' role-' + n.role : '');
     const ROLE3D = {source:'src',replicator:'relay',destination:'dst'};
     const roleTag = ROLE3D[n.role] ? '<div class="role-badge role-'+ROLE3D[n.role]+'" style="background:'+({replicator:'#f0883e',source:'#1f6feb',destination:'#2ea043'}[n.role]||'#888')+';color:#fff;font-size:8px;font-weight:700;padding:1px 5px;border-radius:6px;text-transform:uppercase;margin-top:2px">'+ROLE3D[n.role]+'</div>' : '';
-    div.innerHTML = (n.public_ip ? '<div class="ipp">' + n.public_ip + '</div>' : '')
+    // IPs and the role badge share one wrapper so the legend's "Node data"
+    // toggle hides them as a unit; the target sphere sits outside it and stays
+    // clickable when they are hidden.
+    div.innerHTML = '<div class="node-data">'
+      + (n.public_ip ? '<div class="ipp">' + n.public_ip + '</div>' : '')
       + '<div class="ipv">' + n.private_ip + '</div>'
-      + roleTag;
+      + roleTag
+      + '</div>';
     // Selection sphere, top-left of the node. 3D has no DOM node body to hang a
     // checkbox on, so it rides the CSS2D label: a real sphere mesh would need
     // raycast hit-testing and would still be hard to hit at small node sizes.
@@ -549,7 +554,13 @@ export function mountTopology3D(container, fleet, opts = {}) {
   legendEl.appendChild(buildBoundaryToggles((key, on) => {
     (boundaryObjs[key] || []).forEach((o) => { o.visible = on; });
     setBoundaryHover(null);   // drop any active hover contour when visibility changes
-  }, {}, [{ label: 'Links', checked: true, onChange: (on) => { linksHidden = !on; render(hoverIdx); } }]));
+  }, {}, [
+    { label: 'Links', checked: true, onChange: (on) => { linksHidden = !on; render(hoverIdx); } },
+    { label: 'Node data', checked: true, onChange: (on) => {
+      const disp = on ? '' : 'none';
+      labelRenderer.domElement.querySelectorAll('.node-label .node-data').forEach((c) => { c.style.display = disp; });
+    } },
+  ]));
   const itHtml = buildInstanceTypesHTML(fleet.nodes, region, capScale);
   if (itHtml) itypesEl.innerHTML = '<h3>Instance Types</h3>' + itHtml;
 
