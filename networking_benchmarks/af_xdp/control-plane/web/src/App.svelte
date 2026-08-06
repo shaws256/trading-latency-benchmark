@@ -36,6 +36,8 @@
   //    present; independent of "Live mode" (which is the heartbeat mode below). ──
   let conn = null;
   let kind = 'ucast';
+  // Kinds requested by ?report=; empty unless this tab is a report tab.
+  let reportKinds = [];
   let variation = 'kernel';
   let rerenderTimer = null;
 
@@ -57,9 +59,12 @@
 
   // ── Live report overlay ──
   function getReportViews() {
-    const combos = (conn ? conn.combos() : []).filter((c) => c.kind === kind);
+    // ?report= takes one kind or several separated by "|", so a single tab can
+    // carry both ucast and mcast.
+    const want = reportKinds.length ? reportKinds : [kind];
+    const combos = (conn ? conn.combos() : []).filter((c) => want.includes(c.kind));
     const views = combos.length
-      ? combos.map((c) => ({ ...c, fleet: conn.toFleet(c.kind, c.variation) }))
+      ? combos.map((c) => ({ ...c, fleet: conn.toFleet(c.kind, c.variation, { includeOffline: true }) }))
       : (fleet ? [{ kind, variation, fleet }] : []);
     return views;
   }
@@ -249,7 +254,8 @@
     if (!conn) return;
     // At most two entries: ucast and/or mcast, each unifying its variations.
     panel?.setCombos(conn.kinds(), { kind });
-    fleet = conn.toFleet(kind, variation);
+    // A report tab keeps offline nodes so stored results survive a stopped fleet.
+    fleet = conn.toFleet(kind, variation, { includeOffline: reportOverlayOpen });
     // Prune targetIds: a terminated/offline node cannot silently scope a run.
     const pruned = prunedTargets(targetIds, fleet.nodes);
     if (pruned.size !== targetIds.size) targetIds = pruned;
@@ -426,7 +432,8 @@
     // overlay. The tab opens its own SSE connection (fresh app instance) so it
     // stays live. No topology is rendered.
     if (params.get('report')) {
-      kind = params.get('report');
+      reportKinds = params.get('report').split('|').map((s) => s.trim()).filter(Boolean);
+      kind = reportKinds[0] || 'ucast';
       connect();
       reportOverlayOpen = true;
       return;

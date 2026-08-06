@@ -92,9 +92,12 @@ export function createLive({ onUpdate, onJob } = {}) {
     // than are currently running; showing offline nodes bloats the heatmap with
     // empty cells and confuses the user into thinking the orchestrator is trying
     // to reach them.
-    toFleet(kind, variation) {
-      const online = nodes.filter((n) => n.online);
-      const order = [...online].sort((a, b) => (a.private_ip || '').localeCompare(b.private_ip || ''));
+    // includeOffline keeps nodes that are no longer reporting. The live map wants
+    // only what is up; a report is historical and must still describe the nodes a
+    // stored measurement was taken on, which are offline once a fleet is stopped.
+    toFleet(kind, variation, { includeOffline = false } = {}) {
+      const visible = includeOffline ? nodes : nodes.filter((n) => n.online);
+      const order = [...visible].sort((a, b) => (a.private_ip || '').localeCompare(b.private_ip || ''));
       const idx = new Map(order.map((n, i) => [n.private_ip, i]));
       // Copy an optional field through only when the backend actually reports it,
       // so renderers that show raw specs don't print "undefined" for a node that
