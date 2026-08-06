@@ -79,6 +79,7 @@ export function mountTopology2D(container, fleet, opts = {}) {
   viewport.appendChild(svg);
   root.querySelectorAll('.node, .contour, .edge-label, .peering-label').forEach((el) => viewport.appendChild(el));
   ctx.viewport = viewport;
+  ctx.zoomScale = () => zoomState.scale;
   // A live update remounts the view, so zoom and pan are restored from the
   // caller's saved state instead of resetting to the default.
   const v0 = opts.view || {};
@@ -135,6 +136,8 @@ export function mountTopology2D(container, fleet, opts = {}) {
   // Write the restored pan/zoom to the element: the transform is otherwise only
   // set by the event handlers, so a remounted view would ignore it.
   syncTransform();
+  // Pins are restored last: they need the edges, nodes and viewport in place.
+  if (ctx.restorePins) ctx.restorePins();
 
   return {
     getView() { return { scale: zoomState.scale, tx: zoomState.tx, ty: zoomState.ty, panX, panY }; },

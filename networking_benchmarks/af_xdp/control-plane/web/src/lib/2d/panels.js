@@ -233,58 +233,46 @@ export function enhancePanel(ctx, el, track = true, corner = null) {
 // never changes the content's style, indent, or size. It only adds: drag by the
 // header, and participation in fold-all (fold hides the body; reset restores the
 // original position + expanded state). Returns a cleanup fn.
-export function enhancePinned(el, def) {
+export function enhancePinned(el, opts = {}) {
   const h = el.querySelector('h3');
   if (!h) return () => {};
-  h.style.cursor = 'move'; h.style.userSelect = 'none';
-  const body = [...el.children].filter((n) => n !== h);
+  h.style.cursor = 'move';
+  h.style.userSelect = 'none';
 
-  let collapsed = false, dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
-  let snap = null;   // position before folding, restored on unfold
-  const md = (e) => {
+  // The panel lives inside the zoomed viewport, so a pointer delta is divided by
+  // the scale to move it by the same visual distance.
+  const scaleOf = () => (opts.scale && opts.scale()) || 1;
+  let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+
+  const down = (e) => {
     if (e.target.closest && e.target.closest('button,select,a')) return;
-    dragging = true; moved = false; sx = e.clientX; sy = e.clientY;
-    const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
-    el.style.right = el.style.bottom = 'auto'; el.style.left = ox + 'px'; el.style.top = oy + 'px';
+    dragging = true;
+    sx = e.clientX; sy = e.clientY;
+    ox = parseFloat(el.style.left) || 0;
+    oy = parseFloat(el.style.top) || 0;
     e.preventDefault();
   };
-  const mm = (e) => {
+  const move = (e) => {
     if (!dragging) return;
-    if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 3) moved = true;
-    el.style.left = (ox + e.clientX - sx) + 'px'; el.style.top = (oy + e.clientY - sy) + 'px';
+    const k = scaleOf();
+    el.style.left = (ox + (e.clientX - sx) / k) + 'px';
+    el.style.top = (oy + (e.clientY - sy) / k) + 'px';
   };
-  const mu = () => { dragging = false; };
-  h.addEventListener('mousedown', md);
-  window.addEventListener('mousemove', mm); window.addEventListener('mouseup', mu);
+  const up = () => {
+    if (!dragging) return;
+    dragging = false;
+    // Report the resting place so it survives the next remount.
+    if (opts.onMove) opts.onMove(parseFloat(el.style.left) || 0, parseFloat(el.style.top) || 0);
+  };
 
-  const setCollapsed = (want) => {
-    if (want === collapsed) return;
-    collapsed = want;
-    body.forEach((n) => { n.style.display = collapsed ? 'none' : ''; });
-    if (collapsed) {
-      // Fold: keep only the header and stick it to the top browser edge.
-      snap = { left: el.style.left, top: el.style.top };
-      el.style.right = el.style.bottom = 'auto';
-      el.style.top = '0px';
-    } else if (snap) {
-      el.style.left = snap.left; el.style.top = snap.top; snap = null;
-    }
+  h.addEventListener('mousedown', down);
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+  return () => {
+    h.removeEventListener('mousedown', down);
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
   };
-  // Header click folds/unfolds (ignored right after a drag, or on inner controls).
-  h.addEventListener('click', (e) => {
-    if (moved) { moved = false; return; }
-    if (e.target.closest && e.target.closest('button,select,a')) return;
-    setCollapsed(!collapsed);
-  });
-  const reset = () => {
-    collapsed = false; snap = null;
-    body.forEach((n) => { n.style.display = ''; });
-    el.style.right = el.style.bottom = 'auto'; el.style.left = def.left; el.style.top = def.top;
-  };
-  const entry = { setCollapsed, isCollapsed: () => collapsed, reset };
-  foldables.add(entry);
-
-  return () => { foldables.delete(entry); window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); };
 }
 
 // ── Shared panel content builders (used by both 2D and 3D renderers) ─────────
