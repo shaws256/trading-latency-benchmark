@@ -78,6 +78,7 @@ export function mountTopology2D(container, fleet, opts = {}) {
   root.insertBefore(viewport, root.firstChild);
   viewport.appendChild(svg);
   root.querySelectorAll('.node, .contour, .edge-label, .peering-label').forEach((el) => viewport.appendChild(el));
+  ctx.viewport = viewport;
   // A live update remounts the view, so zoom and pan are restored from the
   // caller's saved state instead of resetting to the default.
   const v0 = opts.view || {};

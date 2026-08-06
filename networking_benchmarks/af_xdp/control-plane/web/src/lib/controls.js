@@ -20,7 +20,7 @@ const CSS = `
   padding:2px 4px;border-radius:4px}
 .cp-panel-caret:hover{background:rgba(88,166,255,.15);color:#58a6ff}
 .cp-panel-caret.collapsed{transform:rotate(-90deg)}
-.cp-panel-fold-btn{font-size:9px;color:#8b949e;cursor:pointer;user-select:none;padding:0 2px}
+.cp-panel-fold-btn{font-size:16px;line-height:1;color:#8b949e;cursor:pointer;user-select:none;padding:0 2px}
 .cp-panel-fold-btn:hover{color:#e6edf3}
 .cp-panel-body{padding:6px 12px 10px;background:#161b22}
 .cp-panel .row{display:flex;align-items:center;gap:6px;margin:6px 0;flex-wrap:wrap}

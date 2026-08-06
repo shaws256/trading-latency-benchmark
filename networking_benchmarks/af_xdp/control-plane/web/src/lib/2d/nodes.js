@@ -91,7 +91,7 @@ export function renderNodes(ctx) {
       'top:' + top + 'px',
     ].join(';');
     panelEl.innerHTML = tipHTML(ctx, i);
-    root.appendChild(panelEl);
+    (ctx.viewport || root).appendChild(panelEl);
 
     const dispose = enhancePinned(panelEl, { left: left + 'px', top: top + 'px' });
     pinned.set(i, { el: panelEl, dispose });
