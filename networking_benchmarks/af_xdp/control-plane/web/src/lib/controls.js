@@ -39,7 +39,7 @@ const CSS = `
 .cp-foldall{margin-left:auto;background:transparent;color:#8b949e;border:1px solid #30363d;
   border-radius:7px;padding:5px 10px;cursor:pointer;font:600 13px inherit;line-height:1}
 .cp-foldall:hover{color:#e6edf3;border-color:#8b949e;background:rgba(88,166,255,.12)}
-.cp-lbl{color:#6e7681;font:600 11px inherit;text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+.cp-lbl{color:#6e7681;font:600 11px inherit;text-transform:uppercase;letter-spacing:.4px;flex-shrink:0;width:62px;display:inline-block}
 .cp-section{color:#e6edf3;font:700 12px inherit;text-transform:uppercase;letter-spacing:.5px}
 .cp-btn-group{display:flex;gap:4px;flex-wrap:nowrap;margin-left:4px}
 .cp-stats{color:#8b949e;font:12px inherit;font-variant-numeric:tabular-nums}
@@ -63,7 +63,7 @@ const CSS = `
 .cp-cost-hint{color:#f0883e;font:10px inherit;margin-left:4px}
 .cp-icon{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;padding:4px 9px;cursor:pointer;font:600 14px inherit;line-height:1;flex:0 0 auto}
 .cp-icon:hover{background:#30363d;color:#fff}
-.cp-num{width:58px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 5px;font:12px inherit}
+.cp-num{width:72px;flex:0 0 72px;box-sizing:border-box;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 5px;font:12px inherit}
 .cp-dim{color:#6e7681;font:11px inherit;margin-left:2px}
 .cp-log-label{color:#6e7681;font:700 10px inherit;letter-spacing:.6px}
 .cp-log-row{display:flex;align-items:center;gap:6px;margin:2px 0 3px}
