@@ -39,13 +39,13 @@ const CSS = `
 .cp-foldall{margin-left:auto;background:transparent;color:#8b949e;border:1px solid #30363d;
   border-radius:7px;padding:5px 10px;cursor:pointer;font:600 13px inherit;line-height:1}
 .cp-foldall:hover{color:#e6edf3;border-color:#8b949e;background:rgba(88,166,255,.12)}
-.cp-lbl{color:#6e7681;font:600 11px inherit;text-transform:uppercase;letter-spacing:.4px;flex-shrink:0;width:62px;display:inline-block}
+.cp-lbl{color:#6e7681;font:600 11px inherit;text-transform:uppercase;letter-spacing:.4px;flex-shrink:0;width:76px;display:inline-block;padding-right:10px;box-sizing:border-box}
 .cp-section{color:#e6edf3;font:700 12px inherit;text-transform:uppercase;letter-spacing:.5px}
 .cp-btn-group{display:flex;gap:4px;flex-wrap:nowrap;margin-left:4px}
 .cp-stats{color:#8b949e;font:12px inherit;font-variant-numeric:tabular-nums}
 .cp-stats b{color:#e6edf3}
 .cp-clock{color:#8b949e;font:12px inherit;font-variant-numeric:tabular-nums;flex:1}
-.cp-tz{flex:0 0 auto;width:auto;max-width:150px}
+.cp-tz{flex:0 1 auto;width:auto;min-width:72px;max-width:150px}
 .cp-sel{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:4px 6px;font:12px inherit;flex:1}
 .cp-btn{background:#21262d;color:#adbac7;border:1px solid #30363d;border-radius:6px;
   padding:4px 8px;cursor:pointer;font:600 12px inherit;transition:background .15s,border-color .15s;text-decoration:none;display:inline-block}

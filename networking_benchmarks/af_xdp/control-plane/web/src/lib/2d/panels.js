@@ -66,7 +66,13 @@ export function buildBoundaryToggles(onToggle, initial = {}, extras = []) {
 
 // A live update remounts the 2D view, so panel geometry and fold state live here
 // rather than on the elements, which are rebuilt each time.
-const PANEL_STATE = {};
+const PANEL_STATE_KEY = 't2d-panel-state';
+const PANEL_STATE = (() => {
+  try { return JSON.parse(localStorage.getItem(PANEL_STATE_KEY)) || {}; } catch { return {}; }
+})();
+const savePanelState = () => {
+  try { localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(PANEL_STATE)); } catch { /* ignore */ }
+};
 const panelKey = (el) => (el.className || '').split(/\s+/).filter(Boolean).join('.') || 'panel';
 
 export function enhancePanel(ctx, el, track = true, corner = null) {
@@ -212,6 +218,7 @@ export function enhancePanel(ctx, el, track = true, corner = null) {
       left: el.style.left, top: el.style.top, width: el.style.width,
       height: el.style.height, folded: el.classList.contains('folded'),
     };
+    savePanelState();
   };
   el.addEventListener('mouseup', record);
   const mo = new MutationObserver(record);
