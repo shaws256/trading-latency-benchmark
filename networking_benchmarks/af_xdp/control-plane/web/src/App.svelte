@@ -75,7 +75,15 @@
   function printReport() {
     const views = getReportViews();
     if (!views.length) return;
+    // Browsers name the saved PDF from the document title, and @page margin 0
+    // suppresses the header, so a dynamic title is safe here.
+    const kinds = [...new Set(views.map((v) => (v.kind === 'mcast' ? 'multicast' : 'unicast')))].join('-');
+    const p2 = (n) => String(n).padStart(2, '0');
+    const dt = new Date();
+    const stamp = `${dt.getFullYear()}${p2(dt.getMonth() + 1)}${p2(dt.getDate())}`
+      + `-${p2(dt.getHours())}${p2(dt.getMinutes())}${p2(dt.getSeconds())}`;
     const doc = buildCombinedReportHTML(views, panel?.timezone?.() || '')
+      .replace(/<title>[^<]*<\/title>/, `<title>latency-report-${kinds}-${stamp}</title>`)
       .replace('</head>', `<style>
         @page { size: landscape; margin: 0; }
         @media print {
@@ -156,6 +164,14 @@
       contentEl.innerHTML = body;
     } else {
       reportOverlayEl.innerHTML = `<div class="report-content report-view">${body}</div>`;
+      // The report's own button calls window.print(), which inside this overlay
+      // captures only the visible viewport, so route it through the iframe path.
+      const pb = reportOverlayEl.querySelector('[data-print-btn]');
+      if (pb) {
+        const fresh = pb.cloneNode(true);
+        pb.parentNode.replaceChild(fresh, pb);
+        fresh.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); printReport(); });
+      }
     }
 
     const root = reportOverlayEl.querySelector('.report-content');
@@ -246,7 +262,9 @@
     if (reportOverlayOpen) rerenderReportOverlay();
     else remount();
     const s = conn.stats();
-    panel?.setStats({ ...s, updated: Date.now() });
+    // Count the links currently displayed rather than every edge ever seen, so
+    // the readout tracks the selected kind and variation.
+    panel?.setStats({ ...statsFromFleet(fleet), online: s.online, nodes: s.nodes, updated: Date.now() });
   }
   function scheduleRerender() {
     if (rerenderTimer) return;
@@ -437,9 +455,6 @@
 
 {#if reportOverlayOpen}
 <div class="report-overlay" data-report-overlay>
-  <div class="report-toolbar">
-    <button class="report-toolbar-btn" on:click={printReport}>Save as PDF</button>
-  </div>
   <div class="report-body" bind:this={reportOverlayEl}></div>
 </div>
 {/if}

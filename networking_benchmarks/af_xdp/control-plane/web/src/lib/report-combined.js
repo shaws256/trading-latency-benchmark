@@ -313,7 +313,8 @@ export function buildCombinedReportBody(views, tz) {
 
   const kindLabel = vs[0].kind === 'mcast' ? 'multicast' : 'unicast';
   const title = `Latency Report - ${kindLabel}`;
-  return `<div class="report-export-bar"><button data-print-btn class="report-toolbar-btn">Save as PDF</button><button data-xls-btn class="report-toolbar-btn">Save as XLS</button></div>
+  const kindsAttr = [...new Set(vs.map((v) => (v.kind === 'mcast' ? 'multicast' : 'unicast')))].join('-');
+  return `<div class="report-export-bar" data-report-kinds="${esc(kindsAttr)}"><button data-print-btn class="report-toolbar-btn">Save as PDF</button><button data-xls-btn class="report-toolbar-btn">Save as XLS</button></div>
   <h1>${esc(title)}</h1>
   <div class="meta">Region: ${esc(region)} \u00b7 Nodes: ${nodes.length} \u00b7 Modes: ${esc(modeList.join(', '))} \u00b7 Measurements: ${rows.length} \u00b7 Timezone: ${esc(tzLabel(tz))} \u00b7 Generated: ${esc(gen)}</div>
   ${ages(rows, tz)}
@@ -521,7 +522,12 @@ export function reportInteractions(root) {
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'latency-report.xls';
+    var bar = root.querySelector('[data-report-kinds]');
+    var kinds = (bar && bar.getAttribute('data-report-kinds')) || 'report';
+    var d = new Date(), pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
+      + '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+    a.download = 'latency-report-' + kinds + '-' + stamp + '.xls';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

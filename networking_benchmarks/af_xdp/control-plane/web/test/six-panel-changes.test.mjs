@@ -171,29 +171,26 @@ test('(5) fold indicator differs between folded and unfolded for Targets', () =>
   freshPanel();
   const btn = dom.window.document.querySelector('[data-fold-targets]');
   assert.ok(btn, 'fold-targets button must exist');
-  const closedText = btn.textContent;
-  // Click to open
+  const closedCollapsed = btn.classList.contains('collapsed');
   btn.click();
-  const openText = btn.textContent;
-  assert.notEqual(closedText, openText,
-    `fold indicator must differ: closed="${closedText}" vs open="${openText}"`);
-  // Verify the closed state uses + (not the old ▶ caret)
-  assert.equal(closedText, '+', 'collapsed state should show "+"');
-  // Verify the open state uses − (not the old ▼ caret)
-  assert.equal(openText, '\u2212', 'expanded state should show "−"');
+  const openCollapsed = btn.classList.contains('collapsed');
+  // A chevron shows state by rotation, so the collapsed class must flip.
+  assert.notEqual(closedCollapsed, openCollapsed,
+    'the collapsed class must flip between folded and unfolded');
+  assert.equal(btn.textContent, '\u2304', 'the indicator is a chevron');
 });
 
 test('(5) fold indicator differs between folded and unfolded for Latency', () => {
   freshPanel();
   const btn = dom.window.document.querySelector('[data-fold-latency]');
   assert.ok(btn, 'fold-latency button must exist');
-  const closedText = btn.textContent;
+  const closedCollapsed = btn.classList.contains('collapsed');
   btn.click();
-  const openText = btn.textContent;
-  assert.notEqual(closedText, openText,
-    `fold indicator must differ: closed="${closedText}" vs open="${openText}"`);
-  assert.equal(closedText, '+', 'collapsed state should show "+"');
-  assert.equal(openText, '\u2212', 'expanded state should show "−"');
+  const openCollapsed = btn.classList.contains('collapsed');
+  // A chevron shows state by rotation, so the collapsed class must flip.
+  assert.notEqual(closedCollapsed, openCollapsed,
+    'the collapsed class must flip between folded and unfolded');
+  assert.equal(btn.textContent, '\u2304', 'the indicator is a chevron');
 });
 
 // ════════════════════════════════════════════════════════════════════════════════

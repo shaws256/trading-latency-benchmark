@@ -16,7 +16,7 @@ const CSS = `
 .cp-panel-title{display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:move;
   user-select:none;border-bottom:1px solid #30363d;background:#0d1117}
 .cp-panel-title:hover{background:#1c2128}
-.cp-panel-caret{font-size:14px;color:#8b949e;margin-right:6px;transition:transform .15s;cursor:pointer;
+.cp-panel-caret{display:inline-block;transition:transform .12s;font-size:14px;color:#8b949e;margin-right:6px;transition:transform .15s;cursor:pointer;
   padding:2px 4px;border-radius:4px}
 .cp-panel-caret:hover{background:rgba(88,166,255,.15);color:#58a6ff}
 .cp-panel-caret.collapsed{transform:rotate(-90deg)}
@@ -111,7 +111,7 @@ export function mountControls(host, opts = {}) {
 
       <!-- Target block: shared between normal and live modes -->
       <div data-target-block>
-        <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>+</span></div>
+        <div class="row center"><span class="cp-section">Targets</span><span class="cp-panel-caret collapsed" data-fold-targets>\u2304</span></div>
         <div data-targets-content style="display:none">
         <div class="row"><span class="cp-target-info" data-target-info>No selection \u2014 full mesh</span></div>
         <div class="row"><span class="cp-tip" data-target-tip>Mark an instance for a group selection</span></div>
@@ -122,7 +122,7 @@ export function mountControls(host, opts = {}) {
       <div class="cp-hr"></div>
 
       <div data-normal>
-        <div class="row center"><span class="cp-section">Test Latency</span><span class="cp-panel-caret collapsed" data-fold-latency>+</span></div>
+        <div class="row center"><span class="cp-section">Test Latency</span><span class="cp-panel-caret collapsed" data-fold-latency>\u2304</span></div>
         <div data-latency-content style="display:none">
         <div class="row"><span class="cp-lbl">Packets</span><input class="cp-num" data-count value="10000" title="Measurement packets per pair (100–1,000,000)"></div>
         <div class="row"><span class="cp-lbl">Rate</span><input class="cp-num" data-rate value="10000" title="Ucast send rate (1,000–1,000,000)"><span class="cp-dim">pps</span></div>
@@ -265,7 +265,7 @@ export function mountControls(host, opts = {}) {
       const open = !!st[key];
       content.style.display = open ? '' : 'none';
       btn.classList.toggle('collapsed', !open);
-      btn.textContent = open ? '\u2212' : '+';
+      btn.textContent = '\u2304';
     }
   }
 
@@ -406,13 +406,11 @@ export function mountControls(host, opts = {}) {
     if (foldState.targets) {
       targetsContent.style.display = '';
       foldTargetsBtn.classList.remove('collapsed');
-      foldTargetsBtn.textContent = '\u2212';
     }
     foldTargetsBtn.addEventListener('click', () => {
       const hidden = targetsContent.style.display === 'none';
       targetsContent.style.display = hidden ? '' : 'none';
       foldTargetsBtn.classList.toggle('collapsed', !hidden);
-      foldTargetsBtn.textContent = hidden ? '\u2212' : '+';
       foldState.targets = hidden;
       saveFoldState(foldState);
     });
@@ -424,13 +422,11 @@ export function mountControls(host, opts = {}) {
     if (foldState.latency) {
       latencyContent.style.display = '';
       foldLatencyBtn.classList.remove('collapsed');
-      foldLatencyBtn.textContent = '\u2212';
     }
     foldLatencyBtn.addEventListener('click', () => {
       const hidden = latencyContent.style.display === 'none';
       latencyContent.style.display = hidden ? '' : 'none';
       foldLatencyBtn.classList.toggle('collapsed', !hidden);
-      foldLatencyBtn.textContent = hidden ? '\u2212' : '+';
       foldState.latency = hidden;
       saveFoldState(foldState);
     });
@@ -474,7 +470,7 @@ export function mountControls(host, opts = {}) {
     opsLog() { return opsLog.slice(); },
     endRun() { endRunUI(); },
     setStats({ nodes = 0, online = 0, edges = 0 } = {}) {
-      statsEl.innerHTML = `<b>${online}</b>/${nodes} online &middot; <b>${edges}</b> edges`;
+      statsEl.innerHTML = `<b>${online}</b>/${nodes} online &middot; <b>${edges}</b> links`;
     },
     // Populate the Show dropdown with saved-run browse results (dev-only API).
     setResults(runs) {

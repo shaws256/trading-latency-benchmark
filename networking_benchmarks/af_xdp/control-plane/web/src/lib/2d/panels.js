@@ -64,13 +64,18 @@ export function buildBoundaryToggles(onToggle, initial = {}, extras = []) {
   return wrap;
 }
 
+// A live update remounts the 2D view, so panel geometry and fold state live here
+// rather than on the elements, which are rebuilt each time.
+const PANEL_STATE = {};
+const panelKey = (el) => (el.className || '').split(/\s+/).filter(Boolean).join('.') || 'panel';
+
 export function enhancePanel(ctx, el, track = true, corner = null) {
   const h = el.querySelector('h3');
   if (!h) return () => {};
 
   // Caret.
   const caret = document.createElement('span');
-  caret.className = 'panel-caret'; caret.textContent = '\u25be';
+  caret.className = 'panel-caret'; caret.textContent = '\u2304';
   h.insertBefore(caret, h.firstChild);
 
   // Structure: el > h3 (immutable height) + content > scaler > [body]
@@ -193,6 +198,24 @@ export function enhancePanel(ctx, el, track = true, corner = null) {
   const cleanup = () => { foldables.delete(foldEntry); ro.disconnect(); window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
   if (track) ctx.disposers.push(cleanup);
   return cleanup;
+  // Restore this panel's saved geometry and fold, and keep the store current.
+  const pk = panelKey(el), st = PANEL_STATE[pk];
+  if (st) {
+    if (st.left) el.style.left = st.left;
+    if (st.top) el.style.top = st.top;
+    if (st.width) el.style.width = st.width;
+    if (st.height) el.style.height = st.height;
+    if (st.folded) el.classList.add('folded');
+  }
+  const record = () => {
+    PANEL_STATE[pk] = {
+      left: el.style.left, top: el.style.top, width: el.style.width,
+      height: el.style.height, folded: el.classList.contains('folded'),
+    };
+  };
+  el.addEventListener('mouseup', record);
+  h.addEventListener('click', () => setTimeout(record, 0));
+
 }
 
 // Dedicated enhancer for pinned latency panels. Unlike enhancePanel it does NOT
@@ -330,10 +353,12 @@ export function renderPanels(ctx) {
       + '<span style="border:2px dashed rgba(163,113,247,0.4);color:#c084fc">AZ</span>'
       + '<span style="border:1.5px dashed rgba(57,211,83,0.3);color:#39d353">Region</span>'
       + '<span style="border:1.5px solid rgba(248,81,73,0.5);color:#f85149">Account</span></div>'
-      + '<div class="ux-hint">'
+      + '<div class="ux-instr"><div class="instr-head" data-instr-toggle><span class="instr-chevron">\u2304</span> Instructions</div>'
+      + '<div class="ux-hint" data-instr-body style="display:none">'
       + '<div class="hint-row"><b>Hover</b> a node \u2014 show its edge labels</div>'
       + '<div class="hint-row"><b>Click</b> a node \u2014 pin its latency table</div>'
       + '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold; drag its corner to resize</div>'
+      + '</div></div>'
       + '</div>';
     // Shared Boundaries toggles — show/hide contour levels (and VPC peering lines).
     // Shared Show toggles — boundary levels + Links (edge) visibility in one row.
@@ -346,7 +371,19 @@ export function renderPanels(ctx) {
         if (!on) root.querySelectorAll('.peering-label').forEach((c) => { c.style.display = 'none'; });
       }
     }, {}, [{ label: 'Links', checked: true, onChange: (on) => { ctx.linksHidden = !on; applySel(ctx, -1); } }]));
-    root.appendChild(el);
+    
+  // Instructions collapse behind their own chevron header.
+  const it = el.querySelector('[data-instr-toggle]'), ib = el.querySelector('[data-instr-body]');
+  if (it && ib) {
+    it.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const open = ib.style.display !== 'none';
+      ib.style.display = open ? 'none' : '';
+      it.classList.toggle('collapsed', open);
+    });
+    it.classList.add('collapsed');
+  }
+  root.appendChild(el);
   })();
 
   // Summary panel (shared logic via buildSummaryHTML).

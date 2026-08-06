@@ -212,4 +212,12 @@ export const CSS = `
 .t2d-root .node-tooltip .sparkline-row td { padding: 2px 6px; }
 .t2d-root .node-tooltip .sparkline-row svg.sparkline { display: block; }
 .t2d-root .node-tooltip tr[style*="dashed"] td { border-style: dashed; }
+/* Instructions fold inside the legend, with a chevron that rotates when shut. */
+.t2d-root .vis-legend .instr-head { cursor: pointer; font-weight: 700; color: #8b949e;
+  margin-top: 6px; user-select: none; display: flex; align-items: center; gap: 5px; }
+.t2d-root .vis-legend .instr-head:hover { color: #e6edf3; }
+.t2d-root .vis-legend .instr-chevron { display: inline-block; transition: transform .12s; }
+.t2d-root .vis-legend .instr-head.collapsed .instr-chevron { transform: rotate(-90deg); }
+.t2d-root .panel-caret { display: inline-block; transition: transform .12s; }
+.t2d-root .folded .panel-caret { transform: rotate(-90deg); }
 `;
