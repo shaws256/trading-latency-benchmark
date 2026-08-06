@@ -179,6 +179,70 @@ Fleet nodes either use the **baked AMI** (instant readiness) or stock AL2023 +
 `ansible-playbook sync.yaml` (rsync → rebuild tools **and the Go agent** → restart).
 The `afxdpctl` CLI wraps all of this. See [`deploy/README.md`](deploy/README.md).
 
+## Accessing the control plane
+
+The web UI and JSON/SSE API listen on `8080` with no authentication and no TLS,
+so that port is **not exposed**. Reach it through SSM Session Manager port
+forwarding, which authorises on IAM and needs no inbound rule, no certificate
+and no DNS name:
+
+```bash
+# One-time: install the plugin (macOS)
+brew install --cask session-manager-plugin
+
+# Forward the control plane's 8080 to localhost:8080
+aws ssm start-session --region <region> --target <control-plane-instance-id> \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+
+# then browse http://localhost:8080
+```
+
+Find the instance id with:
+
+```bash
+aws ec2 describe-instances --region <region> \
+  --filters "Name=tag:Name,Values=af-xdp-control-plane" \
+             "Name=instance-state-name,Values=running" \
+  --query "Reservations[].Instances[].InstanceId" --output text
+```
+
+A shell on the same instance, without SSH or an open port:
+
+```bash
+aws ssm start-session --region <region> --target <control-plane-instance-id>
+```
+
+Every session is authenticated as your IAM principal and recorded in CloudTrail,
+so access is auditable per user. Requirements are met by the stack already: the
+instance role carries `AmazonSSMManagedInstanceCore` and Amazon Linux 2023 ships
+the SSM agent, so `aws ssm describe-instance-information` should list the
+instance as `Online`.
+
+### Direct access instead
+
+To reach `8080` and `22` from one address rather than over SSM, deploy the
+control plane with `adminCidr`:
+
+```bash
+npx cdk deploy XdpStack-ControlPlane --context deploymentType=control-plane \
+  --context region=<region> --context keyPairName=<key> \
+  --context adminCidr=$(curl -s https://checkip.amazonaws.com)/32
+```
+
+Without `adminCidr`, `8080` has no ingress rule at all and `22` stays open -
+narrow it yourself if the account is not otherwise restricted.
+
+### What stays exposed
+
+`4222` (NATS) follows `clientCidr`, default `0.0.0.0/0`, because agents dial in
+from every region a fleet spans and a cross-region fleet reaches the control
+plane over the public internet. A token in SSM protects it. Closing it needs
+private connectivity between the fleet VPCs and the control plane rather than a
+security group change, so treat a world-reachable `4222` as the remaining
+exposure and set `clientCidr` when the fleet is single-region.
+
+
 ## Build Targets
 
 | Target | Links | XDP? | Container-safe? |
