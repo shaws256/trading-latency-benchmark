@@ -71,7 +71,7 @@ export const CSS = `
 /* ── Panels (stats/legend/instance) — position:absolute within .t2d-root ── */
 /* Using absolute so they stay inside the canvas stacking context and don't  */
 /* conflict with the fixed .cp-panel control overlay.                        */
-.t2d-root .panel-caret { display: inline-block; width: 12px; margin-right: 4px; font-size: 10px; color: #8b949e; }
+.t2d-root .panel-caret { display: inline-block; width: 16px; margin-right: 4px; font-size: 16px; color: #8b949e; }
 .t2d-root .stats h3, .t2d-root .vis-legend h3, .t2d-root .instance-legend h3 {
   cursor: move; user-select: none; margin: 0; padding: 8px 12px;
   background: #0d1117; border-bottom: 1px solid #30363d; border-radius: 8px 8px 0 0;
@@ -216,7 +216,7 @@ export const CSS = `
 .t2d-root .vis-legend .instr-head { cursor: pointer; font-weight: 700; color: #8b949e;
   margin-top: 6px; user-select: none; display: flex; align-items: center; gap: 5px; }
 .t2d-root .vis-legend .instr-head:hover { color: #e6edf3; }
-.t2d-root .vis-legend .instr-chevron { display: inline-block; transition: transform .12s; }
+.t2d-root .vis-legend .instr-chevron { display: inline-block; font-size: 16px; line-height: 1; transition: transform .12s; }
 .t2d-root .vis-legend .instr-head.collapsed .instr-chevron { transform: rotate(-90deg); }
 .t2d-root .panel-caret { display: inline-block; transition: transform .12s; }
 .t2d-root .folded .panel-caret { transform: rotate(-90deg); }

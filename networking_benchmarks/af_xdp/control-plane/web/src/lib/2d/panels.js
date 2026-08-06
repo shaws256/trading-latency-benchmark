@@ -214,7 +214,9 @@ export function enhancePanel(ctx, el, track = true, corner = null) {
     };
   };
   el.addEventListener('mouseup', record);
-  h.addEventListener('click', () => setTimeout(record, 0));
+  const mo = new MutationObserver(record);
+  mo.observe(el, { attributes: true, attributeFilter: ['class', 'style'] });
+  ctx.disposers.push(() => mo.disconnect());
 
 }
 
@@ -344,6 +346,12 @@ export function renderPanels(ctx) {
   (function () {
     const el = document.createElement('div'); el.className = 'vis-legend';
     el.innerHTML = '<h3>Legend</h3>'
+      + '<div class="ux-instr"><div class="instr-head" data-instr-toggle><span class="instr-chevron">\u2304</span> Instructions</div>'
+      + '<div class="ux-hint" data-instr-body style="display:none">'
+      + '<div class="hint-row"><b>Hover</b> a node \u2014 show its edge labels</div>'
+      + '<div class="hint-row"><b>Click</b> a node \u2014 pin its latency table</div>'
+      + '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold; drag its corner to resize</div>'
+      + '</div></div>'
       + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#9abe5a,#f0883e,#f85149)"></div><span>Edge color = p50 (green=fast, red=slow)</span></div>'
       + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,rgba(57,211,83,0.7),rgba(57,211,83,0.07))"></div><span>Edge opacity = p50 (faster = more opaque)</span></div>'
       + '<div class="row"><div class="swatch" style="background:' + CAP_GRADIENT_CSS + '"></div><span>Node color = capability (blue=basic \u2192 green=metal/top-net)</span></div>'
@@ -353,12 +361,6 @@ export function renderPanels(ctx) {
       + '<span style="border:2px dashed rgba(163,113,247,0.4);color:#c084fc">AZ</span>'
       + '<span style="border:1.5px dashed rgba(57,211,83,0.3);color:#39d353">Region</span>'
       + '<span style="border:1.5px solid rgba(248,81,73,0.5);color:#f85149">Account</span></div>'
-      + '<div class="ux-instr"><div class="instr-head" data-instr-toggle><span class="instr-chevron">\u2304</span> Instructions</div>'
-      + '<div class="ux-hint" data-instr-body style="display:none">'
-      + '<div class="hint-row"><b>Hover</b> a node \u2014 show its edge labels</div>'
-      + '<div class="hint-row"><b>Click</b> a node \u2014 pin its latency table</div>'
-      + '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold; drag its corner to resize</div>'
-      + '</div></div>'
       + '</div>';
     // Shared Boundaries toggles — show/hide contour levels (and VPC peering lines).
     // Shared Show toggles — boundary levels + Links (edge) visibility in one row.

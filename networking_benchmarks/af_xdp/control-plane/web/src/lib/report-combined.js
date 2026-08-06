@@ -491,7 +491,10 @@ export function reportInteractions(root) {
       xml += '<Row>';
       var cells = [].slice.call(rows[r].querySelectorAll('th, td'));
       for (var c = 0; c < cells.length; c++) {
-        var txt = cells[c].textContent.trim();
+        var cc = cells[c].cloneNode(true);
+        var badges = cc.querySelectorAll('.mode-badge');
+        for (var bi = 0; bi < badges.length; bi++) badges[bi].remove();
+        var txt = cc.textContent.trim();
         var isNum = /^-?\d+(\.\d+)?$/.test(txt);
         var type = isNum ? 'Number' : 'String';
         var val = isNum ? txt : xmlEsc(txt);

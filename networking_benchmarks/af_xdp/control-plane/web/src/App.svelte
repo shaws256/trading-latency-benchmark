@@ -106,7 +106,7 @@
       </style></head>`);
     const f = document.createElement('iframe');
     f.setAttribute('aria-hidden', 'true');
-    f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+    f.style.cssText = 'position:fixed;left:-10000px;top:0;width:1200px;height:1600px;border:0';
     document.body.appendChild(f);
     f.contentDocument.open();
     f.contentDocument.write(doc);

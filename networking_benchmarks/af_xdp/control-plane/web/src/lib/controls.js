@@ -16,7 +16,7 @@ const CSS = `
 .cp-panel-title{display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:move;
   user-select:none;border-bottom:1px solid #30363d;background:#0d1117}
 .cp-panel-title:hover{background:#1c2128}
-.cp-panel-caret{display:inline-block;transition:transform .12s;font-size:14px;color:#8b949e;margin-right:6px;transition:transform .15s;cursor:pointer;
+.cp-panel-caret{display:inline-block;transition:transform .12s;font-size:18px;color:#8b949e;margin-right:6px;transition:transform .15s;cursor:pointer;
   padding:2px 4px;border-radius:4px}
 .cp-panel-caret:hover{background:rgba(88,166,255,.15);color:#58a6ff}
 .cp-panel-caret.collapsed{transform:rotate(-90deg)}
