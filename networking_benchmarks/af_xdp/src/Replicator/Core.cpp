@@ -173,6 +173,10 @@ void Replicator::start() {
             std::cout << "Started HFT-optimized packet processing thread for queue " << queue_id << std::endl;
         }
         
+        // Publish the fan-out snapshot off the packet threads: rebuilding it inline
+        // took a mutex and resolved ARP on the RX path every 100 ms.
+        dest_refresh_thread_ = std::make_unique<std::thread>(&Replicator::destRefreshLoop, this);
+
         // Start control protocol thread (don't bind to specific core to avoid interference)
         control_thread_ = std::make_unique<std::thread>(&Replicator::handleControlProtocol, this);
 
@@ -200,6 +204,14 @@ void Replicator::stop() {
         packet_processor_threads_.clear();
         
         // Wait for control thread to finish
+        if (dest_refresh_thread_ && dest_refresh_thread_->joinable()) {
+            dest_refresh_thread_->join();
+            dest_refresh_thread_.reset();
+        }
+        // Readers are stopped, so retired snapshots can go.
+        dest_snapshot_.store(nullptr, std::memory_order_release);
+        for (auto& s : snapshot_ring_) s.reset();
+
         if (control_thread_ && control_thread_->joinable()) {
             control_thread_->join();
             control_thread_.reset();
