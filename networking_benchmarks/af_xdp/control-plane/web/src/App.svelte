@@ -72,6 +72,10 @@
   // The browser's print header prints document.title; blank it so the page is
   // not stamped with "AF_XDP topology". The URL half of that header is a print
   // dialog setting and cannot be suppressed from CSS.
+  // The report's own PDF button calls this instead of window.print(), which
+  // inside the overlay captures only the visible viewport.
+  if (typeof window !== 'undefined') window.__afxdpPrintReport = () => printReport();
+
   function printReport() {
     const views = getReportViews();
     if (!views.length) return;
@@ -87,6 +91,8 @@
       .replace('</head>', `<style>
         @page { size: landscape; margin: 0; }
         @media print {
+          /* Export controls are screen affordances, not part of the report. */
+          .report-export-bar { display: none !important; }
           html, body { background: #fff !important; color: #111 !important; }
           /* @page margin is 0 so browsers drop their header/footer; put the
              page margin back on the content instead. */
@@ -164,14 +170,6 @@
       contentEl.innerHTML = body;
     } else {
       reportOverlayEl.innerHTML = `<div class="report-content report-view">${body}</div>`;
-      // The report's own button calls window.print(), which inside this overlay
-      // captures only the visible viewport, so route it through the iframe path.
-      const pb = reportOverlayEl.querySelector('[data-print-btn]');
-      if (pb) {
-        const fresh = pb.cloneNode(true);
-        pb.parentNode.replaceChild(fresh, pb);
-        fresh.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); printReport(); });
-      }
     }
 
     const root = reportOverlayEl.querySelector('.report-content');

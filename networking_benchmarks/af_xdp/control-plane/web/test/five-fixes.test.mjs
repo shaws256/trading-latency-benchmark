@@ -157,10 +157,10 @@ describe('(2) panel fold state persistence', () => {
     const content = host.querySelector('[data-targets-content]');
     assert.equal(content.style.display, '', 'targets expanded after click');
 
-    const stored = localStorage.getItem('cp-fold-state');
+    const stored = localStorage.getItem('afxdp-fold-state');
     assert.ok(stored, 'fold state stored in localStorage');
     const state = JSON.parse(stored);
-    assert.equal(state.targets, true, 'targets open state stored');
+    assert.equal(state['cp-targets'], false, 'targets recorded as unfolded');
 
     // Destroy and remount
     panel.dispose();
@@ -182,8 +182,8 @@ describe('(2) panel fold state persistence', () => {
     const content = host.querySelector('[data-latency-content]');
     assert.equal(content.style.display, '', 'latency expanded after click');
 
-    const state = JSON.parse(localStorage.getItem('cp-fold-state'));
-    assert.equal(state.latency, true, 'latency open state stored');
+    const state = JSON.parse(localStorage.getItem('afxdp-fold-state'));
+    assert.equal(state['cp-latency'], false, 'latency recorded as unfolded');
     panel.dispose();
   });
 });

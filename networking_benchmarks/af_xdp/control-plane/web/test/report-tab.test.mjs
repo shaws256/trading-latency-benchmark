@@ -76,10 +76,11 @@ test('Targets folds like Test Latency', () => {
   // The attribute is valueless, so there is no closing quote after it.
   assert.match(controls, /data-targets-content style="display:none"/,
     'Targets starts collapsed, like Test Latency');
-  const h = controls.slice(controls.indexOf("const foldTargetsBtn"),
-    controls.indexOf("const foldLatencyBtn"));
-  assert.match(h, /targetsContent\.style\.display/, 'the caret must toggle the body');
-  assert.match(h, /classList\.toggle\('collapsed'/, 'and reflect state on the caret');
+  // Folding lives in one shared module now, so assert both sections route
+  // through it rather than re-checking inlined handler source.
+  assert.match(controls, /makeFoldable\(/, 'sections must use the shared fold module');
+  assert.match(controls, /'cp-targets'/, 'Targets needs a persistent fold key');
+  assert.match(controls, /'cp-latency'/, 'Test Latency needs a persistent fold key');
 });
 
 test('the foldable Targets body encloses the whole block', () => {

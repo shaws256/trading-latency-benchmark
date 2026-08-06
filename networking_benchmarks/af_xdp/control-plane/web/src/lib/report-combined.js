@@ -262,6 +262,7 @@ export const REPORT_CSS = `
   .selbar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;
     padding:1px 7px;font-size:11px;cursor:pointer;margin-left:6px}
   .report-export-bar{display:flex;gap:8px;margin-bottom:12px}
+  @media print{.report-export-bar{display:none !important}}
   .report-toolbar-btn{background:#21262d;color:#e6edf3;border:1px solid #30363d;
     border-radius:6px;padding:6px 14px;cursor:pointer;font:600 13px system-ui,-apple-system,sans-serif}
   .report-toolbar-btn:hover{background:#30363d;color:#fff}
@@ -467,7 +468,11 @@ export function reportInteractions(root) {
 
   // ── Save as PDF: triggers the browser print dialog ──────────────────────────
   var printBtn = root.querySelector('[data-print-btn]');
-  if (printBtn) printBtn.addEventListener('click', function() { window.print(); });
+  if (printBtn) printBtn.addEventListener('click', function() {
+    var hook = (typeof window !== 'undefined') && window.__afxdpPrintReport;
+    if (typeof hook === 'function') hook();
+    else window.print();
+  });
 
   // ── Save as XLS: single SpreadsheetML 2003 workbook, one sheet per table ───
   function xmlEsc(s) {

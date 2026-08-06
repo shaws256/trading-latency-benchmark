@@ -75,7 +75,8 @@ const CSS = `
 .cp-hr{height:1px;background:#21262d;margin:4px -12px}
 `;
 
-import { enhancePanel, foldAllPanels } from './2d/panels.js';
+import { enhancePanel } from './2d/panels.js';
+import { makeFoldable, setAllFolded } from './fold.js';
 import { esc } from './2d/palette.js';
 import { SCOPES, SCOPE_AMONG, SCOPE_FANOUT, PRESETS, countPairs } from './pairs.js';
 
@@ -189,6 +190,14 @@ export function mountControls(host, opts = {}) {
   const $ = (sel) => el.querySelector(sel);
   const segBtns = [...el.querySelectorAll('[data-mode]')];
   const liveBtn = $('[data-live]');
+  // Fold state for both sections, bound once the markup exists.
+  const foldables = [
+    ['cp-targets', '[data-fold-targets]', '[data-targets-content]'],
+    ['cp-latency', '[data-fold-latency]', '[data-latency-content]'],
+  ].map(([key, btnSel, contentSel]) => makeFoldable(
+    key, $(btnSel), $(contentSel), { defaultFolded: true },
+  ));
+
   const foldAllBtn = $('[data-foldall]');
   // Toggle: 1st click folds EVERY panel (including this control panel); 2nd click
   // restores them ALL to their default position/size/expanded state, regardless
@@ -196,7 +205,7 @@ export function mountControls(host, opts = {}) {
   let allFolded = false;
   foldAllBtn.addEventListener('click', () => {
     allFolded = !allFolded;
-    foldAllPanels(allFolded);
+    setAllFolded(allFolded);
     foldAllBtn.textContent = allFolded ? '\u29C7' : '\u29C9';
   });
   const viewSeg = $('[data-view-seg]');
@@ -252,23 +261,8 @@ export function mountControls(host, opts = {}) {
   const paintLive = () => { liveBtn.classList.toggle('on', liveOn); liveBtn.textContent = liveOn ? '\u25CF Live' : 'Live'; };
   // Live mode swaps the panel body: hide the Show row + one-shot Run Tests, show
   // the heartbeat section (distinct settings). Clears any active heartbeat on exit.
-  // Fold state is authoritative: any path that changes section visibility must
-  // re-apply it, or a folded panel springs open on the next live update. Reads
-  // storage directly so it does not depend on declaration order.
-  function applyFoldState() {
-    let st = {};
-    try { st = JSON.parse(localStorage.getItem('cp-fold-state')) || {}; } catch { st = {}; }
-    const pairs = [['targets', '[data-fold-targets]', '[data-targets-content]'],
-                   ['latency', '[data-fold-latency]', '[data-latency-content]']];
-    for (const [key, btnSel, contentSel] of pairs) {
-      const btn = el.querySelector(btnSel), content = el.querySelector(contentSel);
-      if (!btn || !content) continue;
-      const open = !!st[key];
-      content.style.display = open ? '' : 'none';
-      btn.classList.toggle('collapsed', !open);
-      btn.textContent = '\u2304';
-    }
-  }
+  // Sections bind eagerly below; this only re-asserts after a repaint.
+  function applyFoldState() { foldables.forEach((f) => f.apply()); }
 
   function syncSections() {
     el.querySelectorAll('[data-normal]').forEach((n) => { n.style.display = liveOn ? 'none' : ''; });
@@ -390,48 +384,6 @@ export function mountControls(host, opts = {}) {
   };
 
   // ── Fold state persistence (localStorage) ────────────────────────────────
-  const FOLD_KEY = 'cp-fold-state';
-  function loadFoldState() {
-    try { return JSON.parse(localStorage.getItem(FOLD_KEY)) || {}; } catch { return {}; }
-  }
-  function saveFoldState(state) {
-    try { localStorage.setItem(FOLD_KEY, JSON.stringify(state)); } catch { /* ignore */ }
-  }
-  const foldState = loadFoldState();
-
-  // ── Test Latency fold toggle ────────────────────────────────────────────────
-  const foldTargetsBtn = $('[data-fold-targets]');
-  const targetsContent = $('[data-targets-content]');
-  // Restore fold state for targets
-  if (foldTargetsBtn && targetsContent) {
-    if (foldState.targets) {
-      targetsContent.style.display = '';
-      foldTargetsBtn.classList.remove('collapsed');
-    }
-    foldTargetsBtn.addEventListener('click', () => {
-      const hidden = targetsContent.style.display === 'none';
-      targetsContent.style.display = hidden ? '' : 'none';
-      foldTargetsBtn.classList.toggle('collapsed', !hidden);
-      foldState.targets = hidden;
-      saveFoldState(foldState);
-    });
-  }
-  const foldLatencyBtn = $('[data-fold-latency]');
-  const latencyContent = $('[data-latency-content]');
-  // Restore fold state for latency
-  if (foldLatencyBtn && latencyContent) {
-    if (foldState.latency) {
-      latencyContent.style.display = '';
-      foldLatencyBtn.classList.remove('collapsed');
-    }
-    foldLatencyBtn.addEventListener('click', () => {
-      const hidden = latencyContent.style.display === 'none';
-      latencyContent.style.display = hidden ? '' : 'none';
-      foldLatencyBtn.classList.toggle('collapsed', !hidden);
-      foldState.latency = hidden;
-      saveFoldState(foldState);
-    });
-  }
 
   // ── Live heartbeat: choose a mode -> App re-runs it every interval (min 30s) ──
   let _targetIds = new Set();

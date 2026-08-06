@@ -219,5 +219,6 @@ export const CSS = `
 .t2d-root .vis-legend .instr-chevron { display: inline-block; font-size: 16px; line-height: 1; transition: transform .12s; }
 .t2d-root .vis-legend .instr-head.collapsed .instr-chevron { transform: rotate(-90deg); }
 .t2d-root .panel-caret { display: inline-block; transition: transform .12s; }
-.t2d-root .folded .panel-caret { transform: rotate(-90deg); }
+.t2d-root .folded .panel-caret,
+.t2d-root .panel-caret.collapsed { transform: rotate(-90deg); }
 `;

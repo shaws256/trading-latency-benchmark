@@ -13,7 +13,7 @@ import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 // Shared, single-source-of-truth helpers (identical maths as the 2D map): number
 // formatting, per-edge jitter, latency→colour, capability→colour, fixed node size.
 import { fmtLat, edgeSigma, latencyColor, cellColor, capabilityColor, buildCapabilityScale, nodeRadius3D, CAP_GRADIENT_CSS } from './2d/palette.js';
-import { enhancePanel, placePanel, enhancePinned, buildBoundaryToggles, buildSummaryHTML, buildInstanceTypesHTML } from './2d/panels.js';
+import { enhancePanel, placePanel, enhancePinned, buildBoundaryToggles, buildSummaryHTML, buildInstanceTypesHTML, instructionsHTML, wireInstructions } from './2d/panels.js';
 import { nodeTipHTML } from './2d/tables.js';
 import { HIER, pathKeyOf, separateHierarchy } from './grouplayout.js';
 
@@ -532,19 +532,19 @@ export function mountTopology3D(container, fleet, opts = {}) {
     minSigma: minSig, maxSigma: maxSig, nodes: fleet.nodes,
   });
   legendEl.innerHTML = '<h3>Legend</h3>'
+    + instructionsHTML(
+      '<div class="hint-row"><b>Hover</b> a node \u2014 highlight its edges + latency table</div>'
+      +       '<div class="hint-row"><b>Hover</b> a boundary plane \u2014 draw contours to its member nodes</div>'
+      +       '<div class="hint-row"><b>Click</b> a node \u2014 select it + its 1-hop neighbours; click again to deselect</div>'
+      +       '<div class="hint-row"><b>Shift+Click</b> a node \u2014 toggle target-set membership (gold outline)</div>'
+      +       '<div class="hint-row"><b>Deselect all</b> \u2014 restore the full view</div>'
+      +       '<div class="hint-row"><b>Drag</b> = rotate &middot; <b>scroll</b> = zoom &middot; <b>shift+drag</b> = pan</div>'
+      +       '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold</div>'
+    );
     + '<div class="row"><div class="swatch" style="background:linear-gradient(to right,#39d353,#f0883e,#f85149)"></div><span>Edge colour = p50 latency (green=fast, red=slow)</span></div>'
     + '<div class="row"><div class="swatch" style="background:' + CAP_GRADIENT_CSS + '"></div><span>Node colour = capability (blue=basic \u2192 green=metal/top-net)</span></div>'
     + '<div class="row"><span>Distance \u221d log(p50 latency)</span></div>'
     + '<div class="row"><span style="color:#79c0ff;font-weight:700">Public IP</span><span style="color:#8b949e">&nbsp;/&nbsp;Private IP</span><span>&nbsp;on each node</span></div>'
-    + '<div class="ux-hint">'
-    + '<div class="hint-row"><b>Hover</b> a node \u2014 highlight its edges + latency table</div>'
-    + '<div class="hint-row"><b>Hover</b> a boundary plane \u2014 draw contours to its member nodes</div>'
-    + '<div class="hint-row"><b>Click</b> a node \u2014 select it + its 1-hop neighbours; click again to deselect</div>'
-    + '<div class="hint-row"><b>Shift+Click</b> a node \u2014 toggle target-set membership (gold outline)</div>'
-    + '<div class="hint-row"><b>Deselect all</b> \u2014 restore the full view</div>'
-    + '<div class="hint-row"><b>Drag</b> = rotate &middot; <b>scroll</b> = zoom &middot; <b>shift+drag</b> = pan</div>'
-    + '<div class="hint-row"><b>Drag</b> a panel title to move it; click to fold</div>'
-    + '</div>';
   // Shared Boundaries toggles — flip .visible on each level's collected objects.
   legendEl.appendChild(buildBoundaryToggles((key, on) => {
     (boundaryObjs[key] || []).forEach((o) => { o.visible = on; });
@@ -565,6 +565,7 @@ export function mountTopology3D(container, fleet, opts = {}) {
   enhancePanel(panelCtx, statsEl, true, 'tr');
   enhancePanel(panelCtx, itypesEl, true, 'bl');
   enhancePanel(panelCtx, legendEl, true, 'br');
+  wireInstructions(legendEl);
 
   // ── resize + render loop ──────────────────────────────────────────────────
   const onResize = () => { camera.aspect=W()/H(); camera.updateProjectionMatrix(); renderer.setSize(W(),H()); labelRenderer.setSize(W(),H()); };

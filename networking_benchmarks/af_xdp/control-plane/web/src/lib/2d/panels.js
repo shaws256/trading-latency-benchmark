@@ -15,7 +15,7 @@ const MIN_K = 1.0, MAX_K = 2.0;
 // fold-all button) can collapse/expand every panel at once. Each entry exposes
 // setCollapsed(want) and isCollapsed(); entries unregister themselves on cleanup.
 const foldables = new Set();
-export function foldAllPanels(collapse) { foldables.forEach((f) => f.setCollapsed(collapse)); }
+export function foldAllPanels(collapse) { setAllFolded(collapse); }
 export function anyPanelExpanded() { for (const f of foldables) if (!f.isCollapsed()) return true; return false; }
 export function resetAllPanels() { foldables.forEach((f) => f.reset && f.reset()); }
 
@@ -66,6 +66,8 @@ export function buildBoundaryToggles(onToggle, initial = {}, extras = []) {
 
 // A live update remounts the 2D view, so panel geometry and fold state live here
 // rather than on the elements, which are rebuilt each time.
+import { makeFoldable, setAllFolded, unregister } from '../fold.js';
+
 const PANEL_STATE_KEY = 't2d-panel-state';
 const PANEL_STATE = (() => {
   try { return JSON.parse(localStorage.getItem(PANEL_STATE_KEY)) || {}; } catch { return {}; }
@@ -73,7 +75,9 @@ const PANEL_STATE = (() => {
 const savePanelState = () => {
   try { localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(PANEL_STATE)); } catch { /* ignore */ }
 };
-const panelKey = (el) => (el.className || '').split(/\s+/).filter(Boolean).join('.') || 'panel';
+const panelKey = (el) => el.id
+  || (el.className || '').split(/\s+/).filter(Boolean).join('.')
+  || 'panel';
 
 export function enhancePanel(ctx, el, track = true, corner = null) {
   const h = el.querySelector('h3');
@@ -148,39 +152,19 @@ export function enhancePanel(ctx, el, track = true, corner = null) {
   window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
 
   // ── fold ──────────────────────────────────────────────────────────────────
-  const setCollapsed = (want) => {
-    if (want === collapsed) return;
-    collapsed = want;
-    caret.textContent = collapsed ? '\u25b8' : '\u25be';
-    if (collapsed) {
-      const r = el.getBoundingClientRect();
-      const vh = window.innerHeight;
-      el._snap = { left: r.left, top: r.top };
-      content.style.display = 'none';
-      // Shrink-to-fit the header text: width:auto on a fixed/absolute element is
-      // shrink-to-fit, but the panels carry a min-width in CSS that would keep
-      // them full-width — override it while folded so only the title shows.
-      el.style.minWidth = '0';
-      el.style.width = 'auto'; el.style.height = 'auto'; el.style.maxHeight = '';
-      el.style.resize = 'none';   // locked when folded
-      el.style.top = el.style.bottom = 'auto'; el.style.right = 'auto';
-      el.style.left = r.left + 'px';
-      if (r.top + r.height / 2 < vh / 2) el.style.top = '14px';
-      else el.style.bottom = '14px';
-    } else {
-      if (el._snap) {
-        el.style.left = el.style.right = el.style.top = el.style.bottom = 'auto';
-        el.style.left = el._snap.left + 'px';
-        el.style.top  = el._snap.top + 'px';
-        el._snap = null;
-      }
-      el.style.minWidth = '';
-      el.style.width = ''; el.style.height = ''; el.style.maxHeight = '';
-      el.style.resize = 'horizontal';
-      content.style.display = '';
-      update();
-    }
-  };
+  // One shared folding path with the control panel - see lib/fold.js. A folded
+  // panel keeps its position; only its content is hidden.
+  const fold = makeFoldable(panelKey(el), caret, content, {
+    onChange: (folded) => {
+      collapsed = folded;
+      el.style.minWidth = folded ? '0' : '';
+      el.style.width = folded ? 'auto' : '';
+      el.style.height = folded ? 'auto' : '';
+      el.style.resize = folded ? 'none' : 'horizontal';
+      if (!folded) update();
+    },
+  });
+  const setCollapsed = (want) => fold.toggle(want);
   h.addEventListener('click', (e) => {
     if (moved) { moved = false; return; }
     // Ignore clicks on header controls (2D/3D, Live, fold-all) — otherwise the
@@ -211,12 +195,11 @@ export function enhancePanel(ctx, el, track = true, corner = null) {
     if (st.top) el.style.top = st.top;
     if (st.width) el.style.width = st.width;
     if (st.height) el.style.height = st.height;
-    if (st.folded) el.classList.add('folded');
   }
   const record = () => {
     PANEL_STATE[pk] = {
       left: el.style.left, top: el.style.top, width: el.style.width,
-      height: el.style.height, folded: el.classList.contains('folded'),
+      height: el.style.height,
     };
     savePanelState();
   };
@@ -279,6 +262,31 @@ export function enhancePinned(el, opts = {}) {
 
 // Build the Summary panel's inner HTML. `opts`: { N, pairs, minP50, maxP50,
 // minP99, maxP99, minSigma, maxSigma, nodes[], stress? }.
+// Instructions collapse behind their own chevron, shared by the 2D and 3D
+// legends so both behave the same. Takes the hint rows already built.
+export function instructionsHTML(rowsHtml) {
+  return '<div class="ux-instr">'
+    + '<div class="instr-head" data-instr-toggle>'
+    + '<span class="instr-chevron">\u2304</span> Instructions</div>'
+    + '<div class="ux-hint" data-instr-body style="display:none">' + rowsHtml + '</div>'
+    + '</div>';
+}
+
+// Bind the toggle inside a legend. Safe to call again after a repaint.
+export function wireInstructions(el) {
+  const head = el && el.querySelector('[data-instr-toggle]');
+  const body = el && el.querySelector('[data-instr-body]');
+  if (!head || !body || head.dataset.instrBound) return;
+  head.dataset.instrBound = '1';
+  head.classList.add('collapsed');
+  head.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : '';
+    head.classList.toggle('collapsed', open);
+  });
+}
+
 export function buildSummaryHTML(opts) {
   const { N, pairs, minP50, maxP50, minP99, maxP99, minSigma, maxSigma, nodes, stress } = opts;
   const stat = (label, val) => '<div class="stat"><span>' + label + '</span><span class="val">' + esc(val) + '</span></div>';
@@ -370,16 +378,7 @@ export function renderPanels(ctx) {
     }, {}, [{ label: 'Links', checked: true, onChange: (on) => { ctx.linksHidden = !on; applySel(ctx, -1); } }]));
     
   // Instructions collapse behind their own chevron header.
-  const it = el.querySelector('[data-instr-toggle]'), ib = el.querySelector('[data-instr-body]');
-  if (it && ib) {
-    it.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const open = ib.style.display !== 'none';
-      ib.style.display = open ? 'none' : '';
-      it.classList.toggle('collapsed', open);
-    });
-    it.classList.add('collapsed');
-  }
+  wireInstructions(el);
   root.appendChild(el);
   })();
 
