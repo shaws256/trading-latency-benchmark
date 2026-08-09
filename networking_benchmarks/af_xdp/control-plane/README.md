@@ -33,16 +33,16 @@ small dedicated EC2 (see Deployment).
 
 ## Why NATS + agents (vs SSH/ansible)
 
-The benchmark taught us that SSH-driven orchestration is fragile at the exact
+The benchmark showed that SSH-driven orchestration is fragile at the exact
 moment it matters: an `--xdp-tx` run can grab NIC queue 0 and starve the SSH
 session; creds expire mid-campaign; cross-VPC/region fans out into bespoke
 inventories. The agent model fixes this:
 
 - **Agent-outbound only.** Agents open ONE persistent NATS connection *outbound*
   to the backend. No inbound ports on fleet nodes, no SSH in the hot path, so a
-  runaway XDP program can never lock you out of control.
+  runaway XDP program can never lock out control.
 - **Self-registration via IMDS.** Each agent discovers its own instance-id / IP /
-  AZ / PG / role and registers - no hand-built inventory.
+  AZ / PG / role and registers - automated inventory.
 - **The agent owns the node's resource lifecycle** (queue-free, clock makestep,
   isolated-core pinning, replicator mode/service). The backend issues *intents*,
   not shell.
@@ -186,8 +186,7 @@ on heartbeat, staleness window → offline (default 20 s). Query helpers:
 
 Edges keyed **`kind|variation|src|dst`** (+ a 60-entry p50 history ring for
 sparklines). The `kind` in the key is deliberate: mcast fwd-mode `kernel` and
-ucast variation `kernel` share src→dst and would otherwise collide (a bug caught
-live - mcast telemetry silently overwrote the ucast kernel edge).
+ucast variation `kernel` share src→dst and would otherwise collide.
 
 `Apply(Telemetry)` updates or creates the edge and returns a copy for SSE broadcast.
 
@@ -389,7 +388,7 @@ These are **two distinct modes** in the web UI:
 | | One-shot test | Live (heartbeat) mode |
 |---|---|---|
 | Trigger | Click a test button once | Toggle "Live" → select a mode + interval |
-| Repeat | Never - runs once and finishes | Re-runs every N seconds (min 10 s) |
+| Repeat | Never - runs once and finishes | Re-runs every N seconds (min 30 s) |
 | SSE connection | Always open (independent of test) | Always open |
 | Backend concurrency | One campaign at a time | Same - queues are rejected while running |
 | Parameters | Full 5000-packet runs (user-configurable) | Smaller 1000-packet bursts (quick pulse) |
@@ -452,9 +451,7 @@ Driven from the web panel or `POST /api/run`.
 | variation | client TX | client RX | what it measures |
 |---|---|---|---|
 | `kernel` | `sendto()` | kernel busy-poll socket, kernel-SW RX ts | tuned kernel path (the honest floor) |
-| `xdp-tx` | AF_XDP **zero-copy** | kernel busy-poll socket | removes the kernel TX stack |
-| `xdp-rx` | `sendto()` | kernel socket, **XDP-stamped** ingress ts | instrumented kernel RX (NOT a bypass) |
-| `xdp-txrx` | AF_XDP zero-copy | kernel socket + XDP-stamped ts | both |
+| `xdp-txrx` | AF_XDP zero-copy | kernel socket + XDP-stamped ts | xdp-tx - removes the kernel TX stack, `xdp-rx` - **XDP-stamped** ingress ts, NOT a kernel bypass |
 
 **mcast (one-way source → replicator fan-out → dest), fwd modes:** `copy`,
 `inplace`, `kernel` - set on the replicator per mode; one-way latency uses the

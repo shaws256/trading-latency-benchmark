@@ -327,7 +327,7 @@ export class FleetStack extends cdk.Stack {
           }));
         }
         inst.role.addToPrincipalPolicy(new iam.PolicyStatement({
-          actions: ['ec2:DescribeInstanceTypes'],
+          actions: ['ec2:DescribeInstanceTypes', 'ec2:DescribePlacementGroups'],
           resources: ['*'],
         }));
 

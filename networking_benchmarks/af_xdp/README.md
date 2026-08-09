@@ -10,18 +10,21 @@ web UI) for driving campaigns and rendering live results.
 ```
 af_xdp/
 ├── src/              Core replicator engine (AF_XDP + echo-mode) + eBPF (ucast.o / mcast.o)
+│   ├── common/       Shared headers
+│   ├── Replicator/   Packet replicator files - key binary running on each instance
+│   ├── xdp/          eBPF C programs
 ├── tools/            Measurement instruments (rtt, mcast_send/receive, replicator_ctl, udp_send)
 ├── deploy/           Infrastructure
 │   ├── cdk/          Fleet + AMI builder + control-plane CDK stacks (scenarios/, scripts/bake-ami.sh)
 │   └── ansible/      run_ucast / run_mcast / configure_mcast + dynamic inventory
 ├── control-plane/    Centralized orchestration + live monitoring
-│   ├── proto/        Shared NATS wire contract (subjects + message schemas)
 │   ├── agent/        Per-node sidecar (IMDS self-register, runs rtt/mcast, streams telemetry)
 │   ├── backend/      Registry + NxN collector + orchestrator + HTTP/SSE API (serves web/)
-│   ├── web/          Svelte + three.js live 2D/3D topology + control panel
+│   └── cmd/afxdpctl/ One CLI: up / sync / down / run / cancel / report / fleet
 │   ├── gen/          Offline: per-pair JSON → heatmap (report.py) + fleet.json (fleet_json.py)
 │   ├── mcp/          Read-only MCP server (exposes results DB to AI tooling)
-│   └── cmd/afxdpctl/ One CLI: up / sync / down / run / cancel / report / fleet
+│   ├── proto/        Shared NATS wire contract (subjects + message schemas)
+│   ├── web/          Svelte + three.js live 2D/3D topology + control panel
 ├── tests/            pytest integration suite (echo-mode; run from the af_xdp root)
 ├── dev/              Dev tooling: Docker build harness (dev/Dockerfile) + sync/provision playbooks
 └── Makefile          Build system (all, echo-mode, full, mcast targets)
@@ -40,7 +43,7 @@ make echo-mode
 pip install pytest && pytest -v
 ```
 
-## Running benchmarks - two ways
+## Running benchmarks - three ways
 
 **1. Control plane (recommended).** A Go **agent** on every fleet node connects
 *outbound* to a central **backend** over a **NATS** bus; the backend serves a web
@@ -48,6 +51,7 @@ UI + JSON/SSE API. You launch tests from the browser (or `afxdpctl`), results
 stream back live into a 2D/3D topology. No SSH in the hot path, no creds in the
 loop. See [`control-plane/`](control-plane/README.md).
 
+**2. CLI Tool.**
 ```bash
 # One CLI for the whole loop (control-plane/cmd/afxdpctl):
 afxdpctl up   --key virginia --git-repo <url> --git-ref <branch> --scenario ucast-az-cpg-3 --bake
@@ -57,7 +61,7 @@ afxdpctl report -o run.html                         # heatmap + all latencies
 afxdpctl down --key virginia
 ```
 
-**2. Ansible playbooks (no control plane).** Drive a fleet directly with
+**3. Ansible playbooks (no control plane).** Drive a fleet directly with
 `run_ucast.yaml` / `run_mcast.yaml`; results are written to `results/` and turned
 into a heatmap + `fleet.json` by `control-plane/gen/`. See the multicast workflow
 below and [`deploy/ansible/`](deploy/ansible/README.md).
@@ -87,7 +91,7 @@ below and [`deploy/ansible/`](deploy/ansible/README.md).
 ## Multicast data path (m2u)
 
 Three roles, two hops. EC2 VPCs don't forward raw multicast, so an 8-byte **m2u**
-tunnel header rides *inside* a plain unicast UDP datagram and the replicator fans
+tunnel header (inspired by [mcast2ucast](../mcast2ucast/)) rides *inside* a plain unicast UDP datagram and the replicator fans
 it out:
 
 ![multicast (m2u) datapath](tools/assets/mcast-datapath.svg)
@@ -114,14 +118,14 @@ Measured on the 3-node same-AZ + cluster-placement-group fleet (10k msgs @ 200µ
 
 | Optimization | Mechanism | Impact |
 |---|---|---|
-| **Small `gro_flush_timeout` (10µs)** | Backstop timer of the deferred-IRQ + busy-poll regime. NOT `0` (strands packets in busy-poll gaps → multi-second bursts) and NOT the old `200µs` (becomes the primary delivery path → ~200µs/hop). | **234µs → ~60µs** one-way - the dominant win |
+| **Small `gro_flush_timeout` (10µs)** | Backstop timer of the deferred-IRQ + busy-poll regime. NOT `0` (strands packets in busy-poll gaps → multi-second bursts) and NOT a high value (e.g. `200µs`) - as it becomes the primary delivery path → ~200µs/hop. | tight latency one-way |
 | **In-app NAPI busy-poll** | `SO_PREFER_BUSY_POLL`+`SO_BUSY_POLL` on the XSK fd; the RX loop issues `recvfrom`/`poll` on an empty peek so NAPI runs in the pinned thread instead of waiting for a deferred hard IRQ. Applied to the replicator (`XdpSocket::receive`) **and** `mcast_receive`. | dest-RX becomes gro-independent; robust, burst-free |
 | **CPU isolation + pinning** | `isolcpus=1-4`; ENA IRQ → first isolated CPU, apps → isolated+1, OS/SSH on CPU0. The busy-poll thread is never preempted by the hard IRQ. `irqbalance` disabled. | removes P99 jitter/stalls |
 | **Hugetlb UMEM** | `MAP_HUGETLB` (2 MB pages) for the UMEM with a clean 4 KB fallback. | fewer TLB misses on the packet buffers |
 | **Non-RSS TX queue (queue 1)** | `mcast_send` binds AF_XDP TX off RSS queue 0 (which carries SSH/control); a ZC bind on queue 0 wedges the host NIC. | correctness + host stability |
 | **Hot-path micro-opts** | cache the source IP once (kills per-packet `inet_aton`); drain TX completions once per fan-out batch; single driver kick for all K destinations. | trims per-packet + per-fan-out cost |
 
-**Floor:** on virtualized ENA, ~26µs/hop is NIC/hypervisor-bound - CPU-side tuning
+**Floor:** on virtualized ENA, ~23µs/hop is NIC/hypervisor-bound - CPU-side tuning
 (busy-poll, IRQ pinning) beyond the gro fix shows diminishing returns.
 
 ## Multicast workflow (ansible)
@@ -162,7 +166,6 @@ viewer renders - see [`control-plane/`](control-plane/README.md).
 | p50 | ~60–65 µs | ~26 µs | ~31–37 µs |
 | p99 | ~85 µs | ~42 µs | ~49 µs |
 
-Two hops (source→replicator→dest); ~26µs/hop is the virtualized-ENA floor.
 
 ## Deployment
 
@@ -213,11 +216,7 @@ A shell on the same instance, without SSH or an open port:
 aws ssm start-session --region <region> --target <control-plane-instance-id>
 ```
 
-Every session is authenticated as your IAM principal and recorded in CloudTrail,
-so access is auditable per user. Requirements are met by the stack already: the
-instance role carries `AmazonSSMManagedInstanceCore` and Amazon Linux 2023 ships
-the SSM agent, so `aws ssm describe-instance-information` should list the
-instance as `Online`.
+Every session is authenticated as your IAM principal and recorded in CloudTrail.
 
 ### Direct access instead
 
