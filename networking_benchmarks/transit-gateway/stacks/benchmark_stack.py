@@ -538,7 +538,7 @@ if [ -n "$PTP_DEVICE" ]; then
     fi
     # Configure chrony with direct PTP connection
     grep -q "refclock PHC /dev/ptp_ena" /etc/chrony.conf || \
-        echo 'refclock PHC /dev/ptp_ena poll 0 delay 0.000010 prefer' >> /etc/chrony.conf
+        echo 'refclock PHC /dev/ptp_ena poll 0 dpoll -2 delay 0.000010 prefer' >> /etc/chrony.conf
 else
     echo "No PTP hardware clock, using NTP via Amazon Time Sync Service"
     grep -q '169.254.169.123' /etc/chrony.conf || \

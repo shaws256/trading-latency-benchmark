@@ -128,3 +128,10 @@ def test_generated_build_script_clones_and_builds_a_local_repo(tmp_path):
     info = (root / "BUILD_INFO").read_text()
     assert f"commit={sha}" in info
     assert not (root / "src" / "networking_benchmarks" / "other").exists(), "sparse checkout fetched too much"
+
+
+def test_refclock_line_matches_the_af_xdp_ami():
+    ud = _ud()
+    assert "refclock PHC /dev/ptp_ena poll 0 dpoll -2 delay 0.000010 prefer" in ud
+    # one append, guarded so a rerun cannot add a second refclock (preflight.sh gates on exactly one)
+    assert ud.count("echo 'refclock PHC") == 1 and 'grep -q "refclock PHC /dev/ptp_ena" /etc/chrony.conf' in ud

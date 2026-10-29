@@ -54,6 +54,8 @@ def respond(inst, cmd):
         return "UPLOADED"
     if "preflight.sh --max-offset-us" in cmd:
         return per_instance("preflight", inst, "phc_enable=1\nsystem_time_us=0.1\nPASS")
+    if "preflight.sh --context" in cmd:
+        return per_instance("context", inst, "kernel=6.1.0\ncpu_model=EPYC\ncpuidle_states=POLL:0us C1:1us C2:800us")
     if "preflight.sh --clock" in cmd:
         return "system_time_us=%s\nleap=Normal" % per_instance("post_clock", inst, "0.2")
     if "nohup" in cmd and "mcast_recv" in cmd:
@@ -65,7 +67,11 @@ def respond(inst, cmd):
     if "RECV=DONE" in cmd:
         return per_instance("recv_done", inst, "RECV=DONE")
     if "cat /tmp/mcast_result.json 2>/dev/null; true" in cmd:
-        return per_instance("results", inst, "")
+        res = per_instance("results", inst, "")
+        if isinstance(res, list):  # one entry per collection, the last repeats
+            n = counter("result." + inst)
+            return res[min(n, len(res)) - 1]
+        return res
     if "mcast_recv_detail.json" in cmd and "s3 cp" in cmd:
         if inst in SC.get("detail_missing", []):
             return "DETAIL=MISSING"
@@ -98,7 +104,9 @@ if svc == "cloudformation":
         out(SC["outputs"][key])
 elif svc == "ec2":
     inst = arg("--instance-ids")
-    if "PrivateIpAddress" in query:
+    if "ImageId" in query:
+        out("ami-0123456789abcdef0")
+    elif "PrivateIpAddress" in query:
         out(SC["ips"].get(inst, "10.0.0.9"))
     elif "AvailabilityZone" in query:
         out(SC["az"].get(inst, "us-east-1a"))

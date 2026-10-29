@@ -4,6 +4,7 @@
 # Modes:
 #   preflight.sh [--max-offset-us N]   full check; forces a clock step first. Exit 1 on failure.
 #   preflight.sh --clock               read-only snapshot of the chrony state (no step)
+#   preflight.sh --context             read-only record of the host and NIC state in effect
 #
 # Output is key=value lines, then PASS or one FAIL:<code> line per failed check.
 #
@@ -21,6 +22,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --max-offset-us) MAX_OFFSET_US="$2"; shift 2 ;;
     --clock) MODE=clock; shift ;;
+    --context) MODE=context; shift ;;
     -h|--help) sed -n 2,16p "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -37,6 +39,39 @@ system_time_us() {
     v = $4 + 0; if ($6 == "slow") v = -v; printf "%.3f", v * 1e6; found = 1 }
     END { if (!found) print "unreadable" }'
 }
+
+# Run context: what the numbers were measured under. Every line is key=value, one line per key.
+if [ "$MODE" = context ]; then
+  ctx() { printf '%s=%s\n' "$1" "$2"; }
+  sysfs() { cat "$SYSROOT$1" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//'; }
+  IF="${IFACE:-$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -1)}"
+  IF="${IF:-eth0}"
+  ctx kernel "$(uname -r)"
+  ctx cpu_model "$(grep -m1 'model name' "$SYSROOT/proc/cpuinfo" 2>/dev/null | sed 's/^[^:]*: *//')"
+  ctx cpu_count "$(grep -c '^processor' "$SYSROOT/proc/cpuinfo" 2>/dev/null)"
+  ctx iface "$IF"
+  ctx ena_driver "$(ethtool -i "$IF" 2>/dev/null | awk -F': *' '/^(driver|version)/ {printf "%s%s", sep, $2; sep=" "}')"
+  ctx ena_phc_enable "$(sysfs /sys/module/ena/parameters/phc_enable)"
+  ctx mtu "$(sysfs "/sys/class/net/$IF/mtu")"
+  ctx coalescing "$(ethtool -c "$IF" 2>/dev/null | awk '/^Adaptive RX/ {a=$3} /^rx-usecs:/ {r=$2} /^tx-usecs:/ {t=$2} END {printf "adaptive_rx=%s rx_usecs=%s tx_usecs=%s", a, r, t}')"
+  ctx channels "$(ethtool -l "$IF" 2>/dev/null | awk '/Current hardware/ {c=1} c && /^Combined/ {print $2; exit}')"
+  ctx gro "$(ethtool -k "$IF" 2>/dev/null | awk -F': *' '/^generic-receive-offload/ {print $2}' | cut -d' ' -f1)"
+  ctx napi_defer_hard_irqs "$(sysfs "/sys/class/net/$IF/napi_defer_hard_irqs")"
+  ctx gro_flush_timeout "$(sysfs "/sys/class/net/$IF/gro_flush_timeout")"
+  ctx irqbalance "$(systemctl is-active irqbalance 2>/dev/null || echo unknown)"
+  ctx cpuidle_driver "$(sysfs /sys/devices/system/cpu/cpuidle/current_driver)"
+  ctx cpuidle_states "$(for d in "$SYSROOT"/sys/devices/system/cpu/cpu0/cpuidle/state*; do [ -d "$d" ] && printf '%s:%sus ' "$(cat "$d/name")" "$(cat "$d/latency")"; done | sed 's/ *$//')"
+  ctx cpufreq_governor "$(sysfs /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)"
+  ctx cmdline_tuning "$(tr ' ' '\n' < "$SYSROOT/proc/cmdline" 2>/dev/null | grep -E '^(isolcpus|nohz_full|rcu_nocbs|nosmt|mitigations|intel_idle|processor|idle|tsc|clocksource)' | tr '\n' ' ' | sed 's/ *$//')"
+  ctx busy_poll "$(sysctl -n net.core.busy_poll 2>/dev/null)/$(sysctl -n net.core.busy_read 2>/dev/null)"
+  ctx rmem_max "$(sysctl -n net.core.rmem_max 2>/dev/null)"
+  ctx thp "$(sed 's/.*\[\(.*\)\].*/\1/' "$SYSROOT/sys/kernel/mm/transparent_hugepage/enabled" 2>/dev/null)"
+  ctx clocksource "$(sysfs /sys/devices/system/clocksource/clocksource0/current_clocksource)"
+  ctx chrony_refclock "$(cat "$SYSROOT"/etc/chrony.conf "$SYSROOT"/etc/chrony.d/*.conf 2>/dev/null | grep -E '^[[:space:]]*refclock' | tr -s ' ' | tr '\n' ';' | sed 's/;$//')"
+  ctx chrony_reference "$(chronyc tracking 2>/dev/null | awk -F': *' '/^Reference ID/ {print $2}')"
+  ctx chrony_system_time_us "$(system_time_us)"
+  exit 0
+fi
 
 if [ "$MODE" = clock ]; then
   echo "system_time_us=$(system_time_us)"

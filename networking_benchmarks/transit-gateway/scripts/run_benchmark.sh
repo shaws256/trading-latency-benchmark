@@ -298,6 +298,26 @@ emit_clock_block() {
   echo "--- END CLOCK ---"
 }
 
+# result_ok <file>: true when the file holds one JSON object without an "error" key.
+result_ok() {
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    d = json.loads(open(sys.argv[1]).read())
+    sys.exit(0 if isinstance(d, dict) and d and not d.get("error") else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+# emit_context_block <instance> <ami> <file with key=value lines>
+emit_context_block() {
+  echo "--- CONTEXT $1 ---"
+  echo "ami=$2"
+  grep '=' "$3" || true
+  echo "--- END CONTEXT ---"
+}
+
 # emit_mcast_block <instance> <az> <az-relation> <file with the receiver's stdout>
 emit_mcast_block() {
   echo "--- MCAST $1 ---"
@@ -460,6 +480,15 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     emit_clock_block "$instance_id" pre "$WORK/pre.$instance_id"
   done
   echo ""
+  # The host and NIC state the numbers were taken under (read-only).
+  local ami
+  for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
+    ssm_run "$instance_id" 60 "bash /tmp/preflight.sh --context" || true
+    printf '%s\n' "$SSM_OUT" > "$WORK/ctx.$instance_id"
+    ami=$(aws ec2 describe-instances --instance-ids "$instance_id" --query "Reservations[0].Instances[0].ImageId" --output text)
+    emit_context_block "$instance_id" "$ami" "$WORK/ctx.$instance_id"
+  done
+  echo ""
 
   # --- mcast ---
   if tools_has mcast; then
@@ -499,6 +528,11 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
       READY_WAIT_CMD="sleep $RECEIVER_SETTLE_SECS; pgrep -f '[m]cast_recv' >/dev/null && echo RECV=READY || { echo RECV=DEAD; cat /tmp/mcast_result.json /tmp/mcast_recv.err 2>/dev/null; }"
     fi
 
+    # The whole batch (start receivers, send, collect) runs again once if the sender or any
+    # subscriber produced no usable result; the second outcome is the one reported.
+    local batch=0 incomplete s_id sender_out sender_ok
+    while true; do
+    batch=$((batch + 1))
     for sub_id in "${SUBSCRIBER_IDS[@]}"; do
       attempt=0
       while true; do
@@ -525,16 +559,14 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     else
       send_bin="python3 /tmp/mcast_send.py"
     fi
-    local sender_out sender_ok=true
+    sender_ok=true
     if ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "$send_bin $GROUP $PORT $RATE $DURATION $PUB_IP"; then
       sender_out="$SSM_OUT"
     else
       sender_ok=false
       sender_out="{\"error\":\"sender command did not complete (SSM status: ${SSM_STATUS:-unknown})\"}"
     fi
-    echo "--- SENDER $PUBLISHER_ID ---"
-    echo "$sender_out"
-    echo "--- END SENDER $PUBLISHER_ID ---"
+    printf '%s\n' "$sender_out" > "$WORK/sender.out"
     [[ "$sender_ok" == "true" ]] && echo "  Multicast send complete." || echo "  Multicast send FAILED." >&2
     echo ""
 
@@ -560,6 +592,17 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
       mkdir -p "$DETAIL_DIR"
       aws s3 cp "$DETAIL_PREFIX/" "$DETAIL_DIR/" --recursive --region "$REGION" --only-show-errors || echo "  WARN could not download detail files from $DETAIL_PREFIX/"
     fi
+    incomplete=0
+    [[ "$sender_ok" == "true" ]] || incomplete=1
+    for s_id in "${SUBSCRIBER_IDS[@]}"; do
+      result_ok "$WORK/res.$s_id" || incomplete=1
+    done
+    if [[ $incomplete -eq 0 || $batch -ge 2 ]]; then break; fi
+    echo "  Phase A incomplete (the sender or a subscriber produced no usable result); rerunning the whole batch once"
+    done
+    echo "--- SENDER $PUBLISHER_ID ---"
+    cat "$WORK/sender.out"
+    echo "--- END SENDER $PUBLISHER_ID ---"
 
     local sub_az rel
     for sub_id in "${SUBSCRIBER_IDS[@]}"; do
@@ -597,7 +640,7 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
       sub_ip=$(get_private_ip "$sub_id")
       echo "  Running sockperf under-load -> $sub_id ($sub_ip)..."
       result_output=""
-      if ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "sockperf under-load --ip ${sub_ip} --port ${PORT} --mps ${RATE} --time ${DURATION} --full-rtt 2>&1 | tee /tmp/sockperf_result.txt"; then
+      if ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "sockperf under-load --ip ${sub_ip} --port ${PORT} --mps ${RATE} --time ${DURATION} --reply-every 1 --full-rtt 2>&1 | tee /tmp/sockperf_result.txt"; then
         ssm_run "$PUBLISHER_ID" 60 "cat /tmp/sockperf_result.txt" || true
         result_output="$SSM_OUT"
       else

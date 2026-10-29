@@ -119,3 +119,47 @@ def test_multiple_failures_are_all_reported(lab):
     (lab["fx"] / "ethtool").write_text("nothing\n")
     out = run(lab).stdout
     assert "FAIL:phc_not_enabled" in out and "FAIL:no_hw_receive" in out
+
+
+def test_context_mode_records_host_and_nic_state(lab, tmp_path):
+    root = lab["root"]
+    (root / "proc").mkdir()
+    (root / "proc/cpuinfo").write_text("processor : 0\nmodel name : AMD EPYC 9R14\nprocessor : 1\nmodel name : AMD EPYC 9R14\n")
+    (root / "proc/cmdline").write_text("BOOT_IMAGE=x root=UUID=1 ro isolcpus=1-3 quiet nohz_full=1-3\n")
+    (root / "sys/devices/system/cpu/cpuidle").mkdir(parents=True)
+    (root / "sys/devices/system/cpu/cpuidle/current_driver").write_text("acpi_idle\n")
+    for n, (name, lat) in enumerate((("POLL", 0), ("C1", 1), ("C2", 800))):
+        d = root / f"sys/devices/system/cpu/cpu0/cpuidle/state{n}"
+        d.mkdir(parents=True)
+        (d / "name").write_text(name + "\n")
+        (d / "latency").write_text(f"{lat}\n")
+    (root / "sys/class/net/ens5").mkdir(parents=True)
+    (root / "sys/class/net/ens5/mtu").write_text("9001\n")
+    (root / "sys/class/net/ens5/napi_defer_hard_irqs").write_text("2\n")
+    (root / "etc/chrony.d").mkdir(parents=True)
+    (root / "etc/chrony.d/aws-phc.conf").write_text("refclock PHC /dev/ptp_ena poll 0 dpoll -2 delay 0.000010 prefer\n")
+    bin_ = pathlib.Path(lab["env"]["PATH"].split(":")[0])
+    stub = bin_ / "ethtool"
+    stub.write_text("""#!/bin/bash
+case "$1" in
+  -i) printf 'driver: ena\\nversion: 2.14.1g\\n';;
+  -c) printf 'Adaptive RX: on  TX: n/a\\nrx-usecs: 20\\ntx-usecs: 64\\n';;
+  -l) printf 'Pre-set maximums:\\nCombined:\\t8\\nCurrent hardware settings:\\nCombined:\\t2\\n';;
+  -k) printf 'generic-receive-offload: on\\n';;
+  *) printf 'hardware-receive\\n';;
+esac
+""")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    p = run(lab, "--context")
+    assert p.returncode == 0, p.stderr
+    kv = dict(line.split("=", 1) for line in p.stdout.splitlines() if "=" in line)
+    assert kv["cpu_model"] == "AMD EPYC 9R14" and kv["cpu_count"] == "2"
+    assert kv["ena_driver"] == "ena 2.14.1g"
+    assert kv["coalescing"] == "adaptive_rx=on rx_usecs=20 tx_usecs=64"
+    assert kv["channels"] == "2" and kv["gro"] == "on" and kv["mtu"] == "9001"
+    assert kv["cpuidle_states"] == "POLL:0us C1:1us C2:800us" and kv["cpuidle_driver"] == "acpi_idle"
+    assert kv["cmdline_tuning"] == "isolcpus=1-3 nohz_full=1-3"
+    assert kv["napi_defer_hard_irqs"] == "2"
+    assert "dpoll -2" in kv["chrony_refclock"]
+    assert kv["chrony_system_time_us"] == "0.062"
+    assert "makestep" not in lab["log"].read_text()   # read-only

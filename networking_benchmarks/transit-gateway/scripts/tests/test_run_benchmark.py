@@ -187,6 +187,31 @@ def test_silent_subscriber_makes_the_run_invalid(lab):
     assert not subs[SUBS[1]].ok and subs[SUBS[0]].ok
 
 
+def test_whole_batch_is_retried_once_when_a_result_is_missing(lab):
+    good = json.dumps(recv())
+    lab.scenario["results"][SUBS[1]] = ["", good]
+    p = lab.run()
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "rerunning the whole batch once" in p.stdout
+    assert all(s.ok for s in tr.parse_subscribers(p.stdout))
+    assert p.stdout.count("--- SENDER ") == 1          # only the final attempt is reported
+    assert len(lab.commands("/opt/benchmark-native/bin/mcast_send")) == 2
+
+
+def test_batch_retry_is_bounded_to_one(lab):
+    lab.scenario["results"][SUBS[1]] = ""
+    p = lab.run()
+    assert p.returncode == 3
+    assert len(lab.commands("/opt/benchmark-native/bin/mcast_send")) == 2
+
+
+def test_context_is_recorded_per_instance(lab):
+    p = lab.run()
+    ctx = tr.parse_context(p.stdout)
+    assert set(ctx) == {PUB, *SUBS}
+    assert ctx[PUB]["ami"] == "ami-0123456789abcdef0" and ctx[PUB]["cpuidle_states"].endswith("C2:800us")
+
+
 def test_loss_over_threshold_invalid_and_threshold_configurable(lab):
     lab.scenario["results"][SUBS[0]] = json.dumps(recv(total_received=900, packet_loss_count=100))
     assert lab.run().returncode == 3
