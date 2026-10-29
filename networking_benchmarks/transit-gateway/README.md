@@ -123,45 +123,32 @@ which provisions resources in this order:
 
 After `/opt/benchmark-env-ready` exists on every host, `scripts/run_benchmark.sh`
 drives measurement via SSM:
-
 ```
   run_benchmark.sh
-         │
-         │  (1) describe-stacks  → publisher id, subscriber ids, S3 bucket
+         │  (1) describe-stacks → publisher, subscribers, S3 bucket, AZs
+         │  (2) wait for SSM, /opt/benchmark-env-ready, and (for native)
+         │      /opt/benchmark-native-ready; refuse if the native build
+         │      failed or instances built different commits
+         │  (3) preflight.sh on every host: PHC, hardware RX stamping,
+         │      one PHC refclock, chronyc makestep, System time <= 10 µs
          ▼
-  SSM Run Command
-         │
-         │  (2) wait for SSM-ready & /opt/benchmark-env-ready on all hosts
+  Phase A - Multicast one-way latency + loss (TGW path)
+         │     · subscribers: mcast_recv joins the group, enables hardware
+         │       RX stamping, signals ready (retried once, else abort)
+         │     · publisher : mcast_send paces --rate pps, reports achieved rate
+         │     · receiver records hardware latency (primary) and software
+         │       latency (for the divergence check), loss, duplicates, drops
+         │     · detail histograms go to s3://<bucket>/runs/<Run-ID>/
+         │     · chrony System time re-read on every host after the run
          ▼
-  Phase A — Multicast one-way latency + loss (TGW path)
-         │     · upload mcast_send.py / mcast_recv.py
-         │     · subscribers: mcast_recv.py joins 239.1.1.1, opens HW RX
-         │       timestamping (SO_TIMESTAMPING + SIOCSHWTSTAMP) on the PHC
-         │     · publisher : mcast_send.py emits sequenced UDP packets with
-         │       embedded send-side timestamps at --rate pps
-         │     · receiver computes (rx_ts - tx_ts) per packet → one-way latency
-         │     · aggregates min/median/mean/p95/p99 + packet loss
-         ▼
-  Phase B — Unicast RTT baseline (direct VPC, no TGW)
+  Phase B - Unicast RTT baseline (direct VPC, no TGW)
          │     · sockperf under-load from publisher → each subscriber
-         │     · prints avg / min / p50 / p99 RTT
          ▼
-  stdout (per-subscriber blocks)
+  stdout (raw stream) → RUN VALID / RUN INVALID (exit 3)
          │
-         │  pipe / save → scripts/collect_results.py
-         ▼
-  collect_results.py
-         · parses each block
-         · computes aggregate stats
-         · writes JSON report to S3 (falls back to ./benchmark-results/)
-         · publishes MeanLatencyUs / P99LatencyUs / PacketLossPct
-           to CloudWatch namespace TGWMulticastBenchmark
+         ├─ --save-report → save_report.py → runs/*.md, *.raw.txt, *.details/
+         └─ collect_results.py → S3 report + CloudWatch (valid runs only)
 ```
-
-TGW overhead ≈ `multicast_one_way − unicast_RTT/2`.
-
----
-
 ## CDK context parameters
 
 Pass via `-c key=value` on `cdk synth/deploy`. Defaults in `app.py`.
@@ -175,6 +162,16 @@ Pass via `-c key=value` on `cdk synth/deploy`. Defaults in `app.py`.
 | `s3_bucket_name`     | string | *(auto)*           | Optional explicit results-bucket name.                         |
 | `placement_strategy` | string | `single-az-cpg`    | `single-az-cpg` \| `single-az` \| `cross-az`. Else `ValueError`. |
 | `base_ami`           | string | *(latest AL2023)*  | Optional override; resolved at synth otherwise.               |
+| `native_repo`        | string | `https://github.com/aws-samples/trading-latency-benchmark.git` | `https://` repo the instances clone the native sender/receiver from. |
+| `native_ref`         | string | `main`             | Branch, tag or full commit SHA to build. Must exist in `native_repo`. |
+| `build_native`       | bool   | `true`             | `false` skips the native build (Python sender/receiver only).  |
+
+The native sender/receiver is built **on each instance at launch** by a sparse
+`git clone` of `native_repo` at `native_ref`, so the sources must be reachable
+from the instances: a local, unpushed branch cannot be built. To test a branch
+from a fork, push it and pass `-c native_repo=<fork url> -c native_ref=<branch>`.
+Both values are validated at synth (plain `https://` URL, plain ref) because they
+are written into root-run user-data.
 
 ```bash
 npx cdk deploy \
@@ -225,7 +222,8 @@ Same user-data on publisher and subscribers. Logs to
 |------:|---------------------------------------------------------------------------------------------------------------------------------------|
 | **0** | Sysctl: `rmem_max=wmem_max=26214400`, `rp_filter=0`, `busy_poll=busy_read=50`.                                                       |
 | **1** | `yum install` iperf3 + toolchain; build sockperf from `Mellanox/sockperf` to `/usr/local`.                                           |
-| **2** | Load `ptp` module, write `options ena phc_enable=1`, reload ENA driver, find `ena-ptp` PHC, create `/dev/ptp_ena` via udev, configure `chrony` (`refclock PHC /dev/ptp_ena prefer`). Falls back to NTP via `169.254.169.123` if no PHC. |
+| **1b**| Sparse `git clone` of `native_repo`@`native_ref`, `make` into `/opt/benchmark-native/bin`, record `BUILD_INFO` (commit). Success touches `/opt/benchmark-native-ready`, failure touches `/opt/benchmark-native-failed` (log: `/var/log/benchmark-native-build.log`). A failure does not stop the instance becoming ready for the Python path. |
+| **2** | Load `ptp` module, write `options ena phc_enable=1`, reload ENA driver, find `ena-ptp` PHC, create `/dev/ptp_ena` via udev, configure `chrony` (`refclock PHC /dev/ptp_ena prefer`), then `chronyc waitsync 30 0.0001 0 1` (within 100 µs) and `chronyc makestep`. Falls back to NTP via `169.254.169.123` if no PHC. |
 | **2b**| `ethtool -T <iface>` for diagnostic.                                                                                                  |
 | **3** | `touch /opt/benchmark-env-ready` — gate polled by `run_benchmark.sh`.                                                                |
 
@@ -265,15 +263,17 @@ npx cdk deploy -c num_subscribers=5 -c placement_strategy=single-az-cpg -c insta
 # Diagnose PTP
 scripts/check_ptp.sh --stack-name TgwMulticastBenchmark
 
-# Run
+# Run (native sender/receiver by default; --impl python for the reference scripts)
 scripts/run_benchmark.sh --stack-name TgwMulticastBenchmark \
-  --rate 1000 --duration 60 --instance-type m7i.large --save-report
+  --rate 1000 --duration 60 --save-report
 
 # Tear down
 npx cdk destroy
 ```
 
-Runtime deps (`requirements.txt`): `aws-cdk-lib`, `constructs`, `cdk-nag`.
+Runtime deps (`requirements.txt`): `aws-cdk-lib`, `constructs`, `cdk-nag`
+(the stack calls `NagSuppressions` with the 2.x API, so `cdk-nag<3` is needed),
+and `boto3` for `collect_results.py`.
 Dev deps (`requirements-dev.txt`): `pytest`, `hypothesis`.
 
 ---
@@ -285,78 +285,82 @@ places**, depending on how it was invoked:
 
 ### 1. stdout (always)
 
-`run_benchmark.sh` streams a per-phase log followed by one JSON blob per
-subscriber for Phase A and a sockperf block per subscriber for Phase B. Pipe
-or save it to a file; this is the canonical raw measurement.
+`run_benchmark.sh` prints a raw text stream; save it, it is the canonical record.
+`scripts/tgw_results.py` documents the format and is the one parser behind
+`save_report.py` and `collect_results.py`. For the multicast tool the stream has:
 
-Phase A line per subscriber (multicast one-way latency):
+| Section | Content |
+|---|---|
+| header | `Run-ID`, `Impl: sender=… receiver=…`, `Instance-Type`, `Native-Build` (commit) |
+| `--- SENDER <id> ---` | sender summary JSON: sent, achieved rate, send lateness, send errors |
+| `--- MCAST <id> ---` | one JSON per subscriber, **always present**: AZ, same/cross-AZ, and the receiver result (or why there is none) |
+| `--- CLOCK <id> pre\|post ---` | chrony `System time` on every instance before and after the run |
 
-```text
-i-0abc...  multicast loss: {"iface":"enp39s0",
-  "so_timestamping_variant":"SO_TIMESTAMPING_NEW",
-  "hw_timestamping_enabled":true,
-  "total_expected":59985, "total_received":59985, "packet_loss_count":0,
-  "hw_timestamp_count":59986, "end_marker_received":true,
-  "min_latency_us":140.9, "max_latency_us":4675.6, "mean_latency_us":162.9,
-  "median_latency_us":153.0, "p95_latency_us":171.8, "p99_latency_us":223.2}
-```
+Receiver result fields: `total_expected`, `total_received`, `packet_loss_count`,
+`duplicate_count`, `socket_drops`, `negative_hw_samples`, and
+`min/median/mean/p95/p99/p999/max_latency_us` (hardware receive stamp minus
+publisher user-space send time). The native receiver also records the software
+receive stamp (`sw_*`) and the software-minus-hardware gap (`div_*`), and
+writes full histograms to a detail file (see below).
 
-`min/median/mean/p95/p99/max_latency_us` are the **TGW one-way latency**
-distribution measured as `rx_phc_hw_ts (subscriber NIC) − tx_clock_realtime
-(publisher user-space)` over the run window — see
-[Measurement caveats](#measurement-caveats) for what biases this includes.
+Phase B (sockperf) keeps its `--- SUBSCRIBER <id> ---` blocks: round-trip
+unicast, **no TGW in the path**.
 
-Phase B per-subscriber sockperf block contains `avg-rtt`, `min`, `p50`, `p99`
-in microseconds — round-trip unicast, **no TGW in the path** (used as a
-baseline to subtract).
+**Validity.** After a multicast run the script prints `RUN VALID` or
+`RUN INVALID` with the reasons, and exits `3` if invalid. A run is invalid when
+a subscriber returned nothing, loss exceeds `--max-loss-pct` (2 %), chrony
+`System time` exceeds `--max-clock-offset-us` (10 µs) before or after, the
+sender delivered less than 90 % of the requested rate or was interrupted, the
+receiver and sender packet counts disagree, or any packet has a receive time
+earlier than its send time. A software-minus-hardware median above 20 µs only
+warns (provisional threshold).
+
+**Interpreting the number.** The latency is an **upper bound** on Transit
+Gateway transit: it also contains the publisher's send path and the clock
+error between two hosts. `multicast one-way − unicast RTT/2` is not a clean
+TGW overhead (the paths differ); a negative result means clock error or path
+asymmetry, not a faster TGW.
 
 ### 2. `runs/` (if `--save-report`)
 
-Passing `--save-report` invokes `save_report.py`, which writes two files into
-`runs/<role>_<ami>_<UTC-timestamp>.{md,raw.txt}`:
+`--save-report` writes `runs/<N…>_<type>_<UTC>.{md,raw.txt}` and keeps the
+receivers' histogram files in `runs/<Run-ID>.details/`.
 
-| File         | Contents                                                                           |
-|--------------|------------------------------------------------------------------------------------|
-| `*.md`       | Markdown report with run config + Phase A / Phase B tables (per-subscriber and aggregate). Human-readable; tracked by git for run-to-run comparison. |
-| `*.raw.txt`  | Verbatim copy of stdout for the run. Re-parseable by `save_report.py` / `collect_results.py` / `plot_runs.py`. |
+| File         | Contents |
+|--------------|----------|
+| `*.md`       | Verdict and findings at the top; per-subscriber tables grouped by path (same-AZ vs cross-AZ, never merged); aggregate per path; clock state. |
+| `*.raw.txt`  | Verbatim copy of the stream. Re-parseable by `save_report.py` / `collect_results.py`. |
+| `*.details/` | `<instance>.detail.json`: per-receiver histograms, outliers, per-second series. |
 
-These files are **machine-local** — they don't leave your workstation unless
-you commit them to the repo or upload them yourself. `runs/.gitkeep` is
-checked in; saved reports are not committed by default.
+Reports for invalid runs are still written (with the failures at the top) so a
+bad run is visible. These files are machine-local; `runs/.gitkeep` is checked in.
 
-### 3. S3 + CloudWatch (if you pipe stdout into `collect_results.py`)
+**Aggregation.** Percentiles across subscribers are taken from the **merged
+histograms** (not an average of per-subscriber percentiles), per path. Without
+the detail files the report says so and gives only exact quantities: counts, a
+sample-weighted mean, and the worst subscriber's p99.
 
-`collect_results.py` parses the raw stdout, computes aggregates, and:
-
-- **Uploads** a JSON report to `s3://<S3BucketName>/<prefix>/<run-id>.json`
-  (`<S3BucketName>` is the CloudFormation output; `<prefix>` defaults to
-  `reports/`). Falls back to `./benchmark-results/` if the upload fails or no
-  bucket is given.
-- **Publishes** three CloudWatch metrics to the **`TGWMulticastBenchmark`**
-  namespace (configurable via `--cw-namespace`):
-
-  | Metric            | Unit         | Source                         |
-  |-------------------|--------------|--------------------------------|
-  | `MeanLatencyUs`   | microseconds | aggregate Phase A mean         |
-  | `P99LatencyUs`    | microseconds | aggregate Phase A p99          |
-  | `PacketLossPct`   | percent      | summed loss / summed expected  |
-
-> **Aggregation note:** `collect_results.py` currently averages
-> per-subscriber percentiles (e.g., `mean(per_sub_p99)`), not the percentile
-> of the pooled distribution. With `N>1` subscribers this **underestimates
-> the tail**; inspect the per-subscriber JSON in stdout / `*.raw.txt` for the
-> true distribution shape.
-
-### Quick comparison plotting
-
-`scripts/plot_runs.py` parses one or more `*.raw.txt` files (or any captured
-stdout) and produces a 4-panel matplotlib figure (median / p99 / max / loss)
-with one bar per (subscriber, run):
+### 3. S3 + CloudWatch (`collect_results.py`)
 
 ```bash
-python3 scripts/plot_runs.py runs/run1.raw.txt runs/run2.raw.txt runs/run3.raw.txt \
-  --out plot.png --title "m7i.4xlarge × 6 subs, single-az-cpg"
+python3 scripts/collect_results.py --input runs/<file>.raw.txt \
+  --detail-dir runs/<Run-ID>.details --s3-bucket <S3BucketName>
 ```
+
+`--tool` defaults to `mcast` (also `sockperf`, `iperf3`). An invalid mcast run
+is **refused** (nothing uploaded or published, exit 3) unless `--allow-partial`,
+which publishes it marked `"valid": false` with the findings listed.
+
+- **Uploads** the JSON report to `s3://<bucket>/reports/<Run-ID>.json`
+  (local `./benchmark-results/` fallback).
+- **Publishes** to the **`TGWMulticastBenchmark`** namespace, dimensions
+  `BenchmarkId`, `Tool`, and (mcast) `Path` (`same-az` / `cross-az`):
+  `MeanLatencyUs` (sample-weighted), `MedianLatencyUs` / `P99LatencyUs` /
+  `P999LatencyUs` (pooled; only when every subscriber supplied a histogram),
+  `WorstSubscriberP99Us`, `PacketLossPct`.
+
+For `sockperf` / `iperf3` the aggregate p95/p99 remains the mean of
+per-subscriber values (those tools report no histogram).
 
 ---
 
@@ -377,7 +381,9 @@ Coverage:
   (PascalCase enforced via `add_property_override`).
 - SG: inbound UDP/`<multicast_port>`, TCP/22, all egress.
 - User-data substrings: `chrony`, `/dev/ptp_ena`, `phc_enable=1`, `ethtool -T`,
-  `sockperf`, `iperf3`.
+  `sockperf`, `iperf3`; native build wiring (clone/ref/failure marker, 16 KB
+  limit, bash syntax, injection rejection); the generated build script is run
+  against a local repo.
 - PHC gate: parametrized accept/reject lists.
 - `num_subscribers=257` → `ValueError` matching `256`.
 - `base_ami` used verbatim.
@@ -385,7 +391,17 @@ Coverage:
 - Hypothesis property test: `num_subscribers ∈ [1,10]` → exactly N subscriber
   instances + N TGW members + N+1 total instances.
 
-Orchestration scripts have their own property tests under `scripts/tests/`.
+Orchestration scripts have their own tests under `scripts/tests/`: result
+parsing and validity gates, the Python histogram port against the C++ one,
+`preflight.sh` against stubbed `/sys` and `chronyc`, report/collector output,
+and `run_benchmark.sh` end to end against a fake `aws` CLI (`fake_aws.py`).
+They check control flow and output, not real instances or NICs.
+
+```bash
+python -m pytest scripts/tests -q          # run separately from tests/ (both are `tests` packages)
+make -C scripts/native stats_test           # C++ unit tests
+python3 scripts/native/tests/docker/harness.py   # sender/receiver load profiles in containers
+```
 
 ---
 
@@ -399,10 +415,13 @@ transit-gateway/
 ├── stacks/
 │   └── benchmark_stack.py                  VPC, TGW, multicast, EC2, IAM, S3, user-data, PHC gate
 ├── scripts/
-│   ├── run_benchmark.sh                    Orchestrator: Phase A + B via SSM
-│   ├── check_ptp.sh                        PTP pre-flight diagnostic
-│   ├── mcast_recv.py                       Receiver, NIC HW RX timestamping
-│   ├── mcast_send.py                       Sender, sequenced UDP + embedded TX ts
+│   ├── run_benchmark.sh                    Orchestrator via SSM; emits the raw stream + verdict
+│   ├── preflight.sh                        On-instance PHC / NIC / chrony System-time gate
+│   ├── check_ptp.sh                        PTP diagnostic (reports chrony System time)
+│   ├── tgw_results.py                      Shared parsing, histogram pooling, validity gates
+│   ├── native/                             C++ sender/receiver (built on the instances); see its README
+│   ├── mcast_recv.py                       Reference receiver (Python), kept for A/B
+│   ├── mcast_send.py                       Reference sender (Python), kept for A/B
 │   ├── collect_results.py                  Aggregate → S3 + CloudWatch
 │   ├── save_report.py                      Markdown report → runs/
 │   ├── latency_breakdown.py                Three-mode latency decomposition
