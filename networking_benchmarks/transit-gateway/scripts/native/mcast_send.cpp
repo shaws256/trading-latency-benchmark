@@ -39,6 +39,8 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "lat_stats.hpp"
 #ifdef __linux__
 #include <sched.h>
 #endif
@@ -152,6 +154,7 @@ int main(int argc, char** argv) {
     uint64_t slot = 0, sent = 0, send_errors = 0, late_gt_1ms = 0, resyncs = 0;
     int consecutive_errors = 0;
     int64_t late_max = 0;
+    latstats::SignedHist send_cost;   // time spent inside sendto(), per packet
     uint64_t first_tx = 0, last_tx = 0;
     int last_errno = 0;
 
@@ -182,7 +185,9 @@ int main(int argc, char** argv) {
         put_be32(buf, static_cast<uint32_t>(sent));
         const uint64_t tx = real_ns();       // immediately before the send
         put_be64(buf + 4, tx);
+        const int64_t m_before = mono_ns();
         const ssize_t n = sendto(sock, buf, len, 0, reinterpret_cast<sockaddr*>(&dst), sizeof dst);
+        send_cost.add(mono_ns() - m_before);
         if (n == static_cast<ssize_t>(len)) {
             if (sent == 0) first_tx = tx;
             last_tx = tx;
@@ -222,12 +227,17 @@ int main(int argc, char** argv) {
            "\"payload_bytes\":%ld,\"requested_pps\":%ld,\"duration_s\":%ld,\"sent\":%llu,"
            "\"send_errors\":%llu,\"elapsed_s\":%.3f,\"active_window_s\":%.3f,\"achieved_pps\":%.1f,"
            "\"achieved_pct\":%.2f,\"late_max_us\":%.1f,\"late_gt_1ms_count\":%llu,\"resyncs\":%llu,"
+           "\"sendto_median_us\":%.3f,\"sendto_p99_us\":%.3f,\"sendto_max_us\":%.3f,"
            "\"cpu_user_s\":%.3f,\"cpu_sys_s\":%.3f,\"interrupted\":%s}\n",
            argv[1], port, argv[5], payload, rate, duration, static_cast<unsigned long long>(sent),
            static_cast<unsigned long long>(send_errors), static_cast<double>(t_stop - t0) / 1e9, window_s,
            achieved, rate > 0 ? 100.0 * achieved / static_cast<double>(rate) : 0.0,
            static_cast<double>(late_max) / 1000.0, static_cast<unsigned long long>(late_gt_1ms),
-           static_cast<unsigned long long>(resyncs), ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6,
+           static_cast<unsigned long long>(resyncs),
+           send_cost.count() ? static_cast<double>(send_cost.quantile(0.5)) / 1000.0 : 0.0,
+           send_cost.count() ? static_cast<double>(send_cost.quantile(0.99)) / 1000.0 : 0.0,
+           send_cost.count() ? static_cast<double>(send_cost.max()) / 1000.0 : 0.0,
+           ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6,
            ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6, interrupted ? "true" : "false");
     return consecutive_errors >= kFatalConsecutiveErrors ? 1 : 0;
 }

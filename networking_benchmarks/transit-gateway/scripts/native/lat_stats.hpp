@@ -318,9 +318,22 @@ public:
         int64_t rel_ns;  // since the first recorded packet
     };
 
+    // Packets whose hardware stamp falls within `ns` of the first one are still counted for
+    // loss, duplicates and ordering, but their latency is left out of every statistic.
+    void set_warmup_ns(int64_t ns) { warmup_ns_ = ns; }
     void record(const Sample& s) {
         const SeqTracker::Result r = seq_.observe(s.seq);
         if (r.duplicate) return;  // a second copy is not a delivery; counted only
+        if (warmup_ns_ > 0) {
+            if (!warm_started_) {
+                warm_started_ = true;
+                warm_first_hw_ns_ = s.hw_ns;
+            }
+            if (s.hw_ns - warm_first_hw_ns_ < warmup_ns_) {
+                ++warmup_skipped_;
+                return;
+            }
+        }
 
         const int64_t lat_hw = s.hw_ns - s.tx_ns;
         if (samples_ == 0) first_hw_ns_ = s.hw_ns;
@@ -384,6 +397,8 @@ public:
     // Latency, divergence and accounting fields of the flat summary line.
     void append_summary(JsonLine& j) const {
         j.u64("latency_samples", samples_);
+        j.f3("warmup_secs", static_cast<double>(warmup_ns_) / 1e9);
+        j.u64("warmup_skipped", warmup_skipped_);
         if (samples_) {
             j.us("min_latency_us", hw_.min()).us("max_latency_us", hw_.max());
             j.f3("mean_latency_us", hw_.mean() / 1000.0);
@@ -469,6 +484,9 @@ private:
     SeqTracker seq_;
     SignedHist hw_, sw_, div_;
     uint64_t samples_ = 0, neg_hw_ = 0, neg_sw_ = 0, sw_missing_ = 0;
+    int64_t warmup_ns_ = 0, warm_first_hw_ns_ = 0;
+    bool warm_started_ = false;
+    uint64_t warmup_skipped_ = 0;
     int64_t most_neg_hw_ = 0;
     int64_t first_hw_ns_ = 0, last_hw_ns_ = 0;
     int64_t first100_max_ = INT64_MIN;

@@ -171,6 +171,27 @@ static void test_recorder() {
     CHECK(std::count(d.begin(), d.end(), '[') == std::count(d.begin(), d.end(), ']'));
 }
 
+static void test_warmup() {
+    LatencyRecorder r;
+    r.set_warmup_ns(2000000000LL);                 // 2 s
+    const int64_t base = 1700000000000000000LL;
+    // 5 s at 1 kpps; the first 1.9 s are slow, the rest are steady. Seq 10 is lost.
+    for (uint32_t i = 0; i < 5000; ++i) {
+        if (i == 10) continue;
+        r.record(mk(i, base + i * 1000000LL, (i >= 1 && i < 1900) ? 900000 : 150000, 800));
+    }
+    CHECK(r.samples() == 3000);                    // 2000 warm-up packets left out of the latency stats
+    CHECK(r.hw().max() == 150000);                 // none of the slow ones leaked in
+    CHECK(r.seq().unique() == 4999);               // but every packet is still counted for loss
+    JsonLine j;
+    r.append_summary(j);
+    const std::string line = j.done();
+    CHECK(line.find("\"warmup_secs\":2.000") != std::string::npos);
+    CHECK(line.find("\"warmup_skipped\":1999") != std::string::npos);   // 2000 minus the lost seq 10
+    LatencyRecorder none;                          // disabled by default
+    for (uint32_t i = 0; i < 100; ++i) none.record(mk(i, base + i * 1000000LL, 150000, 800));
+    CHECK(none.samples() == 100);
+}
 static void test_json_escape() {
     JsonLine j;
     j.str("k", "a\"b\\c\n\x01");
@@ -182,6 +203,7 @@ int main() {
     test_quantiles_vs_exact();
     test_seq_tracker();
     test_recorder();
+    test_warmup();
     test_json_escape();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

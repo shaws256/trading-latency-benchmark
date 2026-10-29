@@ -343,6 +343,11 @@ int main(int argc, char** argv) {
     mmsghdr msgs[kBatch];
 
     LatencyRecorder rec;
+    {   // Latency of the first seconds is discarded (loss is still counted); 0 disables.
+        const char* w = getenv("MCAST_WARMUP_SECS");
+        const double warm_s = w ? atof(w) : 2.0;
+        if (warm_s > 0) rec.set_warmup_ns(static_cast<int64_t>(warm_s * 1e9));
+    }
     uint64_t raw_data_packets = 0, hw_count = 0, short_packets = 0, end_markers = 0;
     uint32_t max_rxq_drops = 0;
     bool end_seen = false, timed_out = false, error = false;

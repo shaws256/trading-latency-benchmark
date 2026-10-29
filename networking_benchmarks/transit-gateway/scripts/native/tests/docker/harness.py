@@ -86,7 +86,7 @@ class Lab:
     # -- receivers ---------------------------------------------------------
     def rx_cmd(self, impl, timeout=RX_TIMEOUT):
         if impl == "cpp":
-            return f"/out/bin/mcast_recv_synth {GROUP} {PORT} {timeout} eth0"
+            return f"env MCAST_WARMUP_SECS={getattr(self, 'warmup', 0)} /out/bin/mcast_recv_synth {GROUP} {PORT} {timeout} eth0"
         return f"python3 /native/tests/docker/py_recv_synth.py {GROUP} {PORT} {timeout}"
 
     def rx_start(self, c, impl, tag, timeout=RX_TIMEOUT):
@@ -228,10 +228,11 @@ def check_cpp_rx(ch, scope, rx, tx=None, expect_clean=True):
     ch.add(scope, "downstream regex captures the whole object", bool(m) and m.group(2) == line)
     try:
         import save_report
-        parsed = save_report.parse_phase_a("  i-0test multicast loss: " + line + "\n")
+        import tgw_results
+        parsed = tgw_results.parse_subscribers("  i-0test multicast loss: " + line + "\n")
         rep = save_report.generate_report({"stack_name": "t"}, parsed, [], "unit", "single-az-cpg", "",
                                           __import__("datetime").datetime.now())
-        ch.add(scope, "save_report.py parses and renders it", len(parsed) == 1 and "Phase A" in rep)
+        ch.add(scope, "save_report.py parses and renders it", len(parsed) == 1 and parsed[0].ok and "Phase A" in rep)
     except Exception as e:  # noqa: BLE001
         ch.add(scope, "save_report.py parses and renders it", False, repr(e))
     ch.add(scope, "accounting: received + loss == expected",
@@ -352,7 +353,7 @@ def run_join_live_stream(lab, ch, trials=30):
     aborts, invalid, valid, skipped_runs = 0, 0, 0, 0
     errs = {}
     for _ in range(trials):
-        r = dexec("rxc1", f"timeout -s TERM 2 /out/bin/mcast_recv_synth {GROUP} {PORT} 30 eth0", check=False)
+        r = dexec("rxc1", f"env MCAST_WARMUP_SECS=0 timeout -s TERM 2 /out/bin/mcast_recv_synth {GROUP} {PORT} 30 eth0", check=False)
         line = (r.stdout.strip().splitlines() or [""])[0]
         try:
             j = json.loads(line)
@@ -510,7 +511,37 @@ def run_max(lab, ch):
     return res
 
 
+def run_warmup(lab, ch):
+    """Default warm-up: the first seconds leave the latency statistics, not the loss accounting."""
+    tag, scope = "warmup_default", "warmup_default"
+    lab.warmup = 2
+    try:
+        lab.rx_start("rxc1", "cpp", tag, timeout=30)
+        lab.rx_ready("rxc1", "cpp")
+        tx = lab.tx_run("cpp", 2000, 8, tag)
+        lab.rx_wait("rxc1", tag, 15)
+        rx = lab.rx_collect("rxc1", "cpp", tag)
+    finally:
+        lab.warmup = 0
+    j = rx["json"] or {}
+    ch.add(scope, "receiver reports the warm-up it applied", j.get("warmup_secs") == 2.0, str(j.get("warmup_secs")))
+    ch.add(scope, "about 2 s of packets left out of the latency stats (2000 pps)",
+           3500 <= j.get("warmup_skipped", 0) <= 4500, str(j.get("warmup_skipped")))
+    ch.add(scope, "loss accounting still sees every packet",
+           j.get("total_received") == tx.get("sent") and j.get("packet_loss_count") == 0,
+           f"received={j.get('total_received')} sent={tx.get('sent')}")
+    ch.add(scope, "latency samples + skipped == packets received",
+           j.get("latency_samples", 0) + j.get("warmup_skipped", 0) == j.get("total_received"),
+           f"{j.get('latency_samples')}+{j.get('warmup_skipped')} vs {j.get('total_received')}")
+    d = rx.get("detail") or {}
+    h = d.get("hist_hw_latency", {})
+    mass = sum(c for _, c in h.get("pos", [])) + sum(c for _, c in h.get("neg", []))
+    ch.add(scope, "histogram mass == latency samples (warm-up excluded)", mass == j.get("latency_samples"), str(mass))
+    return [{"profile": "warmup_default", "sender": {"impl": "cpp"}, "receivers": [rx], "scope": scope, "tc": "", "netem": None}]
+
+
 PROFILES = [
+    ("warmup_default", run_warmup),
     ("base_1k", lambda lab, ch: run_pair_profile(lab, ch, "base_1k", 1000, 15)),
     ("rate_10k", lambda lab, ch: run_pair_profile(lab, ch, "rate_10k", 10000, 15)),
     ("rate_50k", lambda lab, ch: run_pair_profile(lab, ch, "rate_50k", 50000, 10)),

@@ -17,7 +17,7 @@ BUILD    ?= build
 
 all: $(BUILD)/mcast_send $(BUILD)/mcast_recv
 
-$(BUILD)/mcast_send: mcast_send.cpp
+$(BUILD)/mcast_send: mcast_send.cpp lat_stats.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
