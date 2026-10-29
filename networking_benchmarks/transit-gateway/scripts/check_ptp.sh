@@ -11,6 +11,7 @@ set -euo pipefail
 
 STACK_NAME=""
 VERBOSE="false"
+MAX_SYS_US="${MAX_SYS_US:-10}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -96,11 +97,11 @@ if echo "$SRC" | grep -q PHC; then SYNC=PTP; \
 elif echo "$SRC" | grep -q 169.254; then SYNC=NTP; \
 else SYNC=UNKNOWN; fi; \
 echo "  SYNC: $SYNC (active=$ACTIVE)"; \
-LAST_OFFSET=$(echo "$TRACKING" | awk "/Last offset/ {print \$4}"); \
+SYS_US=$(echo "$TRACKING" | awk "/^System time/ {v=\$4+0; if (\$6==\"slow\") v=-v; printf \"%.3f\", v*1e6}"); \
 RMS_OFFSET=$(echo "$TRACKING" | awk "/RMS offset/ {print \$4}"); \
-[ -z "$LAST_OFFSET" ] && LAST_OFFSET="?"; \
+[ -z "$SYS_US" ] && SYS_US="?"; \
 [ -z "$RMS_OFFSET" ] && RMS_OFFSET="?"; \
-echo "  Last offset: $LAST_OFFSET s   RMS offset: $RMS_OFFSET s"; \
+echo "  System time: $SYS_US us (the gated value)   RMS offset: $RMS_OFFSET s"; \
 echo; \
 echo "KV:phc_dev=$PHC_DEV"; \
 echo "KV:phc_name=$PHC_NAME"; \
@@ -111,7 +112,7 @@ echo "KV:hw_rx=$HW_RX"; \
 echo "KV:hw_raw_clock=$HW_RAW"; \
 echo "KV:active_source=$ACTIVE"; \
 echo "KV:sync=$SYNC"; \
-echo "KV:last_offset=$LAST_OFFSET"; \
+echo "KV:system_time_us=$SYS_US"; \
 echo "KV:rms_offset=$RMS_OFFSET"'
 
 # Use python3 to safely encode the command into the SSM JSON payload.
@@ -129,7 +130,7 @@ ROW_HW_TS=()
 ROW_HW_RX=()
 ROW_ACTIVE=()
 ROW_SYNC=()
-ROW_LAST=()
+ROW_SYS=()
 ROW_RMS=()
 
 for inst in "${ALL[@]}"; do
@@ -192,7 +193,7 @@ for inst in "${ALL[@]}"; do
   ROW_HW_RX+=("$(get_kv hw_rx)")
   ROW_ACTIVE+=("$(get_kv active_source)")
   ROW_SYNC+=("$(get_kv sync)")
-  ROW_LAST+=("$(get_kv last_offset)")
+  ROW_SYS+=("$(get_kv system_time_us)")
   ROW_RMS+=("$(get_kv rms_offset)")
 done
 
@@ -202,7 +203,7 @@ done
 echo ""
 echo "============================================================ PTP SUMMARY ============================================================"
 printf "%-21s %-11s %-10s %-7s %-9s %-9s %-7s %-16s %-8s %-13s %-13s\n" \
-  "Instance" "Role" "PHC dev" "phc_en" "/dev/ena" "hw_ts" "hw_rx" "Active source" "Sync" "Last offset" "RMS offset"
+  "Instance" "Role" "PHC dev" "phc_en" "/dev/ena" "hw_ts" "hw_rx" "Active source" "Sync" "SysTime us" "RMS offset"
 printf "%-21s %-11s %-10s %-7s %-9s %-9s %-7s %-16s %-8s %-13s %-13s\n" \
   "--------------------" "----------" "---------" "------" "--------" "--------" "------" "---------------" "-------" "------------" "------------"
 
@@ -217,7 +218,7 @@ for i in "${!ROW_INST[@]}"; do
     "${ROW_HW_RX[$i]:-?}" \
     "${ROW_ACTIVE[$i]:-?}" \
     "${ROW_SYNC[$i]:-?}" \
-    "${ROW_LAST[$i]:-?}" \
+    "${ROW_SYS[$i]:-?}" \
     "${ROW_RMS[$i]:-?}"
 done
 
@@ -226,6 +227,7 @@ echo "Legend:"
 echo "  hw_ts   — /sys/bus/pci/devices/*/hw_packet_timestamping_state (ENA driver)"
 echo "  hw_rx   — ethtool -T advertises 'hardware-receive' on the primary NIC"
 echo "  Sync=PTP means chronyc shows a PHC reference as the active source."
+echo "  SysTime = chrony System time: the clock error right now. Exit status is non-zero above ${MAX_SYS_US} us."
 echo ""
 
 # Non-zero exit if any instance is not synced to PHC.
@@ -235,5 +237,10 @@ echo ""
 EXIT_CODE=0
 for s in "${ROW_SYNC[@]}"; do
   [[ "$s" != "PTP" ]] && EXIT_CODE=1
+done
+for v in "${ROW_SYS[@]}"; do
+  if ! awk -v v="$v" -v m="$MAX_SYS_US" 'BEGIN { if (v == "" || v == "?") exit 1; if (v < 0) v = -v; exit !(v <= m) }'; then
+    EXIT_CODE=1
+  fi
 done
 exit $EXIT_CODE

@@ -1,3 +1,5 @@
+import re
+
 import aws_cdk as cdk
 from aws_cdk import aws_ec2 as ec2, aws_iam as iam, aws_logs as logs, aws_s3 as s3, Fn
 from cdk_nag import NagSuppressions
@@ -31,6 +33,27 @@ def _validate_phc_instance(instance_type: str) -> None:
         )
 
 
+DEFAULT_NATIVE_REPO = "https://github.com/aws-samples/trading-latency-benchmark.git"
+DEFAULT_NATIVE_REF = "main"
+NATIVE_SRC_PATH = "networking_benchmarks/transit-gateway/scripts/native"
+
+# Both values are written into the instance's root-run user-data, so they are restricted
+# to characters that cannot terminate a shell word.
+_REPO_RE = re.compile(r"^https://[A-Za-z0-9._/-]+$")
+_REF_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
+
+
+def _validate_native_source(repo: str, ref: str) -> None:
+    """Raise ValueError unless repo is a plain https URL and ref a plain branch, tag or SHA."""
+    if not _REPO_RE.match(repo):
+        raise ValueError(f"native_repo='{repo}' must be an https:// URL of letters, digits and . _ / -")
+    if not _REF_RE.match(ref) or ".." in ref:
+        raise ValueError(
+            f"native_ref='{ref}' must be a branch, tag or full commit SHA "
+            "(letters, digits and . _ / -; not starting with '-')"
+        )
+
+
 class BenchmarkStack(cdk.Stack):
     def __init__(
         self,
@@ -44,12 +67,16 @@ class BenchmarkStack(cdk.Stack):
         s3_bucket_name: str | None = None,
         placement_strategy: str = "single-az-cpg",
         base_ami: str | None = None,
+        native_repo: str = DEFAULT_NATIVE_REPO,
+        native_ref: str = DEFAULT_NATIVE_REF,
+        build_native: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         # PHC gating: receiver-side HW timestamping requires a PHC-capable family.
         _validate_phc_instance(instance_type)
+        _validate_native_source(native_repo, native_ref)
 
         # Store parameters for use by subsequent tasks
         self._num_subscribers = num_subscribers
@@ -59,6 +86,9 @@ class BenchmarkStack(cdk.Stack):
         self._s3_bucket_name = s3_bucket_name
         self._placement_strategy = placement_strategy
         self._base_ami = base_ami
+        self._native_repo = native_repo
+        self._native_ref = native_ref
+        self._build_native = build_native
 
         # --- VPC ---
         self.vpc = ec2.CfnVPC(
@@ -425,6 +455,47 @@ which iperf3  || { echo "FATAL: iperf3 install failed"; exit 1; }
 echo "Tools installed: sockperf=$(which sockperf), iperf3=$(which iperf3)"
 
 # ============================================================
+# Phase 1b: Build the native sender/receiver from source
+# ============================================================
+# A failure here must not break the Python path: it writes a marker and the
+# environment is still signalled ready. The orchestrator refuses --impl native
+# when /opt/benchmark-native-ready is absent.
+rm -f /opt/benchmark-native-ready /opt/benchmark-native-failed
+if [ "@BUILD_NATIVE@" = "true" ]; then
+cat > /opt/benchmark-native-build.sh <<'NATIVE_BUILD_EOF'
+set -euo pipefail
+ROOT=/opt/benchmark-native
+rm -rf "$ROOT"
+mkdir -p "$ROOT/src"
+cd "$ROOT/src"
+git init -q .
+git remote add origin '@NATIVE_REPO@'
+git sparse-checkout set --no-cone '/@NATIVE_SRC_PATH@/'
+ok=false
+for attempt in 1 2 3; do
+    if git fetch -q --depth 1 --filter=blob:none origin '@NATIVE_REF@'; then ok=true; break; fi
+    sleep 5
+done
+$ok
+git checkout -q FETCH_HEAD
+COMMIT=$(git rev-parse HEAD)
+cd "@NATIVE_SRC_PATH@"
+make BUILD="$ROOT/bin" all
+test -x "$ROOT/bin/mcast_send"
+test -x "$ROOT/bin/mcast_recv"
+echo "commit=$COMMIT repo=@NATIVE_REPO@ ref=@NATIVE_REF@" > "$ROOT/BUILD_INFO"
+NATIVE_BUILD_EOF
+    if bash /opt/benchmark-native-build.sh > /var/log/benchmark-native-build.log 2>&1; then
+        touch /opt/benchmark-native-ready
+        echo "Native build ok: $(cat /opt/benchmark-native/BUILD_INFO)"
+    else
+        touch /opt/benchmark-native-failed
+        echo "WARNING: native build failed; see /var/log/benchmark-native-build.log"
+        tail -n 20 /var/log/benchmark-native-build.log
+    fi
+fi
+
+# ============================================================
 # Phase 2: Configure PTP clock sync (may briefly drop network)
 # ============================================================
 
@@ -475,7 +546,9 @@ else
 fi
 
 systemctl restart chronyd
-chronyc waitsync 30 || true
+# Wait until the clock is within 100 us of the reference, then step away any residue.
+chronyc waitsync 30 0.0001 0 1 || echo "WARNING: chrony did not reach 100 us within 30 s"
+chronyc makestep || true
 chronyc sources
 
 # ============================================================
@@ -499,6 +572,13 @@ fi
 touch /opt/benchmark-env-ready
 echo "Benchmark environment ready"
 """
+        user_data_script = (
+            user_data_script
+            .replace("@BUILD_NATIVE@", "true" if build_native else "false")
+            .replace("@NATIVE_REPO@", native_repo)
+            .replace("@NATIVE_REF@", native_ref)
+            .replace("@NATIVE_SRC_PATH@", NATIVE_SRC_PATH)
+        )
         user_data_b64 = Fn.base64(user_data_script)
 
         # --- Helper to create ENI + Instance pair ---

@@ -2,30 +2,23 @@
 set -euo pipefail
 
 ###############################################################################
-# run_benchmark.sh — Orchestrate a TGW multicast benchmark via SSM Run Command
+# run_benchmark.sh - Orchestrate a TGW multicast benchmark via SSM Run Command
 #
 # Usage:
-#   scripts/run_benchmark.sh --stack-name <name> [OPTIONS]
+#   scripts/run_benchmark.sh --stack-name <name> [OPTIONS]      (see --help)
 #
-# Options:
-#   --stack-name  NAME      CloudFormation stack name (required)
-#   --group       ADDR      Multicast group address   (default: 239.1.1.1)
-#   --port        PORT      UDP port                   (default: 5001)
-#   --rate        RATE      Packets/sec (sockperf mps) or kbps (iperf3 -b)
-#                                                       (default: 1000)
-#   --duration    SECS      Benchmark duration seconds  (default: 60)
-#   --tool        TOOL[,..] Benchmark tool(s); repeatable or comma-separated
-#                           Choices: mcast, sockperf, iperf3
-#                                                       (default: mcast,sockperf)
+# The script queries the stack, waits for the instances, runs a clock and NIC
+# preflight, runs the requested tools, and prints a raw text stream (see
+# tgw_results.py for the format). Pipe or save that stream for save_report.py /
+# collect_results.py. A multicast run that fails a validity gate (missing
+# subscriber, loss, clock, sender rate) exits with status 3.
 #
-# The script queries CloudFormation stack outputs, waits for instance
-# readiness, runs the benchmark via SSM, and prints per-subscriber results
-# to stdout (pipe to collect_results.py for aggregation).
-#
-# Tools always run in canonical order: mcast → sockperf → iperf3, regardless
-# of the order they are passed. The PHC pre-flight always runs (sockperf and
-# iperf3 do not need it, but PTP correctness is checked unconditionally).
+# Runs on the operator's machine, so it stays compatible with bash 3.2 (macOS):
+# no associative arrays, no mapfile, guarded empty-array expansion.
 ###############################################################################
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TGW_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -40,20 +33,27 @@ INSTANCE_TYPE=""
 PLACEMENT="single-az-cpg"
 NOTES=""
 SAVE_REPORT=false
+IMPL="native"
+SENDER_IMPL=""
+RECEIVER_IMPL=""
+MAX_LOSS_PCT=2
+MAX_CLOCK_OFFSET_US=10
+DETAIL_DIR=""
+RUNS_DIR=""
 
 VALID_TOOLS=(mcast sockperf iperf3)
-# Canonical execution order — runs always proceed in this order regardless of CLI input.
 TOOL_ORDER=(mcast sockperf iperf3)
 
 SSM_POLL_INTERVAL=10
 SSM_POLL_MAX_ATTEMPTS=60
 READY_POLL_INTERVAL=10
 READY_POLL_MAX_ATTEMPTS=60
+SSM_WAIT_INTERVAL=2
 RECEIVER_SETTLE_SECS=5
 
-# ---------------------------------------------------------------------------
-# Usage / help
-# ---------------------------------------------------------------------------
+NATIVE_BIN=/opt/benchmark-native/bin
+EXIT_INVALID_RUN=3
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") --stack-name <name> [OPTIONS]
@@ -70,29 +70,32 @@ Options:
                        pps for mcast, kbps for iperf3)
   --duration   SECS    Benchmark duration in seconds   [default: 60]
   --tool       TOOL[,..] Benchmark tool(s); repeatable or comma-separated.
-                       Choices:
-                         mcast    — TGW multicast one-way latency (PHC HW timestamps)
-                         sockperf — unicast RTT baseline (no TGW)
-                         iperf3   — unicast UDP throughput (no TGW, no latency)
-                       [default: mcast,sockperf]
-                       Tools always run in canonical order: mcast → sockperf → iperf3.
+                         mcast    - TGW multicast one-way latency (hardware RX stamps)
+                         sockperf - unicast RTT baseline (no TGW)
+                         iperf3   - unicast UDP throughput (no TGW, no latency)
+                       [default: mcast,sockperf]  (always run mcast, sockperf, iperf3)
+  --impl IMPL          Multicast sender and receiver implementation:
+                       native (C++, built on the instances) or python
+                       (scripts/mcast_*.py).           [default: native]
+  --sender-impl IMPL   Override the sender only  (native|python)
+  --receiver-impl IMPL Override the receiver only (native|python)
+  --max-loss-pct PCT   Fail the run above this loss per subscriber  [default: 2]
+  --max-clock-offset-us US
+                       Fail the run when chrony System time exceeds this  [default: 10]
   --instance-type TYPE EC2 instance type (for report)  [default: auto-detect]
   --placement  STRAT   Placement strategy              [default: single-az-cpg]
   --notes      TEXT    Additional notes for report
+  --detail-dir DIR     Keep the receivers' histogram files here
+  --runs-dir DIR       Where --save-report writes             [default: ../runs]
   --save-report        Save markdown report to runs/   [default: off]
 
+A native implementation needs the instances to have built it at launch; the
+script stops with the build log if they could not. It never falls back to Python.
+
 Examples:
-  # default (mcast + sockperf)
-  scripts/run_benchmark.sh --stack-name MyBenchStack
-
-  # only TGW one-way latency
-  scripts/run_benchmark.sh --stack-name MyBenchStack --tool mcast
-
-  # all three tools, comma-separated
-  scripts/run_benchmark.sh --stack-name MyBenchStack --tool mcast,sockperf,iperf3
-
-  # repeatable form
-  scripts/run_benchmark.sh --stack-name MyBenchStack --tool mcast --tool iperf3
+  scripts/run_benchmark.sh --stack-name MyBenchStack --tool mcast --save-report
+  scripts/run_benchmark.sh --stack-name MyBenchStack --impl python
+  scripts/run_benchmark.sh --stack-name MyBenchStack --sender-impl python --receiver-impl native
 EOF
   exit 1
 }
@@ -107,8 +110,14 @@ while [[ $# -gt 0 ]]; do
     --port)          PORT="$2";          shift 2 ;;
     --rate)          RATE="$2";          shift 2 ;;
     --duration)      DURATION="$2";      shift 2 ;;
+    --impl)          IMPL="$2";          shift 2 ;;
+    --sender-impl)   SENDER_IMPL="$2";   shift 2 ;;
+    --receiver-impl) RECEIVER_IMPL="$2"; shift 2 ;;
+    --max-loss-pct)  MAX_LOSS_PCT="$2";  shift 2 ;;
+    --max-clock-offset-us) MAX_CLOCK_OFFSET_US="$2"; shift 2 ;;
+    --detail-dir)    DETAIL_DIR="$2";    shift 2 ;;
+    --runs-dir)      RUNS_DIR="$2";      shift 2 ;;
     --tool)
-      # Accept both repeatable (--tool a --tool b) and comma-separated (--tool a,b).
       IFS=',' read -ra _parts <<< "$2"
       for _t in "${_parts[@]}"; do
         _t="$(echo "$_t" | tr -d '[:space:]')"
@@ -131,12 +140,8 @@ if [[ -z "$STACK_NAME" ]]; then
   usage
 fi
 
-# Default tools if user did not pass --tool at all.
-if [[ ${#TOOLS[@]} -eq 0 ]]; then
-  TOOLS=(mcast sockperf)
-fi
+[[ ${#TOOLS[@]} -eq 0 ]] && TOOLS=(mcast sockperf)
 
-# Validate every tool against the allow-list.
 for _t in "${TOOLS[@]}"; do
   _ok=false
   for _v in "${VALID_TOOLS[@]}"; do
@@ -148,7 +153,23 @@ for _t in "${TOOLS[@]}"; do
   fi
 done
 
-# Build the final run-order list: deduplicated, in canonical order.
+# Values reach remote shell commands, so they are checked here.
+require_int() { [[ "$2" =~ ^[0-9]+$ ]] && [[ "$2" -gt 0 ]] || { echo "ERROR: $1 must be a positive integer, got '$2'" >&2; exit 1; }; }
+require_num() { [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "ERROR: $1 must be a number, got '$2'" >&2; exit 1; }; }
+require_int --port "$PORT"
+require_int --rate "$RATE"
+require_int --duration "$DURATION"
+require_num --max-loss-pct "$MAX_LOSS_PCT"
+require_num --max-clock-offset-us "$MAX_CLOCK_OFFSET_US"
+[[ "$GROUP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "ERROR: --group must be an IPv4 address, got '$GROUP'" >&2; exit 1; }
+[[ "$STACK_NAME" =~ ^[A-Za-z0-9-]+$ ]] || { echo "ERROR: --stack-name has unexpected characters" >&2; exit 1; }
+
+[[ -z "$SENDER_IMPL" ]] && SENDER_IMPL="$IMPL"
+[[ -z "$RECEIVER_IMPL" ]] && RECEIVER_IMPL="$IMPL"
+for _i in "$SENDER_IMPL" "$RECEIVER_IMPL"; do
+  [[ "$_i" == "native" || "$_i" == "python" ]] || { echo "ERROR: implementation must be native or python, got '$_i'" >&2; exit 1; }
+done
+
 RUN_TOOLS=()
 for _v in "${TOOL_ORDER[@]}"; do
   for _t in "${TOOLS[@]}"; do
@@ -159,477 +180,507 @@ for _v in "${TOOL_ORDER[@]}"; do
   done
 done
 
-# Membership helper: tools_has <name> → exit 0 if requested, 1 otherwise.
 tools_has() {
-  local needle="$1"
-  for _t in "${RUN_TOOLS[@]}"; do
-    [[ "$_t" == "$needle" ]] && return 0
+  local needle="$1" t
+  for t in "${RUN_TOOLS[@]}"; do
+    [[ "$t" == "$needle" ]] && return 0
   done
   return 1
 }
 
-# ---------------------------------------------------------------------------
-# Output capture for --save-report
-# ---------------------------------------------------------------------------
-if [[ "$SAVE_REPORT" == "true" ]]; then
-  RAW_OUTPUT_FILE=$(mktemp /tmp/benchmark_raw_XXXXXXXX)
-  exec > >(tee "$RAW_OUTPUT_FILE") 2>&1
+NEEDS_NATIVE=false
+tools_has mcast && { [[ "$SENDER_IMPL" == "native" || "$RECEIVER_IMPL" == "native" ]] && NEEDS_NATIVE=true; }
+NEEDS_PYTHON=false
+tools_has mcast && { [[ "$SENDER_IMPL" == "python" || "$RECEIVER_IMPL" == "python" ]] && NEEDS_PYTHON=true; }
+
+[[ -z "$RUNS_DIR" ]] && RUNS_DIR="$TGW_DIR/runs"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/tgw_bench.XXXXXXXX")"
+RAW_OUTPUT_FILE="$WORK/raw.txt"
+KEEP_DETAIL=false
+if [[ -n "$DETAIL_DIR" ]]; then
+  KEEP_DETAIL=true
+elif [[ "$SAVE_REPORT" == "true" ]]; then
+  DETAIL_DIR="$RUNS_DIR/$RUN_ID.details"
+  KEEP_DETAIL=true
+else
+  DETAIL_DIR="$WORK/details"
 fi
-
-echo "=== TGW Multicast Benchmark ==="
-echo "Stack:    $STACK_NAME"
-echo "Tools:    ${RUN_TOOLS[*]}"
-echo "Group:    $GROUP"
-echo "Port:     $PORT"
-echo "Rate:     $RATE"
-echo "Duration: ${DURATION}s"
-echo ""
+trap 'rm -rf "$WORK"' EXIT
 
 # ---------------------------------------------------------------------------
-# Helper: get a single CloudFormation output value by key
+# Helpers
 # ---------------------------------------------------------------------------
 get_stack_output() {
-  local key="$1"
   aws cloudformation describe-stacks \
     --stack-name "$STACK_NAME" \
-    --query "Stacks[0].Outputs[?OutputKey=='${key}'].OutputValue" \
+    --query "Stacks[0].Outputs[?OutputKey=='${1}'].OutputValue" \
     --output text
 }
 
-# ---------------------------------------------------------------------------
-# Helper: run an SSM command on one or more instances, return command-id
-# ---------------------------------------------------------------------------
+# ssm_send_command <instance> <command> <timeout-secs>  -> prints the command id
+# The command travels as a JSON string built by python, so quotes and newlines are safe.
 ssm_send_command() {
-  local targets="$1"  # comma-separated instance IDs
-  local commands="$2"
-  local timeout="$3"
-
-  # Build instance-id list as JSON array
-  local id_array
-  id_array=$(echo "$targets" | tr ',' '\n' | sed 's/.*/"&"/' | paste -sd ',' -)
-
+  local params
+  params=$(python3 -c 'import json,sys; print(json.dumps({"commands":[sys.argv[1]],"executionTimeout":[sys.argv[2]]}))' "$2" "$3")
   aws ssm send-command \
-    --instance-ids "[${id_array}]" \
+    --instance-ids "$1" \
     --document-name "AWS-RunShellScript" \
-    --parameters "{\"commands\":[\"${commands}\"],\"executionTimeout\":[\"${timeout}\"]}" \
+    --parameters "$params" \
     --query "Command.CommandId" \
     --output text
 }
 
-# ---------------------------------------------------------------------------
-# Helper: wait for an SSM command to finish on a specific instance
-# ---------------------------------------------------------------------------
+ssm_stdout() {
+  aws ssm get-command-invocation --command-id "$1" --instance-id "$2" \
+    --query "StandardOutputContent" --output text 2>/dev/null || true
+}
+
+# ssm_wait_command <command-id> <instance> <max-secs>; sets SSM_STATUS
+SSM_STATUS=""
 ssm_wait_command() {
-  local command_id="$1"
-  local instance_id="$2"
-  local max_wait="$3"
-
-  local elapsed=0
+  local command_id="$1" instance_id="$2" max_wait="$3" elapsed=0
   while [[ $elapsed -lt $max_wait ]]; do
-    local status
-    status=$(aws ssm get-command-invocation \
-      --command-id "$command_id" \
-      --instance-id "$instance_id" \
-      --query "Status" \
-      --output text 2>/dev/null || echo "Pending")
-
-    case "$status" in
-      Success)  return 0 ;;
+    SSM_STATUS=$(aws ssm get-command-invocation \
+      --command-id "$command_id" --instance-id "$instance_id" \
+      --query "Status" --output text 2>/dev/null || echo "Pending")
+    case "$SSM_STATUS" in
+      Success) return 0 ;;
       Failed|TimedOut|Cancelled)
-        echo "ERROR: SSM command $command_id on $instance_id finished with status: $status" >&2
+        echo "ERROR: SSM command $command_id on $instance_id finished with status: $SSM_STATUS" >&2
         return 1
         ;;
     esac
-
-    sleep 5
-    elapsed=$((elapsed + 5))
+    sleep "$SSM_WAIT_INTERVAL"
+    elapsed=$((elapsed + SSM_WAIT_INTERVAL))
   done
-
+  SSM_STATUS="WaitTimeout"
   echo "ERROR: Timed out waiting for SSM command $command_id on $instance_id" >&2
   return 1
 }
 
-# ---------------------------------------------------------------------------
-# Helper: get the private IP of an instance (needed for multicast interface)
-# ---------------------------------------------------------------------------
+# ssm_run <instance> <timeout-secs> <command>; stdout goes to SSM_OUT, returns 1 on failure.
+SSM_OUT=""
+ssm_run() {
+  local id
+  SSM_OUT=""
+  id=$(ssm_send_command "$1" "$3" "$2") || return 1
+  if ssm_wait_command "$id" "$1" "$(($2 + 30))"; then
+    SSM_OUT=$(ssm_stdout "$id" "$1")
+    return 0
+  fi
+  SSM_OUT=$(ssm_stdout "$id" "$1")
+  return 1
+}
+
+# ssm_upload <instance> <local file> <remote path>
+ssm_upload() {
+  local b64
+  b64=$(python3 -c 'import base64,sys; sys.stdout.write(base64.b64encode(open(sys.argv[1],"rb").read()).decode())' "$2")
+  ssm_run "$1" 30 "echo '$b64' | base64 -d > '$3' && chmod +x '$3' && echo UPLOADED" || return 1
+  [[ "$SSM_OUT" == *UPLOADED* ]]
+}
+
 get_private_ip() {
-  local instance_id="$1"
-  aws ec2 describe-instances \
-    --instance-ids "$instance_id" \
-    --query "Reservations[0].Instances[0].PrivateIpAddress" \
-    --output text
+  aws ec2 describe-instances --instance-ids "$1" \
+    --query "Reservations[0].Instances[0].PrivateIpAddress" --output text
+}
+
+get_az() {
+  aws ec2 describe-instances --instance-ids "$1" \
+    --query "Reservations[0].Instances[0].Placement.AvailabilityZone" --output text
+}
+
+# emit_clock_block <instance> <pre|post> <file with key=value lines>
+emit_clock_block() {
+  echo "--- CLOCK $1 $2 ---"
+  grep '=' "$3" || true
+  echo "--- END CLOCK ---"
+}
+
+# emit_mcast_block <instance> <az> <az-relation> <file with the receiver's stdout>
+emit_mcast_block() {
+  echo "--- MCAST $1 ---"
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import json, sys
+sid, az, rel, path = sys.argv[1:5]
+raw = open(path).read().strip()
+doc = {"subscriber_id": sid, "az": az, "az_relation": rel}
+if not raw:
+    doc["error"] = "no result returned"
+else:
+    try:
+        doc["result"] = json.loads(raw)
+    except ValueError:
+        doc["error"] = "result is not valid JSON: " + raw[:200]
+print(json.dumps(doc))
+PY
+  echo "--- END MCAST $1 ---"
 }
 
 # ---------------------------------------------------------------------------
-# Step 1: Query CloudFormation stack outputs
+# The run itself. Its output is the raw stream; the verdict is computed from it afterwards.
 # ---------------------------------------------------------------------------
-echo ">>> Querying CloudFormation stack outputs..."
+run_all() {
+  set -eo pipefail
+  local SENDER_TIMEOUT=$((DURATION + 30))
+  local instance_id sub_id
 
-PUBLISHER_ID=$(get_stack_output "PublisherInstanceId")
-SUBSCRIBER_IDS_CSV=$(get_stack_output "SubscriberInstanceIds")
-S3_BUCKET=$(get_stack_output "S3BucketName")
+  echo "=== TGW Multicast Benchmark ==="
+  echo "Stack:    $STACK_NAME"
+  echo "Run-ID:   $RUN_ID"
+  echo "Tools:    ${RUN_TOOLS[*]}"
+  echo "Group:    $GROUP"
+  echo "Port:     $PORT"
+  echo "Rate:     $RATE"
+  echo "Duration: ${DURATION}s"
+  echo "Impl:     sender=$SENDER_IMPL receiver=$RECEIVER_IMPL"
+  echo ""
 
-# Also fetch multicast config from stack outputs for informational logging.
-# CLI args (--group, --port) take precedence over stack outputs.
-echo "  Stack multicast group: $(get_stack_output "MulticastGroup")"
-echo "  Stack multicast port:  $(get_stack_output "MulticastPort")"
+  # --- Step 1: stack outputs ---
+  echo ">>> Querying CloudFormation stack outputs..."
+  local PUBLISHER_ID SUBSCRIBER_IDS_CSV S3_BUCKET STACK_ID REGION
+  PUBLISHER_ID=$(get_stack_output "PublisherInstanceId")
+  SUBSCRIBER_IDS_CSV=$(get_stack_output "SubscriberInstanceIds")
+  S3_BUCKET=$(get_stack_output "S3BucketName")
+  STACK_ID=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].StackId" --output text)
+  REGION=$(echo "$STACK_ID" | cut -d: -f4)
+  echo "  Stack multicast group: $(get_stack_output "MulticastGroup")"
+  echo "  Stack multicast port:  $(get_stack_output "MulticastPort")"
 
-IFS=',' read -ra SUBSCRIBER_IDS <<< "$SUBSCRIBER_IDS_CSV"
-ALL_INSTANCE_IDS=("$PUBLISHER_ID" "${SUBSCRIBER_IDS[@]}")
+  local SUBSCRIBER_IDS ALL_INSTANCE_IDS
+  IFS=',' read -ra SUBSCRIBER_IDS <<< "$SUBSCRIBER_IDS_CSV"
+  ALL_INSTANCE_IDS=("$PUBLISHER_ID" "${SUBSCRIBER_IDS[@]}")
 
-echo "  Publisher:   $PUBLISHER_ID"
-echo "  Subscribers: ${SUBSCRIBER_IDS[*]}"
-echo "  S3 Bucket:   $S3_BUCKET"
-echo ""
+  local ITYPE="$INSTANCE_TYPE"
+  [[ -z "$ITYPE" ]] && ITYPE=$(aws ec2 describe-instances --instance-ids "$PUBLISHER_ID" \
+    --query "Reservations[0].Instances[0].InstanceType" --output text)
+  echo "Instance-Type: $ITYPE"
+  echo "  Publisher:   $PUBLISHER_ID"
+  echo "  Subscribers: ${SUBSCRIBER_IDS[*]}"
+  echo "  S3 Bucket:   $S3_BUCKET"
+  echo ""
 
-# ---------------------------------------------------------------------------
-# Step 2: Wait for all instances to be SSM-ready
-# ---------------------------------------------------------------------------
-echo ">>> Waiting for all instances to be SSM-ready..."
-
-for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-  attempt=0
-  while [[ $attempt -lt $SSM_POLL_MAX_ATTEMPTS ]]; do
-    ping_status=$(aws ssm describe-instance-information \
-      --filters "Key=InstanceIds,Values=${instance_id}" \
-      --query "InstanceInformationList[0].PingStatus" \
-      --output text 2>/dev/null || echo "None")
-
-    if [[ "$ping_status" == "Online" ]]; then
-      echo "  $instance_id — SSM online"
-      break
-    fi
-
-    attempt=$((attempt + 1))
-    if [[ $attempt -ge $SSM_POLL_MAX_ATTEMPTS ]]; then
-      echo "ERROR: $instance_id did not become SSM-ready after $((SSM_POLL_MAX_ATTEMPTS * SSM_POLL_INTERVAL))s" >&2
-      exit 1
-    fi
-    sleep "$SSM_POLL_INTERVAL"
+  # --- Step 2: SSM online ---
+  echo ">>> Waiting for all instances to be SSM-ready..."
+  local attempt ping_status
+  for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
+    attempt=0
+    while true; do
+      ping_status=$(aws ssm describe-instance-information \
+        --filters "Key=InstanceIds,Values=${instance_id}" \
+        --query "InstanceInformationList[0].PingStatus" --output text 2>/dev/null || echo "None")
+      if [[ "$ping_status" == "Online" ]]; then
+        echo "  $instance_id - SSM online"
+        break
+      fi
+      attempt=$((attempt + 1))
+      if [[ $attempt -ge $SSM_POLL_MAX_ATTEMPTS ]]; then
+        echo "ERROR: $instance_id did not become SSM-ready after $((SSM_POLL_MAX_ATTEMPTS * SSM_POLL_INTERVAL))s" >&2
+        exit 1
+      fi
+      sleep "$SSM_POLL_INTERVAL"
+    done
   done
-done
+  echo ""
 
-echo ""
-
-# ---------------------------------------------------------------------------
-# Step 3: Wait for /opt/benchmark-env-ready on all instances
-# ---------------------------------------------------------------------------
-echo ">>> Waiting for benchmark environment readiness on all instances..."
-
-for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-  attempt=0
-  while [[ $attempt -lt $READY_POLL_MAX_ATTEMPTS ]]; do
-    cmd_id=$(ssm_send_command "$instance_id" "test -f /opt/benchmark-env-ready && which sockperf >/dev/null 2>&1 && which iperf3 >/dev/null 2>&1 && echo READY || echo NOTREADY" "30")
-    sleep 3  # give the command a moment to execute
-
-    result=$(aws ssm get-command-invocation \
-      --command-id "$cmd_id" \
-      --instance-id "$instance_id" \
-      --query "StandardOutputContent" \
-      --output text 2>/dev/null || echo "")
-
-    if [[ "$result" == *"READY"* ]]; then
-      echo "  $instance_id — environment ready"
-      break
+  # --- Step 3: environment readiness, and native build state ---
+  echo ">>> Waiting for benchmark environment readiness on all instances..."
+  # shellcheck disable=SC2016
+  local READY_CMD='if [ -f /opt/benchmark-env-ready ] && command -v sockperf >/dev/null 2>&1 && command -v iperf3 >/dev/null 2>&1; then echo ENV=READY; else echo ENV=NOTREADY; fi
+if [ -f /opt/benchmark-native-ready ]; then echo NATIVE=ready; echo "NATIVE_BUILD=$(cat /opt/benchmark-native/BUILD_INFO 2>/dev/null)"
+elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NATIVE=absent; fi'
+  local native_commit first_commit="" first_build="" native_state build_line
+  for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
+    attempt=0
+    while true; do
+      ssm_run "$instance_id" 30 "$READY_CMD" || true
+      if [[ "$SSM_OUT" == *"ENV=READY"* ]]; then
+        echo "  $instance_id - environment ready"
+        break
+      fi
+      attempt=$((attempt + 1))
+      if [[ $attempt -ge $READY_POLL_MAX_ATTEMPTS ]]; then
+        echo "ERROR: $instance_id environment not ready after $((READY_POLL_MAX_ATTEMPTS * READY_POLL_INTERVAL))s" >&2
+        exit 1
+      fi
+      sleep "$READY_POLL_INTERVAL"
+    done
+    if [[ "$NEEDS_NATIVE" == "true" ]]; then
+      native_state=$(echo "$SSM_OUT" | sed -n 's/^NATIVE=//p' | head -1)
+      if [[ "$native_state" != "ready" ]]; then
+        echo "ERROR: $instance_id has no native build (state: ${native_state:-unknown})." >&2
+        echo "       Refusing to continue: a silent fallback to Python would change what is measured." >&2
+        if ssm_run "$instance_id" 30 "tail -n 20 /var/log/benchmark-native-build.log 2>/dev/null; true"; then
+          echo "$SSM_OUT" | sed 's/^/       | /' >&2
+        fi
+        echo "       Fix the build (native_repo / native_ref must be reachable and contain the sources)" >&2
+        echo "       or run with --impl python." >&2
+        exit 1
+      fi
+      build_line=$(echo "$SSM_OUT" | sed -n 's/^NATIVE_BUILD=//p' | head -1)
+      native_commit=$(echo "$build_line" | sed -n 's/^commit=\([0-9a-f]*\).*/\1/p')
+      if [[ -z "$first_commit" ]]; then
+        first_commit="$native_commit"
+        first_build="$build_line"
+      elif [[ "$native_commit" != "$first_commit" ]]; then
+        echo "ERROR: instances built different native commits ($first_commit vs $native_commit)." >&2
+        exit 1
+      fi
     fi
+  done
+  [[ -n "$first_build" ]] && echo "Native-Build: $first_build"
+  echo ""
 
-    attempt=$((attempt + 1))
-    if [[ $attempt -ge $READY_POLL_MAX_ATTEMPTS ]]; then
-      echo "ERROR: $instance_id environment not ready after $((READY_POLL_MAX_ATTEMPTS * READY_POLL_INTERVAL))s" >&2
-      exit 1
+  # --- Step 4: preflight (clock + NIC), identical script on every instance ---
+  echo ">>> Preflight: PHC, hardware timestamping and clock offset on all instances..."
+  local PTP_FAIL=0
+  for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
+    ssm_upload "$instance_id" "$SCRIPT_DIR/preflight.sh" /tmp/preflight.sh || { echo "ERROR: could not upload preflight.sh to $instance_id" >&2; exit 1; }
+    ssm_run "$instance_id" 60 "bash /tmp/preflight.sh --max-offset-us $MAX_CLOCK_OFFSET_US" || true
+    printf '%s\n' "$SSM_OUT" > "$WORK/pre.$instance_id"
+    if [[ "$SSM_OUT" == *PASS* ]]; then
+      echo "  $instance_id - clock and NIC ready ($(grep '^system_time_us=' "$WORK/pre.$instance_id" | head -1))"
+    else
+      echo "  FAIL $instance_id - preflight failed:" >&2
+      sed 's/^/    /' "$WORK/pre.$instance_id" >&2
+      PTP_FAIL=1
     fi
-    sleep "$READY_POLL_INTERVAL"
   done
-done
-
-echo ""
-
-# ---------------------------------------------------------------------------
-# Step 4: PTP pre-flight — abort if any instance lacks PHC sync
-#
-# Strict checks (each FAILs the run):
-#   * /sys/module/ena/parameters/phc_enable == 1
-#   * a /sys/class/ptp/*/clock_name contains "ena-ptp"
-#   * ethtool -T <iface> advertises "hardware-receive"
-#   * chrony's active source ("^*"-prefixed) is a PHC reference
-#     (was a warning before; now a hard failure to prevent silent
-#      one-way-latency miscalibration when chrony falls back to NTP)
-# ---------------------------------------------------------------------------
-echo ">>> PTP pre-flight: verifying hardware clock on all instances..."
-
-# shellcheck disable=SC2016
-PTP_PREFLIGHT_CMD='set -e; \
-PHC_ENABLE=$(cat /sys/module/ena/parameters/phc_enable 2>/dev/null || echo 0); \
-echo "phc_enable=$PHC_ENABLE"; \
-if [ "$PHC_ENABLE" != "1" ]; then echo FAIL:phc_not_enabled; exit 1; fi; \
-PTP_DEV=""; \
-for f in /sys/class/ptp/*/clock_name; do \
-  if [ -f "$f" ] && grep -q ena-ptp "$f"; then \
-    PTP_DEV=/dev/$(basename $(dirname $f)); \
-    break; \
-  fi; \
-done; \
-if [ -z "$PTP_DEV" ]; then echo FAIL:no_ena_ptp_device; exit 1; fi; \
-echo "ptp_device=$PTP_DEV"; \
-IFACE=$(ip -o -4 route show to default | awk "{print \$5}" | head -1); \
-ETHTOOL=$(ethtool -T $IFACE 2>&1); \
-if ! echo "$ETHTOOL" | grep -q hardware-receive; then \
-  echo FAIL:no_hw_rx_capability; \
-  echo "$ETHTOOL"; \
-  exit 1; \
-fi; \
-ACTIVE_LINE=$(chronyc sources 2>/dev/null | grep "^\^\*\|^#\*" | head -1 || true); \
-if [ -z "$ACTIVE_LINE" ]; then \
-  echo FAIL:chrony_no_active_source; \
-  chronyc sources 2>&1 | head -20; \
-  exit 1; \
-fi; \
-ACTIVE_NAME=$(echo "$ACTIVE_LINE" | awk "{print \$2}"); \
-echo "active_source=$ACTIVE_NAME"; \
-if ! echo "$ACTIVE_LINE" | grep -q PHC; then \
-  echo FAIL:chrony_not_synced_to_phc; \
-  echo "active=$ACTIVE_LINE"; \
-  echo "(falling back to NTP would invalidate the one-way TGW latency measurement)"; \
-  exit 1; \
-fi; \
-echo "sync=PHC"; \
-echo PASS'
-
-PTP_PREFLIGHT_PARAMS=$(python3 -c "import json,sys; print(json.dumps({'commands':[sys.argv[1]],'executionTimeout':['15']}))" "$PTP_PREFLIGHT_CMD")
-
-PTP_FAIL=0
-for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-  ptp_cmd_id=$(aws ssm send-command \
-    --instance-ids "$instance_id" \
-    --document-name "AWS-RunShellScript" \
-    --parameters "$PTP_PREFLIGHT_PARAMS" \
-    --query "Command.CommandId" --output text)
-
-  # Poll up to ~30s for completion instead of a fixed sleep.
-  ptp_status="Pending"
-  for _ in $(seq 1 15); do
-    sleep 2
-    ptp_status=$(aws ssm get-command-invocation \
-      --command-id "$ptp_cmd_id" \
-      --instance-id "$instance_id" \
-      --query "Status" \
-      --output text 2>/dev/null || echo "Pending")
-    case "$ptp_status" in
-      Success|Failed|Cancelled|TimedOut) break ;;
-    esac
-  done
-
-  ptp_output=$(aws ssm get-command-invocation \
-    --command-id "$ptp_cmd_id" \
-    --instance-id "$instance_id" \
-    --query "StandardOutputContent" \
-    --output text 2>/dev/null || echo "")
-
-  if [[ "$ptp_status" != "Success" ]] || [[ "$ptp_output" != *"PASS"* ]]; then
-    echo "  FAIL $instance_id — PTP/PHC not ready:" >&2
-    echo "    $ptp_output" >&2
-    PTP_FAIL=1
-  else
-    echo "  $instance_id — PHC verified ($(echo "$ptp_output" | grep ptp_device | head -1), $(echo "$ptp_output" | grep active_source | head -1))"
+  if [[ $PTP_FAIL -ne 0 ]]; then
+    echo "" >&2
+    echo "ERROR: preflight failed. Either hardware timestamps are unavailable or the clock is not" >&2
+    echo "       disciplined to the local PHC; the one-way measurement would be invalid." >&2
+    echo "       Run: scripts/check_ptp.sh --stack-name $STACK_NAME for diagnostics." >&2
+    exit 1
   fi
-done
+  echo "  All instances passed preflight."
+  echo ""
+  for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
+    emit_clock_block "$instance_id" pre "$WORK/pre.$instance_id"
+  done
+  echo ""
 
-if [[ $PTP_FAIL -ne 0 ]]; then
-  echo "" >&2
-  echo "ERROR: PTP pre-flight failed. Hardware timestamps will not be available" >&2
-  echo "       OR chrony is not disciplining CLOCK_REALTIME from the local PHC." >&2
-  echo "       Either condition makes the TGW one-way latency measurement invalid." >&2
-  echo "       Run: scripts/check_ptp.sh --stack-name $STACK_NAME for diagnostics." >&2
-  exit 1
+  # --- mcast ---
+  if tools_has mcast; then
+    local send_bin recv_cmd start_cmd
+    if [[ "$NEEDS_PYTHON" == "true" ]]; then
+      echo ">>> Uploading Python multicast helpers..."
+      for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
+        ssm_upload "$instance_id" "$SCRIPT_DIR/mcast_recv.py" /tmp/mcast_recv.py || { echo "ERROR: upload to $instance_id failed" >&2; exit 1; }
+        ssm_upload "$instance_id" "$SCRIPT_DIR/mcast_send.py" /tmp/mcast_send.py || { echo "ERROR: upload to $instance_id failed" >&2; exit 1; }
+      done
+      echo "  Scripts uploaded."
+      echo ""
+    fi
+
+    local PUB_AZ PUB_IP
+    PUB_AZ=$(get_az "$PUBLISHER_ID")
+    PUB_IP=$(get_private_ip "$PUBLISHER_ID")
+
+    echo ">>> Phase A: Multicast one-way latency (${RATE} pps, ${DURATION}s, sender=$SENDER_IMPL receiver=$RECEIVER_IMPL)..."
+
+    if [[ "$RECEIVER_IMPL" == "native" ]]; then
+      recv_cmd="$NATIVE_BIN/mcast_recv $GROUP $PORT $SENDER_TIMEOUT"
+    else
+      recv_cmd="python3 /tmp/mcast_recv.py $GROUP $PORT $SENDER_TIMEOUT"
+    fi
+    # The stop command is separate from the start command so that neither script text contains
+    # both the pkill pattern and the receiver path (pkill -f could otherwise match its own shell).
+    stop_cmd="pkill -f '[m]cast_recv' 2>/dev/null || true; sleep 1; rm -f /tmp/mcast_recv.ready /tmp/mcast_result.json /tmp/mcast_recv_detail.json /tmp/mcast_recv.err; echo STOPPED"
+    start_cmd="nohup $recv_cmd > /tmp/mcast_result.json 2> /tmp/mcast_recv.err < /dev/null & echo STARTED"
+    # Wait for the receiver to be listening. Native receivers write a ready file after they
+    # join the group and enable stamping; the Python receiver has no such signal, so it gets
+    # a fixed settle time and a liveness check.
+    local READY_WAIT_CMD
+    if [[ "$RECEIVER_IMPL" == "native" ]]; then
+      READY_WAIT_CMD="for i in \$(seq 1 50); do [ -f /tmp/mcast_recv.ready ] && { echo RECV=READY; exit 0; }; pgrep -f '[m]cast_recv' >/dev/null || { echo RECV=DEAD; cat /tmp/mcast_result.json /tmp/mcast_recv.err 2>/dev/null; exit 0; }; sleep 0.2; done; echo RECV=TIMEOUT"
+    else
+      READY_WAIT_CMD="sleep $RECEIVER_SETTLE_SECS; pgrep -f '[m]cast_recv' >/dev/null && echo RECV=READY || { echo RECV=DEAD; cat /tmp/mcast_result.json /tmp/mcast_recv.err 2>/dev/null; }"
+    fi
+
+    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
+      attempt=0
+      while true; do
+        attempt=$((attempt + 1))
+        ssm_run "$sub_id" 60 "$stop_cmd" || true
+        ssm_run "$sub_id" 60 "$start_cmd" || true
+        ssm_run "$sub_id" 60 "$READY_WAIT_CMD" || true
+        if [[ "$SSM_OUT" == *"RECV=READY"* ]]; then
+          echo "  $sub_id - multicast receiver ready"
+          break
+        fi
+        if [[ $attempt -ge 2 ]]; then
+          echo "ERROR: receiver on $sub_id did not become ready after $attempt attempts:" >&2
+          echo "$SSM_OUT" | sed 's/^/    /' >&2
+          exit 1
+        fi
+        echo "  $sub_id - receiver not ready (${SSM_OUT%%$'\n'*}); retrying once"
+      done
+    done
+
+    echo "  Sending ${RATE} pps multicast for ${DURATION}s..."
+    if [[ "$SENDER_IMPL" == "native" ]]; then
+      send_bin="$NATIVE_BIN/mcast_send"
+    else
+      send_bin="python3 /tmp/mcast_send.py"
+    fi
+    local sender_out sender_ok=true
+    if ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "$send_bin $GROUP $PORT $RATE $DURATION $PUB_IP"; then
+      sender_out="$SSM_OUT"
+    else
+      sender_ok=false
+      sender_out="{\"error\":\"sender command did not complete (SSM status: ${SSM_STATUS:-unknown})\"}"
+    fi
+    echo "--- SENDER $PUBLISHER_ID ---"
+    echo "$sender_out"
+    echo "--- END SENDER $PUBLISHER_ID ---"
+    [[ "$sender_ok" == "true" ]] && echo "  Multicast send complete." || echo "  Multicast send FAILED." >&2
+    echo ""
+
+    # Receivers finish on their own after the end marker. Give them a moment, then interrupt
+    # any that are still running so they write what they have.
+    local DONE_CMD="for i in \$(seq 1 30); do pgrep -f '[m]cast_recv' >/dev/null || { echo RECV=DONE; exit 0; }; sleep 1; done; pkill -INT -f '[m]cast_recv'; sleep 3; echo RECV=INTERRUPTED"
+    local DETAIL_PREFIX="s3://$S3_BUCKET/runs/$RUN_ID"
+    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
+      ssm_run "$sub_id" 60 "$DONE_CMD" || true
+      [[ "$SSM_OUT" == *"RECV=INTERRUPTED"* ]] && echo "  $sub_id - receiver had to be interrupted (end marker never arrived?)"
+    done
+
+    # Pull each subscriber's result and its detail (histograms) file.
+    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
+      ssm_run "$sub_id" 30 "cat /tmp/mcast_result.json 2>/dev/null; true" || true
+      printf '%s\n' "$SSM_OUT" > "$WORK/res.$sub_id"
+      if [[ "$RECEIVER_IMPL" == "native" ]]; then
+        ssm_run "$sub_id" 60 "if [ -f /tmp/mcast_recv_detail.json ]; then aws s3 cp /tmp/mcast_recv_detail.json $DETAIL_PREFIX/$sub_id.detail.json --region $REGION --only-show-errors && echo DETAIL=UPLOADED; else echo DETAIL=MISSING; fi" || true
+        [[ "$SSM_OUT" == *"DETAIL=UPLOADED"* ]] || echo "  WARN $sub_id - detail file not uploaded; pooled percentiles will be unavailable"
+      fi
+    done
+    if [[ "$RECEIVER_IMPL" == "native" ]]; then
+      mkdir -p "$DETAIL_DIR"
+      aws s3 cp "$DETAIL_PREFIX/" "$DETAIL_DIR/" --recursive --region "$REGION" --only-show-errors || echo "  WARN could not download detail files from $DETAIL_PREFIX/"
+    fi
+
+    local sub_az rel
+    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
+      sub_az=$(get_az "$sub_id")
+      rel="cross-az"
+      [[ "$sub_az" == "$PUB_AZ" ]] && rel="same-az"
+      emit_mcast_block "$sub_id" "$sub_az" "$rel" "$WORK/res.$sub_id"
+    done
+    echo ""
+
+    # Clock state after the run
+    for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
+      ssm_run "$instance_id" 30 "bash /tmp/preflight.sh --clock" || true
+      printf '%s\n' "$SSM_OUT" > "$WORK/post.$instance_id"
+      emit_clock_block "$instance_id" post "$WORK/post.$instance_id"
+    done
+    echo ""
+  fi
+
+  # --- sockperf: unicast RTT baseline (no TGW) ---
+  if tools_has sockperf; then
+    echo ">>> Phase B: Unicast latency measurement (sockperf under-load)..."
+    local sub_ip result_output
+    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
+      sub_ip=$(get_private_ip "$sub_id")
+      ssm_run "$sub_id" 60 "pkill -f 'sockperf server' 2>/dev/null || true; pkill -f '[m]cast_recv' 2>/dev/null || true; fuser -k ${PORT}/udp 2>/dev/null || true; sleep 2; nohup sockperf server --ip ${sub_ip} --port ${PORT} > /tmp/sockperf_server.txt 2>&1 < /dev/null &" || true
+      echo "  $sub_id ($sub_ip) - sockperf server started"
+    done
+    sleep "$RECEIVER_SETTLE_SECS"
+    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
+      ssm_run "$sub_id" 30 "cat /tmp/sockperf_server.txt 2>/dev/null; ss -ulnp | grep ${PORT}" || true
+      echo "  $sub_id server status: $SSM_OUT"
+    done
+    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
+      sub_ip=$(get_private_ip "$sub_id")
+      echo "  Running sockperf under-load -> $sub_id ($sub_ip)..."
+      result_output=""
+      if ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "sockperf under-load --ip ${sub_ip} --port ${PORT} --mps ${RATE} --time ${DURATION} --full-rtt 2>&1 | tee /tmp/sockperf_result.txt"; then
+        ssm_run "$PUBLISHER_ID" 60 "cat /tmp/sockperf_result.txt" || true
+        result_output="$SSM_OUT"
+      else
+        result_output="ERROR: sockperf did not complete (SSM status: ${SSM_STATUS:-unknown})"
+      fi
+      echo "--- SUBSCRIBER $sub_id ---"
+      echo "$result_output"
+      echo "--- END $sub_id ---"
+      echo ""
+      ssm_run "$sub_id" 30 "pkill -f 'sockperf server' || true" || true
+    done
+  fi
+
+  # --- iperf3: unicast UDP throughput (no TGW, no latency) ---
+  if tools_has iperf3; then
+    echo ">>> Phase C: Unicast UDP throughput (iperf3)..."
+    local sub_ip result_output
+    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
+      sub_ip=$(get_private_ip "$sub_id")
+      ssm_run "$sub_id" 60 "pkill -f 'iperf3 -s' 2>/dev/null || true; fuser -k ${PORT}/udp 2>/dev/null || true; sleep 2; nohup iperf3 -s -p ${PORT} > /tmp/benchmark_result.txt 2>&1 < /dev/null &" || true
+      echo "  $sub_id ($sub_ip) - iperf3 server started"
+    done
+    sleep "$RECEIVER_SETTLE_SECS"
+    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
+      sub_ip=$(get_private_ip "$sub_id")
+      echo "  Running iperf3 -> $sub_id ($sub_ip)..."
+      ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "iperf3 -c ${sub_ip} -u -p ${PORT} -b ${RATE}k -t ${DURATION} 2>&1 | tee /tmp/iperf3_result.txt" || true
+      if ssm_run "$sub_id" 60 "pkill -f 'iperf3 -s' || true; sleep 1; cat /tmp/benchmark_result.txt"; then
+        result_output="$SSM_OUT"
+      else
+        result_output="ERROR: iperf3 did not complete (SSM status: ${SSM_STATUS:-unknown})"
+      fi
+      echo "--- SUBSCRIBER $sub_id ---"
+      echo "$result_output"
+      echo "--- END $sub_id ---"
+      echo ""
+    done
+  fi
+
+  echo "=== Benchmark complete ==="
+  echo "S3 bucket for reports: $S3_BUCKET"
+}
+
+# ---------------------------------------------------------------------------
+# Run, then judge. run_all's output is both shown and kept as the raw stream.
+# ---------------------------------------------------------------------------
+set +e
+run_all 2>&1 | tee "$RAW_OUTPUT_FILE"
+RUN_RC=${PIPESTATUS[0]}
+set -e
+if [[ $RUN_RC -ne 0 ]]; then
+  echo "ERROR: benchmark aborted (exit $RUN_RC); no results to judge." >&2
+  exit "$RUN_RC"
 fi
 
-echo "  All instances passed PTP pre-flight (PHC + chrony-disciplined)."
-echo ""
-
-# ---------------------------------------------------------------------------
-# Step 5+: Run requested tools in canonical order
-# ---------------------------------------------------------------------------
-# mcast:    multicast over TGW with PHC HW RX timestamps (one-way latency).
-# sockperf: unicast ping-pong RTT baseline (no TGW in data path).
-# iperf3:   unicast UDP throughput (no latency stats).
-
-SENDER_TIMEOUT=$((DURATION + 30))
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# ---------------------------------------------------------------------------
-# mcast — TGW multicast one-way latency
-# ---------------------------------------------------------------------------
+FINAL_RC=0
 if tools_has mcast; then
-  # --- Upload helper scripts to instances ---
-  echo ">>> Uploading multicast helper scripts..."
-  RECV_SCRIPT=$(cat "$SCRIPT_DIR/mcast_recv.py")
-  SEND_SCRIPT=$(cat "$SCRIPT_DIR/mcast_send.py")
-
-  RECV_UPLOAD=$(printf '%s' "$RECV_SCRIPT" | python3 -c "import sys,json; print(json.dumps('cat > /tmp/mcast_recv.py << '+'PYEOF'+chr(10)+sys.stdin.read()+chr(10)+'PYEOF'+chr(10)+'chmod +x /tmp/mcast_recv.py'))")
-  SEND_UPLOAD=$(printf '%s' "$SEND_SCRIPT" | python3 -c "import sys,json; print(json.dumps('cat > /tmp/mcast_send.py << '+'PYEOF'+chr(10)+sys.stdin.read()+chr(10)+'PYEOF'+chr(10)+'chmod +x /tmp/mcast_send.py'))")
-
-  # Upload to all instances
-  for inst_id in "${ALL_INSTANCE_IDS[@]}"; do
-    aws ssm send-command \
-      --instance-ids "$inst_id" \
-      --document-name "AWS-RunShellScript" \
-      --parameters "{\"commands\":[$RECV_UPLOAD],\"executionTimeout\":[\"10\"]}" \
-      --query "Command.CommandId" --output text >/dev/null
-    aws ssm send-command \
-      --instance-ids "$inst_id" \
-      --document-name "AWS-RunShellScript" \
-      --parameters "{\"commands\":[$SEND_UPLOAD],\"executionTimeout\":[\"10\"]}" \
-      --query "Command.CommandId" --output text >/dev/null
-  done
-  sleep 3
-  echo "  Scripts uploaded."
   echo ""
-
-  echo ">>> Phase A: Multicast one-way latency (${RATE} pps, ${DURATION}s)..."
-
-  for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-    recv_cmd="nohup python3 /tmp/mcast_recv.py ${GROUP} ${PORT} ${SENDER_TIMEOUT} > /tmp/mcast_result.json 2>&1 &"
-    ssm_send_command "$sub_id" "$recv_cmd" "300" >/dev/null
-    echo "  $sub_id — multicast receiver started"
-  done
-
-  sleep "$RECEIVER_SETTLE_SECS"
-
-  pub_ip=$(get_private_ip "$PUBLISHER_ID")
-  send_cmd="python3 /tmp/mcast_send.py ${GROUP} ${PORT} ${RATE} ${DURATION} ${pub_ip}"
-  echo "  Sending ${RATE} pps multicast for ${DURATION}s..."
-  MCAST_CMD_ID=$(ssm_send_command "$PUBLISHER_ID" "$send_cmd" "$SENDER_TIMEOUT")
-  ssm_wait_command "$MCAST_CMD_ID" "$PUBLISHER_ID" "$SENDER_TIMEOUT"
-  echo "  Multicast send complete."
-  echo ""
-
-  # Collect multicast loss results
-  sleep 3
-  for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-    collect_cmd_id=$(ssm_send_command "$sub_id" "cat /tmp/mcast_result.json 2>/dev/null || echo {}" "30")
-    ssm_wait_command "$collect_cmd_id" "$sub_id" 30
-    mcast_result=$(aws ssm get-command-invocation \
-      --command-id "$collect_cmd_id" \
-      --instance-id "$sub_id" \
-      --query "StandardOutputContent" \
-      --output text)
-    echo "  $sub_id multicast loss: $mcast_result"
-  done
-  echo ""
+  echo ">>> Run validity:"
+  set +e
+  if ! python3 "$SCRIPT_DIR/tgw_results.py" verdict --input "$RAW_OUTPUT_FILE" \
+    --max-loss-pct "$MAX_LOSS_PCT" --max-clock-offset-us "$MAX_CLOCK_OFFSET_US"; then
+    FINAL_RC=$EXIT_INVALID_RUN
+  fi
+  set -e
 fi
 
-# ---------------------------------------------------------------------------
-# sockperf — unicast RTT baseline (no TGW)
-# ---------------------------------------------------------------------------
-if tools_has sockperf; then
-  echo ">>> Phase B: Unicast latency measurement (sockperf under-load)..."
-
-  for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-    sub_ip=$(get_private_ip "$sub_id")
-
-    recv_cmd="pkill -f 'sockperf server' 2>/dev/null || true; pkill -f 'mcast_recv' 2>/dev/null || true; fuser -k ${PORT}/udp 2>/dev/null || true; sleep 2; nohup sockperf server --ip ${sub_ip} --port ${PORT} > /tmp/sockperf_server.txt 2>&1 &"
-    ssm_send_command "$sub_id" "$recv_cmd" "300" >/dev/null
-    echo "  $sub_id ($sub_ip) — sockperf server started"
-  done
-
-  sleep "$RECEIVER_SETTLE_SECS"
-
-  # Verify sockperf servers are listening
-  for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-    verify_cmd_id=$(ssm_send_command "$sub_id" "cat /tmp/sockperf_server.txt 2>/dev/null; ss -ulnp | grep ${PORT}" "10")
-    sleep 3
-    verify_out=$(aws ssm get-command-invocation \
-      --command-id "$verify_cmd_id" \
-      --instance-id "$sub_id" \
-      --query "StandardOutputContent" \
-      --output text 2>/dev/null || echo "")
-    echo "  $sub_id server status: $verify_out"
-  done
-
-  for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-    sub_ip=$(get_private_ip "$sub_id")
-
-    send_cmd="sockperf under-load --ip ${sub_ip} --port ${PORT} --mps ${RATE} --time ${DURATION} --full-rtt 2>&1 | tee /tmp/sockperf_result.txt"
-    echo "  Running sockperf under-load → $sub_id ($sub_ip)..."
-    SEND_CMD_ID=$(ssm_send_command "$PUBLISHER_ID" "$send_cmd" "$SENDER_TIMEOUT")
-    ssm_wait_command "$SEND_CMD_ID" "$PUBLISHER_ID" "$SENDER_TIMEOUT"
-
-    # Collect results from publisher (sender has the stats)
-    collect_cmd_id=$(ssm_send_command "$PUBLISHER_ID" "cat /tmp/sockperf_result.txt" "60")
-    ssm_wait_command "$collect_cmd_id" "$PUBLISHER_ID" 60
-    result_output=$(aws ssm get-command-invocation \
-      --command-id "$collect_cmd_id" \
-      --instance-id "$PUBLISHER_ID" \
-      --query "StandardOutputContent" \
-      --output text)
-
-    echo "--- SUBSCRIBER $sub_id ---"
-    echo "$result_output"
-    echo "--- END $sub_id ---"
-    echo ""
-
-    # Stop sockperf server
-    ssm_send_command "$sub_id" "pkill -f 'sockperf server' || true" "10" >/dev/null
-  done
-fi
-
-# ---------------------------------------------------------------------------
-# iperf3 — unicast UDP throughput (no TGW, no latency)
-# ---------------------------------------------------------------------------
-if tools_has iperf3; then
-  echo ">>> Phase C: Unicast UDP throughput (iperf3)..."
-
-  for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-    sub_ip=$(get_private_ip "$sub_id")
-
-    recv_cmd="pkill -f 'iperf3 -s' 2>/dev/null || true; fuser -k ${PORT}/udp 2>/dev/null || true; sleep 2; nohup iperf3 -s -p ${PORT} > /tmp/benchmark_result.txt 2>&1 &"
-    ssm_send_command "$sub_id" "$recv_cmd" "300" >/dev/null
-    echo "  $sub_id ($sub_ip) — iperf3 server started"
-  done
-
-  sleep "$RECEIVER_SETTLE_SECS"
-
-  for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-    sub_ip=$(get_private_ip "$sub_id")
-
-    send_cmd="iperf3 -c ${sub_ip} -u -p ${PORT} -b ${RATE}k -t ${DURATION} 2>&1 | tee /tmp/iperf3_result.txt"
-    echo "  Running iperf3 → $sub_id ($sub_ip)..."
-    SEND_CMD_ID=$(ssm_send_command "$PUBLISHER_ID" "$send_cmd" "$SENDER_TIMEOUT")
-    ssm_wait_command "$SEND_CMD_ID" "$PUBLISHER_ID" "$SENDER_TIMEOUT"
-
-    stop_cmd="pkill -f 'iperf3 -s' || true; sleep 1; cat /tmp/benchmark_result.txt"
-    collect_cmd_id=$(ssm_send_command "$sub_id" "$stop_cmd" "60")
-    ssm_wait_command "$collect_cmd_id" "$sub_id" 60
-    result_output=$(aws ssm get-command-invocation \
-      --command-id "$collect_cmd_id" \
-      --instance-id "$sub_id" \
-      --query "StandardOutputContent" \
-      --output text)
-
-    echo "--- SUBSCRIBER $sub_id ---"
-    echo "$result_output"
-    echo "--- END $sub_id ---"
-    echo ""
-  done
-fi
-
-echo "=== Benchmark complete ==="
-echo "Results above can be piped to scripts/collect_results.py for aggregation"
-echo "S3 bucket for reports: $S3_BUCKET"
-
-# ---------------------------------------------------------------------------
-# Save markdown report (if --save-report)
-# ---------------------------------------------------------------------------
 if [[ "$SAVE_REPORT" == "true" ]]; then
-  # Give tee a moment to flush
-  sleep 1
-
-  REPORT_ARGS=(--input "$RAW_OUTPUT_FILE" --placement "$PLACEMENT")
+  REPORT_ARGS=(--input "$RAW_OUTPUT_FILE" --placement "$PLACEMENT" --output-dir "$RUNS_DIR"
+               --max-loss-pct "$MAX_LOSS_PCT" --max-clock-offset-us "$MAX_CLOCK_OFFSET_US")
   [[ -n "$INSTANCE_TYPE" ]] && REPORT_ARGS+=(--instance-type "$INSTANCE_TYPE")
   [[ -n "$NOTES" ]] && REPORT_ARGS+=(--notes "$NOTES")
-
+  [[ -d "$DETAIL_DIR" ]] && REPORT_ARGS+=(--detail-dir "$DETAIL_DIR")
   echo ""
   echo ">>> Generating markdown report..."
+  set +e
   python3 "$SCRIPT_DIR/save_report.py" "${REPORT_ARGS[@]}"
-  rm -f "$RAW_OUTPUT_FILE"
+  set -e
 fi
+
+if [[ "$KEEP_DETAIL" == "true" && -d "$DETAIL_DIR" ]]; then
+  echo "Histogram detail files kept in: $DETAIL_DIR"
+  echo "  (pass --detail-dir to collect_results.py / save_report.py for pooled percentiles)"
+fi
+
+exit "$FINAL_RC"
