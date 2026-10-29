@@ -19,6 +19,8 @@ Raw format (new sections; the sockperf / iperf3 blocks are unchanged):
     --- END MCAST <instance> ---
     --- CLOCK <instance> <pre|post> ---  key=value lines (chrony System time, ...)
     --- END CLOCK ---
+    --- CONTEXT <instance> ---          key=value lines: kernel, driver, CPU, idle states, ...
+    --- END CONTEXT ---
 
 Older raw files (one `<id> multicast loss: {json}` line per subscriber) still parse.
 
@@ -52,6 +54,9 @@ DEFAULT_MIN_ACHIEVED_PCT = 90.0
 # Provisional. Healthy hosts on the tuned af_xdp fleet showed a software-minus-hardware
 # gap of 0.1-2.5 us; this stack is untuned and unmeasured, so this only warns.
 DEFAULT_MAX_DIV_MEDIAN_US = 20.0
+# A p99.9 rests on the slowest 0.1% of samples; with fewer than this many it is ~100 points
+# or fewer and mostly noise, so it is not reported.
+MIN_SAMPLES_FOR_P999 = 100_000
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +281,69 @@ def parse_clock(raw: str) -> Dict[str, Dict[str, Dict[str, str]]]:
     return out
 
 
+def parse_sockperf(text: str) -> Dict[str, Any]:
+    """Metrics from `sockperf under-load` output (the sender-side statistics).
+
+    sockperf 3.10 prints the round-trip summary as `Summary: Round trip is X usec`, the
+    average as `avg-rtt=X`, percentiles as `---> percentile P = V` (no unit), and, by default,
+    replies to only every 100th message, so SentMessages minus ReceivedMessages is not loss;
+    `# dropped messages` is. Keys are absent when the text does not contain them.
+    """
+    m: Dict[str, Any] = {}
+
+    def num(pattern: str) -> Optional[float]:
+        r = re.search(pattern, text)
+        return float(r.group(1)) if r else None
+
+    avg = num(r"avg-rtt=([\d.]+)")
+    if avg is None:
+        avg = num(r"Summary:\s*(?:Round trip|Latency) is ([\d.]+) usec")
+    if avg is not None:
+        m["avg_rtt_us"] = avg
+    pct = {float(a): float(b) for a, b in re.findall(r"percentile\s+([\d.]+)\s*=\s*([\d.]+)", text)}
+    for p, key in ((50.0, "p50_us"), (90.0, "p90_us"), (99.0, "p99_us"), (99.9, "p999_us")):
+        if p in pct:
+            m[key] = pct[p]
+    for label, key in (("MIN", "min_us"), ("MAX", "max_us")):
+        v = num(rf"<{label}> observation\s*=\s*([\d.]+)")
+        if v is not None:
+            m[key] = v
+    obs = num(r"Total (\d+) observations")
+    if obs is not None:
+        m["observations"] = int(obs)
+    dropped = num(r"# dropped messages = (\d+)")
+    if dropped is not None:
+        m["dropped"] = int(dropped)
+    sent = re.search(r"\[Valid Duration\][^\n]*SentMessages=(\d+);\s*ReceivedMessages=(\d+)", text)
+    if sent:
+        m["valid_sent"], m["valid_received"] = int(sent.group(1)), int(sent.group(2))
+    return m
+
+
+def parse_context(raw: str) -> Dict[str, Dict[str, str]]:
+    """{instance: {key: value}} from CONTEXT blocks (the state each measurement was taken under)."""
+    out: Dict[str, Dict[str, str]] = {}
+    for iid, _tag, body in _blocks(raw, "CONTEXT"):
+        out[iid] = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
+    return out
+
+
+def context_summary(ctx: Dict[str, Dict[str, str]]) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
+    """Split context into (keys identical on every instance, {key: {instance: value}} for the rest)."""
+    if not ctx:
+        return {}, {}
+    keys = sorted({k for kv in ctx.values() for k in kv})
+    common: Dict[str, str] = {}
+    differing: Dict[str, Dict[str, str]] = {}
+    for k in keys:
+        vals = {iid: kv.get(k, "") for iid, kv in ctx.items()}
+        if len(set(vals.values())) == 1:
+            common[k] = next(iter(vals.values()))
+        else:
+            differing[k] = vals
+    return common, differing
+
+
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
@@ -314,6 +382,9 @@ def aggregate_group(subs: List[Subscriber]) -> Dict[str, Any]:
     out["lost"] = sum(int(x.get("packet_loss_count", 0)) for x in r)
     out["duplicates"] = sum(int(x.get("duplicate_count", 0)) for x in r)
     out["socket_drops"] = sum(int(x.get("socket_drops", 0)) for x in r)
+    warm = [float(x["warmup_secs"]) for x in r if "warmup_secs" in x]
+    out["warmup_secs"] = max(warm) if warm else None
+    out["warmup_skipped"] = sum(int(x.get("warmup_skipped", 0)) for x in r)
     ns = [int(x.get("latency_samples", x.get("total_received", 0))) for x in r]
     means = [float(x.get("mean_latency_us", 0.0)) for x in r]
     if sum(ns):
@@ -331,6 +402,9 @@ def aggregate_group(subs: List[Subscriber]) -> Dict[str, Any]:
         out["pooled"] = True
         out["pooled_samples"] = pooled.count
         for q, name in ((0.50, "median"), (0.95, "p95"), (0.99, "p99"), (0.999, "p999")):
+            if name == "p999" and pooled.count < MIN_SAMPLES_FOR_P999:
+                out["p999_omitted"] = f"fewer than {MIN_SAMPLES_FOR_P999} samples"
+                continue
             out[f"{name}_us"] = pooled.quantile(q) / 1000.0
         sw = [_hist(s, "hist_sw_latency") for s in ok]
         dv = [_hist(s, "hist_div_sw_minus_hw") for s in ok]

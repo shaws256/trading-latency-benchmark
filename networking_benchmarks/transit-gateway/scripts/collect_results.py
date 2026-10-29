@@ -65,73 +65,27 @@ def parse_subscriber_blocks(raw_text: str) -> Dict[str, str]:
 
 
 def parse_sockperf_output(raw_output: str) -> Dict[str, Any]:
-    """Parse sockperf under-load / ping-pong output into metrics dict.
+    """Per-subscriber metrics from sockperf under-load output, via tgw_results.parse_sockperf.
 
-    Extracts latency summary, percentiles, and packet counts from the
-    receiver-side output captured by run_benchmark.sh.
+    sockperf reports no p95 (it prints 50/75/90/99/99.9...), so p95 is None rather than a
+    made-up number. Loss is sockperf's own `dropped messages` count: with its default
+    reply-every-N behaviour, sent minus received is not loss.
     """
-    metrics: Dict[str, Any] = {
-        "min_latency_us": 0.0,
-        "max_latency_us": 0.0,
-        "mean_latency_us": 0.0,
-        "median_latency_us": 0.0,
-        "p95_latency_us": 0.0,
-        "p99_latency_us": 0.0,
-        "total_received": 0,
-        "total_expected": 0,
-        "packet_loss_count": 0,
+    p = tr.parse_sockperf(raw_output)
+    observations = int(p.get("observations", 0))
+    dropped = int(p.get("dropped", 0))
+    return {
+        "min_latency_us": p.get("min_us", 0.0),
+        "max_latency_us": p.get("max_us", 0.0),
+        "mean_latency_us": p.get("avg_rtt_us", 0.0),
+        "median_latency_us": p.get("p50_us", 0.0),
+        "p95_latency_us": None,
+        "p99_latency_us": p.get("p99_us", 0.0),
+        "total_received": observations,
+        "total_expected": observations + dropped,
+        "packet_loss_count": dropped,
+        "parsed": bool(p),
     }
-
-    # Summary latency line:
-    #   sockperf: Summary: Latency is 89.123 usec
-    m = re.search(r"Summary:\s*Latency\s+is\s+([\d.]+)\s*usec", raw_output)
-    if m:
-        metrics["mean_latency_us"] = float(m.group(1))
-
-    # Total run line:
-    #   sockperf: [Total Run] ... SentMessages=10000; ReceivedMessages=9998
-    m = re.search(
-        r"SentMessages\s*=\s*(\d+)\s*;\s*ReceivedMessages\s*=\s*(\d+)",
-        raw_output,
-    )
-    if m:
-        metrics["total_expected"] = int(m.group(1))
-        metrics["total_received"] = int(m.group(2))
-        metrics["packet_loss_count"] = metrics["total_expected"] - metrics["total_received"]
-
-    # Percentile lines (sockperf under-load --full-rtt output):
-    #   sockperf: % percentile  99.000 =   450.123 usec
-    #   sockperf: % percentile  99.900 =   800.456 usec
-    percentiles: Dict[float, float] = {}
-    for pm in re.finditer(
-        r"percentile\s+([\d.]+)\s*=\s*([\d.]+)\s*usec", raw_output
-    ):
-        pct = float(pm.group(1))
-        val = float(pm.group(2))
-        percentiles[pct] = val
-
-    if percentiles:
-        if 50.0 in percentiles:
-            metrics["median_latency_us"] = percentiles[50.0]
-        if 95.0 in percentiles:
-            metrics["p95_latency_us"] = percentiles[95.0]
-        if 99.0 in percentiles:
-            metrics["p99_latency_us"] = percentiles[99.0]
-        if 99.9 in percentiles:
-            # Use 99.9 as a better upper bound if available
-            pass
-
-    # Min / Max latency lines:
-    #   sockperf: Summary: ... min=45.000 usec ...
-    m_min = re.search(r"\bmin\s*=\s*([\d.]+)", raw_output)
-    if m_min:
-        metrics["min_latency_us"] = float(m_min.group(1))
-
-    m_max = re.search(r"\bmax\s*=\s*([\d.]+)", raw_output)
-    if m_max:
-        metrics["max_latency_us"] = float(m_max.group(1))
-
-    return metrics
 
 
 def parse_iperf3_output(raw_output: str) -> Dict[str, Any]:
@@ -216,7 +170,7 @@ def compute_aggregate_statistics(
     all_max = [m["max_latency_us"] for m in per_subscriber_metrics]
     all_mean = [m["mean_latency_us"] for m in per_subscriber_metrics]
     all_median = [m["median_latency_us"] for m in per_subscriber_metrics]
-    all_p95 = [m["p95_latency_us"] for m in per_subscriber_metrics]
+    all_p95 = [m["p95_latency_us"] for m in per_subscriber_metrics if m.get("p95_latency_us") is not None]
     all_p99 = [m["p99_latency_us"] for m in per_subscriber_metrics]
 
     return {
@@ -227,7 +181,7 @@ def compute_aggregate_statistics(
         "max_latency_us": math.ceil(max(all_max) * 1000) / 1000,
         "mean_latency_us": round(statistics.mean(all_mean), 3),
         "median_latency_us": round(statistics.median(all_median), 3),
-        "p95_latency_us": round(statistics.mean(all_p95), 3),
+        "p95_latency_us": round(statistics.mean(all_p95), 3) if all_p95 else None,
         "p99_latency_us": round(statistics.mean(all_p99), 3),
     }
 

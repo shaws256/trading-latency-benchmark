@@ -350,3 +350,40 @@ def test_pooled_only_when_every_histogram_present():
 def test_aggregate_of_all_failed_group_reports_zero_ok():
     s = tr.Subscriber("i-a", error="x")
     assert tr.aggregate_group([s]) == {"subscribers": 1, "subscribers_ok": 0}
+
+
+# ---------------------------------------------------------------------------
+# Context, p99.9 rule, warm-up
+# ---------------------------------------------------------------------------
+
+def _ctx_block(iid, **kv):
+    body = "\n".join(f"{k}={v}" for k, v in kv.items())
+    return f"--- CONTEXT {iid} ---\n{body}\n--- END CONTEXT ---\n"
+
+
+def test_context_parse_and_split_common_from_differing():
+    raw = (_ctx_block("i-a", kernel="6.1", cpuidle_states="POLL:0us C2:800us", ami="ami-1")
+           + _ctx_block("i-b", kernel="6.1", cpuidle_states="POLL:0us", ami="ami-1"))
+    ctx = tr.parse_context(raw)
+    assert set(ctx) == {"i-a", "i-b"}
+    common, differing = tr.context_summary(ctx)
+    assert common == {"ami": "ami-1", "kernel": "6.1"}
+    assert differing == {"cpuidle_states": {"i-a": "POLL:0us C2:800us", "i-b": "POLL:0us"}}
+    assert tr.context_summary({}) == ({}, {})
+
+
+def test_p999_is_withheld_below_the_sample_minimum():
+    few = [tr.Subscriber("i-a", result=recv(), detail={"hist_hw_latency": _hist_json([100_000 + i for i in range(5000)])})]
+    agg = tr.aggregate_group(few)
+    assert "p999_us" not in agg and "100000" in agg["p999_omitted"].replace(",", "").replace("_", "")
+    assert "p99_us" in agg
+    many = [tr.Subscriber("i-a", result=recv(), detail={"hist_hw_latency": _hist_json([100_000 + i % 500 for i in range(tr.MIN_SAMPLES_FOR_P999)])})]
+    assert "p999_us" in tr.aggregate_group(many)
+
+
+def test_warmup_fields_are_aggregated():
+    a = tr.Subscriber("i-a", result=recv(warmup_secs=2.0, warmup_skipped=2000))
+    b = tr.Subscriber("i-b", result=recv(warmup_secs=2.0, warmup_skipped=1990))
+    agg = tr.aggregate_group([a, b])
+    assert agg["warmup_secs"] == 2.0 and agg["warmup_skipped"] == 3990
+    assert tr.aggregate_group([tr.Subscriber("i-c", result=recv())])["warmup_secs"] is None

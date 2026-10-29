@@ -49,40 +49,17 @@ def parse_header(raw: str) -> dict:
 
 
 def parse_phase_b(raw: str) -> list[dict]:
-    """Parse Phase B sockperf unicast RTT results per subscriber."""
+    """Phase B sockperf unicast RTT results per subscriber (via tgw_results.parse_sockperf)."""
     results = []
     pattern = re.compile(r"--- SUBSCRIBER (\S+) ---\n(.*?)--- END \1 ---", re.DOTALL)
     for m in pattern.finditer(raw):
-        sub_id = m.group(1)
-        block = m.group(2)
+        sub_id, block = m.group(1), m.group(2)
         entry: dict = {"subscriber_id": sub_id}
-
-        rtt_m = re.search(r"avg-rtt=([\d.]+)", block)
-        if rtt_m:
-            entry["avg_rtt_us"] = float(rtt_m.group(1))
+        p = tr.parse_sockperf(block)
+        if "avg_rtt_us" not in p:
+            entry["error"] = block.strip().split("\n")[0] if block.strip() else "no sockperf output"
         else:
-            if "command not found" in block or "No messages" in block:
-                entry["error"] = block.strip().split("\n")[0]
-            results.append(entry)
-            continue
-
-        for pct_m in re.finditer(r"percentile\s+([\d.]+)\s*=\s*([\d.]+)", block):
-            pct = float(pct_m.group(1))
-            val = float(pct_m.group(2))
-            if pct == 50.0:
-                entry["p50_us"] = val
-            elif pct == 90.0:
-                entry["p90_us"] = val
-            elif pct == 99.0:
-                entry["p99_us"] = val
-
-        min_m = re.search(r"<MIN> observation\s*=\s*([\d.]+)", block)
-        if min_m:
-            entry["min_us"] = float(min_m.group(1))
-        max_m = re.search(r"<MAX> observation\s*=\s*([\d.]+)", block)
-        if max_m:
-            entry["max_us"] = float(max_m.group(1))
-
+            entry.update(p)
         results.append(entry)
     return results
 
@@ -119,6 +96,9 @@ def _phase_a_section(raw: str, subs: List[tr.Subscriber], findings: List[tr.Find
         if sender.get("late_max_us") is not None:
             parts.append(f"worst send lateness {sender['late_max_us']} us")
         L.append("- Sender: " + ", ".join(parts))
+    if sender and sender.get("sendto_median_us") is not None:
+        L.append(f"- Sender send-path cost (time inside sendto after the stamp): median {sender['sendto_median_us']} us, "
+                 f"p99 {sender['sendto_p99_us']} us, max {sender['sendto_max_us']} us")
     L.append(f"- Implementations: sender={cfg.get('sender_impl', 'n/a')}, receiver={cfg.get('receiver_impl', 'n/a')}")
     if cfg.get("native_build"):
         L.append(f"- Native build: {cfg['native_build']}")
@@ -148,6 +128,10 @@ def _phase_a_section(raw: str, subs: List[tr.Subscriber], findings: List[tr.Find
         L.append("")
         if not agg["subscribers_ok"]:
             continue
+        if agg.get("warmup_secs"):
+            L.append(f"Latency statistics exclude the first {agg['warmup_secs']:g} s of each receiver "
+                     f"({agg['warmup_skipped']} packets); loss counts include them.")
+            L.append("")
         L.append(f"**Aggregate, {group}**")
         L.append("")
         L.append("| Metric | Value |")
@@ -156,7 +140,10 @@ def _phase_a_section(raw: str, subs: List[tr.Subscriber], findings: List[tr.Find
             L.append(f"| Median (pooled over {agg['pooled_samples']} samples) | {_f(agg['median_us'])} µs |")
             L.append(f"| P95 (pooled) | {_f(agg['p95_us'])} µs |")
             L.append(f"| P99 (pooled) | {_f(agg['p99_us'])} µs |")
-            L.append(f"| P99.9 (pooled) | {_f(agg['p999_us'])} µs |")
+            if "p999_us" in agg:
+                L.append(f"| P99.9 (pooled) | {_f(agg['p999_us'])} µs |")
+            else:
+                L.append(f"| P99.9 | not reported ({agg.get('p999_omitted', 'too few samples')}) |")
         else:
             L.append("| Pooled percentiles | not available (a subscriber's histogram is missing; pass --detail-dir) |")
             L.append(f"| Worst-subscriber P99 | {_f(agg.get('worst_subscriber_p99_us'))} µs |")
@@ -177,6 +164,30 @@ def _phase_a_section(raw: str, subs: List[tr.Subscriber], findings: List[tr.Find
         for iid, ph in sorted(clocks.items()):
             L.append(f"| `..{iid[-12:]}` | {ph.get('pre', {}).get('system_time_us', 'n/a')} "
                      f"| {ph.get('post', {}).get('system_time_us', 'n/a')} |")
+        L.append("")
+    L.extend(_context_section(raw))
+    return L
+
+
+def _context_section(raw: str) -> List[str]:
+    ctx = tr.parse_context(raw)
+    if not ctx:
+        return []
+    common, differing = tr.context_summary(ctx)
+    L = ["### Run context", "",
+         "State in effect during the measurement (identical on every instance unless listed below).", "",
+         "| Setting | Value |", "|---|---|"]
+    for k, v in common.items():
+        L.append(f"| {k} | {v or 'n/a'} |")
+    L.append("")
+    if differing:
+        L.append("Differs between instances:")
+        L.append("")
+        L.append("| Setting | Instance | Value |")
+        L.append("|---|---|---|")
+        for k, vals in differing.items():
+            for iid, v in sorted(vals.items()):
+                L.append(f"| {k} | `..{iid[-12:]}` | {v or 'n/a'} |")
         L.append("")
     return L
 
