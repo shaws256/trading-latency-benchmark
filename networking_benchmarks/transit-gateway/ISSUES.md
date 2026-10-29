@@ -22,32 +22,49 @@ Reference implementation: `networking_benchmarks/af_xdp/` (merged), plus the loc
 
 **Effort**: S = under half a day, M = about a day, L = multi-day.
 
-**Not verified**: nothing here was run on AWS. Real sockperf output, the CDK synth tests, and every claim about EC2 timing behavior remain unchecked.
+**Evidence**: the original findings came from code and local runs. The Status and EC2 findings sections record what has since been run on EC2 (m7a.large, ap-northeast-1).
 
 ---
 
-## Status of P0 and P1
+## Status
 
-Implemented on this branch. "Verified" means exercised by the tests listed in the README (fake `aws`, stubbed `/sys` and `chronyc`, Linux containers). Nothing has run on EC2.
+"Verified" below means exercised by the tests in the README and by runs on EC2 (m7a.large, ap-northeast-1, one publisher and two subscribers, single AZ in one cluster placement group).
 
 | Issue | State | Where |
 |---|---|---|
-| P0-1 clock gate | Done. User-data waits to 100 µs and steps; `preflight.sh` forces a step and gates chrony `System time` (10 µs) before the run; the orchestrator re-reads it after the run; `check_ptp.sh` reports and gates it | `stacks/benchmark_stack.py`, `preflight.sh`, `run_benchmark.sh`, `check_ptp.sh` |
-| P0-2 mcast not collected | Done. `collect_results.py` defaults to `mcast`, adds a `Tool` dimension, and refuses invalid runs without `--allow-partial` | `collect_results.py`, `tgw_results.py` |
-| P0-3 silent subscriber | Done. Every expected subscriber gets a block (error if none); a missing or errored one fails the run; failed subscribers count as total loss | `run_benchmark.sh`, `tgw_results.py`, `save_report.py` |
+| P0-1 clock gate | Done and verified on EC2. User-data waits to 100 µs and steps; `preflight.sh` forces a step and gates chrony `System time` (10 µs) before the run; the orchestrator re-reads it after; `check_ptp.sh` reports and gates it | `stacks/benchmark_stack.py`, `preflight.sh`, `run_benchmark.sh`, `check_ptp.sh` |
+| P0-2 mcast not collected | Done. `collect_results.py` defaults to `mcast`, adds a `Tool` dimension, refuses invalid runs without `--allow-partial` | `collect_results.py`, `tgw_results.py` |
+| P0-3 silent subscriber | Done. Every expected subscriber gets a block; a missing or errored one fails the run; failed subscribers count as total loss; the whole Phase A batch is rerun once if the sender or a subscriber gives no usable result | `run_benchmark.sh`, `tgw_results.py`, `save_report.py` |
 | P0-4 clock error in data | Done. Negative samples are counted, never clamped, and fail the run; the software-vs-hardware gap is reported | `native/`, `tgw_results.py` |
-| P1-1 aggregates | Done. Percentiles come from merged histograms; without them only exact quantities are reported | `tgw_results.py`, `save_report.py`, `collect_results.py` |
-| P1-2 AZ mixing | Done. Subscribers are grouped by same-AZ / cross-AZ and never merged | same |
-| P1-3 upper bound | Partly. The native sender stamps after packing; reports and README now say "upper bound". The send path and hardware-stamp reference point are still not measured on EC2, and the RTT/2 subtraction is only caveated | `native/`, `README.md` |
-| P1-4 pacing | Done. Absolute-deadline pacing; achieved rate reported and gated at 90 % | `native/mcast_send.cpp`, `tgw_results.py` |
-| P1-5 readiness | Done for native (ready file, one retry, then abort). The Python receiver keeps a fixed settle plus a liveness check | `run_benchmark.sh` |
-| P1-6 loss accounting | Done. Duplicates, out-of-order and socket drops are counted; 2 % loss gate | `native/`, `tgw_results.py` |
-| P1-7 native sender/receiver | Done and wired. Built on the instances from a sparse git clone; failure leaves the Python path usable; no silent fallback | `stacks/benchmark_stack.py`, `run_benchmark.sh` |
+| P1-1 aggregates | Done and verified on EC2. Percentiles come from merged histograms | `tgw_results.py`, `save_report.py`, `collect_results.py` |
+| P1-2 AZ mixing | Done. Same-AZ and cross-AZ are never merged (cross-AZ not yet run on EC2) | same |
+| P1-3 absolute bias | Partly. The send path is now measured on EC2: the native sender reports time spent in `sendto()` after the stamp (median 3.0 µs, p99 4.0 µs at 10k pps), so that part of the upper bound is small. The hardware-stamp reference point on ENA and the RTT/2 subtraction remain caveats only | `native/mcast_send.cpp`, `save_report.py` |
+| P1-4 pacing | Done and verified on EC2: absolute-deadline pacing held 100% at 100k pps; achieved rate reported and gated | `native/mcast_send.cpp`, `tgw_results.py` |
+| P1-5 readiness | Done for native (ready file, one retry, then abort); the Python receiver keeps a fixed settle plus a liveness check | `run_benchmark.sh` |
+| P1-6 loss accounting | Done and verified on EC2 (duplicates, out-of-order, socket drops, 2% gate) | `native/`, `tgw_results.py` |
+| P1-7 native sender/receiver | Done, wired, verified on EC2 (built on the instances; dev sync by SCP also works) | `stacks/benchmark_stack.py`, `run_benchmark.sh` |
+| P1-8 host tuning | Open by design: outline only, nothing implemented | below |
+| P2-1 repeats and warm-up | Mostly done. The receiver drops the first 2 s from latency statistics (`MCAST_WARMUP_SECS`, loss still counted); p99.9 is withheld under 100,000 samples; `compare_runs.py` reports the per-run spread and a bootstrap interval over runs (5+ runs per group, otherwise the min-max spread). Repeats are still launched by hand | `native/`, `tgw_results.py`, `compare_runs.py` |
+| P2-2 clock uncertainty | Open by request. Only the before/after System time gate exists | |
+| P2-3 report and parser bugs | Done. Header regex, instance type, stale default, and a single sockperf parser verified against real output (see the found-bugs note) | `tgw_results.py`, `tests/fixtures/sockperf_under_load.txt` |
+| P2-4 run context | Done and verified on EC2: kernel, ENA driver, AMI, CPU, idle states, coalescing, channels, GRO, NAPI, IRQ balance, sysctls, chrony refclock line and System time, per instance, in the report | `preflight.sh --context`, `run_benchmark.sh`, `save_report.py` |
+| P2-5 tests | Done: failure paths, mixed AZ, pooled-vs-averaged, fake `aws`, and real sockperf text as a fixture | `scripts/tests/` |
+| P2-6 chrony parity | Done in code (`dpoll -2`, single guarded refclock line, forced step, exactly-one-refclock gate). The live test stack predates the change, so the effect of `dpoll` is still unmeasured | `stacks/benchmark_stack.py`, `preflight.sh` |
 
-Open items that need EC2: whether the hardware stamp path behaves as the code assumes (the shipped receiver refuses to run without a real `SIOCSHWTSTAMP`), the 20 µs software-minus-hardware warning threshold, and whether the default `main` ref contains the native sources (it does only once this is merged).
+Bugs found while implementing or testing on EC2:
+- The old readiness check treated `NOTREADY` as ready (it matched the substring `READY`).
+- Real sockperf 3.10 output prints `Summary: Round trip is X usec` and percentiles without a unit. The old collector's patterns matched neither, so it would have stored a zero mean and no percentiles.
+- `sockperf under-load` replies to every 100th message by default, so sent minus received looked like 99% loss. The collector now uses sockperf's own dropped-message count, and the orchestrator passes `--reply-every 1` so the RTT sample count matches the rate.
 
-Found while implementing: the old readiness check treated `NOTREADY` as ready (it matched the substring `READY`).
+## EC2 findings (m7a.large, 2 vCPU, 2 subscribers)
 
+Measured with the native tools; every run was valid with 0 or negligible loss.
+
+- **Run-to-run instability is large and is not the tools.** At 1,000 pps the median spans 99.8 to 207.6 µs across seven native runs; Python spans 138 to 206 µs. Over three rounds each, the mean difference between native and Python is 0.4 µs, with the same spread on both. At 10,000 pps three consecutive native runs agreed to within 0.5 µs (119.1-119.6 µs), but a later native run on the same hosts gave 170.6 µs. So stability at 10k held within a window, not generally.
+- **The shift is before the receiver.** The software-minus-hardware stamp gap stays at 5-6 µs in every run while the median moves by 100 µs, and the minimum latency moves with the median (87 to 194 µs). So a receiver CPU wake-up is not the cause, which rules out my earlier C-state-on-the-receiver hypothesis. What remains is the sender side or the network path (TGW, host placement); this is not yet separated.
+- **100,000 pps tail.** Native P99 is about 290 µs (P95 about 183 µs) against Python's about 140 µs, but Python only delivered 95.6% of the load. The native sender spent 29.1 s of a 30 s run in kernel time (about 9.7 µs per `sendto()` against a 10 µs interval), and both receivers saw delay spikes at the same sequence numbers, so the delay arises before the receivers. ENA allowance counters showed no `pps_allowance_exceeded`. Sender saturation is the likely cause; it is not proven.
+
+---
 ## P0 - silent wrong or misleading results
 
 ### P0-1. Clock convergence is never gated, and the diagnostics read the wrong fields
@@ -158,8 +175,29 @@ Found while implementing: the old readiness check treated `NOTREADY` as ready (i
 - **Not covered by container tests.** The real `SIOCSHWTSTAMP` path and raw hardware stamp, ENA behavior, real x86 hardware timing, and any real latency number. These need the EC2 run.
 - **Effort.** Sender S-M, receiver M-L. Do the sender first.
 
----
+### P1-8. Host and NIC tuning (outline only, not implemented)
 
+**Issue.** The stack applies only sysctls (`rmem_max`, `rp_filter`, `busy_poll=busy_read=50`). The af_xdp AMI (`bake-ami.sh`) additionally pins IRQs, disables coalescing, sets low-latency NAPI, isolates cores, limits C-states and forces a clock step. The live TGW hosts show: adaptive RX coalescing on (rx-usecs 20, tx-usecs 64), `irqbalance` active, `napi_defer_hard_irqs=0`, the `C2` idle state advertised at 800 µs, no cpufreq governor (AMD guest), no kernel command-line tuning, and one IRQ pair spread over both vCPUs.
+
+**What matters here and what does not.** The headline is the NIC's hardware receive stamp minus a user-space send stamp, so anything that happens after the receive stamp (receive coalescing, receiver C-states, softirq scheduling) shifts only the software stamp and the endpoint, not the headline. The data agree: the software-minus-hardware gap is constant while the headline moves. The af_xdp tuning was designed for an AF_XDP busy-poll datapath and an end-to-end endpoint cost; most of it does not apply to a kernel-socket benchmark of the TGW.
+
+**Minimum set worth considering (not implemented):**
+
+| Item | af_xdp reference | Why it applies here |
+|---|---|---|
+| Stop `irqbalance`; pin the NIC IRQs to one vCPU and run the sender on the other | `ena-irq-affinity.service`, `irqbalance` disabled | The 100k pps sender saturated one core in kernel time while IRQ work shares both vCPUs. This is the setting most likely to reduce the native sender's tail |
+| Pin the sender thread to a core | af_xdp pins app threads to isolated cores | Removes scheduler migration from the stamp-to-wire path |
+| More vCPUs for high-rate sender runs (4+) | not in af_xdp (isolates 4 of its larger instances) | 2 vCPUs leave no spare core at 100k pps |
+| Chrony parity: `dpoll -2`, forced step | `chrony-force-sync.service`, `aws-phc.conf` | Done already (P0-1, P2-6) |
+| Record the state in effect | `nic_tuning` | Done already (P2-4) |
+
+Not recommended for this case: `isolcpus`/`nohz_full`/`rcu_nocbs`/`nosmt`/hugepages and the `ena-xdp-queues` and busy-poll NAPI units (they serve AF_XDP busy-polling); receive coalescing off and `max_cstate` limits (they change the software stamp, not the headline) unless the goal becomes endpoint-to-endpoint latency.
+
+**Experiment before building anything (cheap, reversible, no reboot).** The open question is where the 1k/10k level shifts come from. Disable the `C2` state at runtime on the sender only (`echo 1 > /sys/devices/system/cpu/cpu*/cpuidle/state2/disable`) and repeat 1k pps five times against five without it; then do the same on the receivers. If the level shifts disappear only with the sender change, the sender wake-up is implicated; if neither changes them, look at host placement and the TGW path. Use `compare_runs.py` for the comparison.
+
+- **Effort.** S for the IRQ/irqbalance/pinning items once the experiment says they matter; no AMI work needed.
+
+---
 ## P2 - repeatability and interpretability
 
 ### P2-1. One short run, no warm-up, no repeats, no uncertainty

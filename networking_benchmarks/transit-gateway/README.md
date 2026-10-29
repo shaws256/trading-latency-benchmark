@@ -170,6 +170,11 @@ The native sender/receiver is built **on each instance at launch** by a sparse
 `git clone` of `native_repo` at `native_ref`, so the sources must be reachable
 from the instances: a local, unpushed branch cannot be built. To test a branch
 from a fork, push it and pass `-c native_repo=<fork url> -c native_ref=<branch>`.
+During development you can instead copy the working tree to a running host and rebuild
+(`tar czf` the `scripts/native` directory, `scp` it, `make BUILD=/opt/benchmark-native/bin all`);
+the instances have no key pair, so push a temporary key with
+`aws ec2-instance-connect send-ssh-public-key` first. The orchestrator then reports
+`repo=scp-working-tree` in `Native-Build`.
 Both values are validated at synth (plain `https://` URL, plain ref) because they
 are written into root-run user-data.
 
@@ -295,6 +300,7 @@ places**, depending on how it was invoked:
 | `--- SENDER <id> ---` | sender summary JSON: sent, achieved rate, send lateness, send errors |
 | `--- MCAST <id> ---` | one JSON per subscriber, **always present**: AZ, same/cross-AZ, and the receiver result (or why there is none) |
 | `--- CLOCK <id> pre\|post ---` | chrony `System time` on every instance before and after the run |
+| `--- CONTEXT <id> ---` | host and NIC state in effect: kernel, ENA driver, AMI, CPU model, idle states, coalescing, channels, GRO, NAPI, IRQ balance, sysctls, chrony refclock line |
 
 Receiver result fields: `total_expected`, `total_received`, `packet_loss_count`,
 `duplicate_count`, `socket_drops`, `negative_hw_samples`, and
@@ -302,6 +308,12 @@ Receiver result fields: `total_expected`, `total_received`, `packet_loss_count`,
 publisher user-space send time). The native receiver also records the software
 receive stamp (`sw_*`) and the software-minus-hardware gap (`div_*`), and
 writes full histograms to a detail file (see below).
+
+**Warm-up and sample size.** The native receiver leaves the first 2 s of each run out of every
+latency statistic (`MCAST_WARMUP_SECS`, `0` disables) while still counting those packets for
+loss. P99.9 is reported only with 100,000 or more pooled samples. The sender summary includes
+the time spent inside `sendto()` after the timestamp (`sendto_median_us`, `sendto_p99_us`,
+`sendto_max_us`), which bounds how much of the number is the send path.
 
 Phase B (sockperf) keeps its `--- SUBSCRIBER <id> ---` blocks: round-trip
 unicast, **no TGW in the path**.
@@ -340,6 +352,21 @@ histograms** (not an average of per-subscriber percentiles), per path. Without
 the detail files the report says so and gives only exact quantities: counts, a
 sample-weighted mean, and the worst subscriber's p99.
 
+### Comparing runs
+
+One run says little about whether two configurations differ; the run-to-run spread on identical
+hosts has been larger than the effects of interest. Summarise repeats with:
+
+```bash
+python3 scripts/compare_runs.py \
+  --run native:runs/a.raw.txt --run native:runs/b.raw.txt ... \
+  --run python:runs/c.raw.txt --run python:runs/d.raw.txt ...
+```
+
+It reports each run's pooled median/P95/P99, the spread, and a bootstrap interval over runs
+(5+ runs per group; fewer gives the per-run values and min-max only), skips runs that fail a
+gate, and for two groups gives the interval of the difference.
+
 ### 3. S3 + CloudWatch (`collect_results.py`)
 
 ```bash
@@ -359,8 +386,10 @@ which publishes it marked `"valid": false` with the findings listed.
   `P999LatencyUs` (pooled; only when every subscriber supplied a histogram),
   `WorstSubscriberP99Us`, `PacketLossPct`.
 
-For `sockperf` / `iperf3` the aggregate p95/p99 remains the mean of
-per-subscriber values (those tools report no histogram).
+For `sockperf` / `iperf3` the aggregate p99 remains the mean of per-subscriber
+values (those tools report no histogram). sockperf prints no p95, so none is
+stored. `sockperf under-load` is run with `--reply-every 1` (its default replies
+to every 100th message, which also made sent minus received look like loss).
 
 ---
 
@@ -419,6 +448,7 @@ transit-gateway/
 │   ├── preflight.sh                        On-instance PHC / NIC / chrony System-time gate
 │   ├── check_ptp.sh                        PTP diagnostic (reports chrony System time)
 │   ├── tgw_results.py                      Shared parsing, histogram pooling, validity gates
+│   ├── compare_runs.py                     Spread and bootstrap interval across repeated runs
 │   ├── native/                             C++ sender/receiver (built on the instances); see its README
 │   ├── mcast_recv.py                       Reference receiver (Python), kept for A/B
 │   ├── mcast_send.py                       Reference sender (Python), kept for A/B
