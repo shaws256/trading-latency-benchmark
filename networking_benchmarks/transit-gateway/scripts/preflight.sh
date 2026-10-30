@@ -2,7 +2,12 @@
 # preflight.sh - clock and NIC readiness check, run ON a benchmark instance.
 #
 # Modes:
-#   preflight.sh [--max-offset-us N]   full check; forces a clock step first. Exit 1 on failure.
+#   preflight.sh [--max-offset-us N]   full check (static + gate). Exit 1 on failure.
+#   preflight.sh --static              checks that do not change between runs: PHC driver, PTP
+#                                      device, hardware RX stamping, exactly one refclock
+#   preflight.sh --gate [--max-offset-us N]
+#                                      per-run checks: PHC is the selected source, then force a
+#                                      clock step and require System time within the threshold
 #   preflight.sh --clock               read-only snapshot of the chrony state (no step)
 #   preflight.sh --context             read-only record of the host and NIC state in effect
 #
@@ -21,9 +26,11 @@ MODE=full
 while [ $# -gt 0 ]; do
   case "$1" in
     --max-offset-us) MAX_OFFSET_US="$2"; shift 2 ;;
+    --static) MODE=static; shift ;;
+    --gate) MODE=gate; shift ;;
     --clock) MODE=clock; shift ;;
     --context) MODE=context; shift ;;
-    -h|--help) sed -n 2,16p "$0"; exit 0 ;;
+    -h|--help) sed -n 2,22p "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -79,6 +86,7 @@ if [ "$MODE" = clock ]; then
   exit 0
 fi
 
+if [ "$MODE" != gate ]; then
 # 1. ENA PHC support loaded
 PHC_ENABLE=$(cat "$SYSROOT/sys/module/ena/parameters/phc_enable" 2>/dev/null || echo 0)
 echo "phc_enable=$PHC_ENABLE"
@@ -101,16 +109,22 @@ if ethtool -T "${IFACE:-eth0}" 2>&1 | grep -q hardware-receive; then
 else
   echo "hw_receive=no"; fail no_hw_receive
 fi
+fi
 
-# 4. Exactly one PHC refclock, and it is the selected source
+# 4. Exactly one PHC refclock (static), and it is the selected source (gate)
 SOURCES=$(chronyc sources 2>&1)
-REFCLOCKS=$(echo "$SOURCES" | grep -c '^#')
-SELECTED=$(echo "$SOURCES" | awk '/^[#^=][*]/ {print $2; exit}')
-echo "refclocks=$REFCLOCKS"
-echo "selected=${SELECTED:-none}"
-[ "$REFCLOCKS" = "1" ] || fail refclock_count_not_1
-echo "$SOURCES" | grep -q '^#\*' || fail phc_not_selected
+if [ "$MODE" != gate ]; then
+  REFCLOCKS=$(echo "$SOURCES" | grep -c '^#')
+  echo "refclocks=$REFCLOCKS"
+  [ "$REFCLOCKS" = "1" ] || fail refclock_count_not_1
+fi
+if [ "$MODE" != static ]; then
+  SELECTED=$(echo "$SOURCES" | awk '/^[#^=][*]/ {print $2; exit}')
+  echo "selected=${SELECTED:-none}"
+  echo "$SOURCES" | grep -q '^#\*' || fail phc_not_selected
+fi
 
+if [ "$MODE" != static ]; then
 # 5. Step away any residual offset, then require the clock to be close
 chronyc makestep >/dev/null 2>&1 || fail makestep_failed
 chronyc burst 4/4 >/dev/null 2>&1 || true
@@ -124,6 +138,7 @@ elif ! awk -v v="$OFFSET_US" -v m="$MAX_OFFSET_US" 'BEGIN { if (v < 0) v = -v; e
   fail "clock_offset_exceeds_${MAX_OFFSET_US}us"
 fi
 chronyc tracking 2>/dev/null | awk -F': *' '/^Leap status/ {print "leap=" $2}'
+fi
 
 if [ -z "$FAILS" ]; then
   echo PASS

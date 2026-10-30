@@ -163,3 +163,34 @@ esac
     assert "dpoll -2" in kv["chrony_refclock"]
     assert kv["chrony_system_time_us"] == "0.062"
     assert "makestep" not in lab["log"].read_text()   # read-only
+
+
+def test_static_mode_checks_hardware_and_never_steps_the_clock(lab):
+    p = run(lab, "--static")
+    assert p.returncode == 0, p.stdout
+    assert "PASS" in p.stdout and "refclocks=1" in p.stdout
+    assert "system_time_us" not in p.stdout and "selected=" not in p.stdout
+    assert "makestep" not in lab["log"].read_text()
+
+
+def test_static_mode_reports_static_failures_only(lab):
+    (lab["root"] / "sys/module/ena/parameters/phc_enable").write_text("0\n")
+    (lab["fx"] / "sources").write_text(SOURCES_OK.replace("#* PHC0", "#- PHC0"))   # not selected: a gate matter
+    out = run(lab, "--static").stdout
+    assert "FAIL:phc_not_enabled" in out and "phc_not_selected" not in out
+
+
+def test_gate_mode_steps_the_clock_and_skips_static_checks(lab):
+    (lab["root"] / "sys/module/ena/parameters/phc_enable").write_text("0\n")      # a static matter
+    p = run(lab, "--gate")
+    assert p.returncode == 0, p.stdout
+    assert "PASS" in p.stdout and "system_time_us=0.062" in p.stdout and "phc_enable" not in p.stdout
+    assert "makestep" in lab["log"].read_text()
+
+
+def test_gate_mode_fails_when_the_phc_is_not_selected_or_the_offset_is_large(lab):
+    (lab["fx"] / "sources").write_text(SOURCES_OK.replace("#* PHC0", "#- PHC0").replace("^- 169", "^* 169"))
+    assert "FAIL:phc_not_selected" in run(lab, "--gate").stdout
+    (lab["fx"] / "sources").write_text(SOURCES_OK)
+    (lab["fx"] / "tracking").write_text(TRACKING.format(sys="0.000025000", dir="slow"))
+    assert "clock_offset_exceeds_10us" in run(lab, "--gate").stdout

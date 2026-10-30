@@ -121,16 +121,30 @@ which provisions resources in this order:
 
 ## Runtime / measurement flow
 
-After `/opt/benchmark-env-ready` exists on every host, `scripts/run_benchmark.sh`
-drives measurement via SSM:
+Work is split by how often it has to happen:
+
+| Stage | When | What |
+|---|---|---|
+| EC2 user-data | Once per instance boot | Packages, sockperf, native build, chrony and PHC setup, sysctls, `/opt/benchmark-env-ready` |
+| `scripts/prepare_stack.sh` | Once per deployment; run automatically when the manifest is missing or stale | Wait for SSM and env-ready, read the native build state, install `preflight.sh` and `mcast_*.py` under `/opt/benchmark/bin/`, static clock and NIC checks (PHC driver, PTP device, hardware RX stamping, one refclock), record host context. Writes `.bench-state/<stack>.json` |
+| `scripts/run_benchmark.sh` | Every run | Confirm the manifest still holds, gate the clock, measure, judge |
+
+The manifest keeps the stack identity from CloudFormation (instance ids, bucket, group, port) and,
+per instance, the facts read from its own metadata service (private IP, AZ, AMI, type), the boot
+id, the sha256 of the installed helper files, the native build and the static host context. A run
+makes no CloudFormation or EC2 calls; its one per-instance gate call returns the boot id and helper
+hashes. A reboot, an unreachable (replaced) instance, or an edited helper file on the instance or
+in this checkout makes the run prepare again, which re-reads CloudFormation. After changing the
+stack in place (for example the multicast group), run `scripts/prepare_stack.sh` or pass
+`--force-prepare`.
+
 ```
   run_benchmark.sh
-         │  (1) describe-stacks → publisher, subscribers, S3 bucket, AZs
-         │  (2) wait for SSM, /opt/benchmark-env-ready, and (for native)
-         │      /opt/benchmark-native-ready; refuse if the native build
-         │      failed or instances built different commits
-         │  (3) preflight.sh on every host: PHC, hardware RX stamping,
-         │      one PHC refclock, chronyc makestep, System time <= 10 µs
+         │  (1) load the manifest (CloudFormation is queried only when preparing)
+         │  (2) manifest check; prepare first when missing or stale
+         │      refuse if the native build failed or instances built different commits
+         │  (3) one command per host: boot id + helper hashes, then
+         │      preflight.sh --gate: PHC selected, chronyc makestep, System time <= 10 µs
          ▼
   Phase A - Multicast one-way latency + loss (TGW path)
          │     · subscribers: mcast_recv joins the group, enables hardware
@@ -466,8 +480,10 @@ transit-gateway/
 ├── stacks/
 │   └── benchmark_stack.py                  VPC, TGW, multicast, EC2, IAM, S3, user-data, PHC gate
 ├── scripts/
-│   ├── run_benchmark.sh                    Orchestrator via SSM; emits the raw stream + verdict
-│   ├── preflight.sh                        On-instance PHC / NIC / chrony System-time gate
+│   ├── run_benchmark.sh / .py              Orchestrator (entry shim + Python); emits the raw stream + verdict
+│   ├── prepare_stack.sh                    One-time instance preparation (runs `python3 -m tgw_bench prepare`)
+│   ├── tgw_bench/                          Orchestrator package: transport, prepare, run, phases/ (clock gate, mcast, unicast)
+│   ├── preflight.sh                        On-instance checks: --static (prepare), --gate (every run), --clock, --context
 │   ├── check_ptp.sh                        PTP diagnostic (reports chrony System time)
 │   ├── tgw_results.py                      Shared parsing, histogram pooling, validity gates
 │   ├── compare_runs.py                     Spread and bootstrap interval across repeated runs

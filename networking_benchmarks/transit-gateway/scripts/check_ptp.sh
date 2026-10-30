@@ -231,7 +231,7 @@ echo "  SysTime = chrony System time: the clock error right now. Exit status is 
 echo ""
 
 # Non-zero exit if any instance is not synced to PHC.
-# We don't fail on hw_ts being '0' or '?', because run_benchmark.sh's mcast
+# We don't fail on hw_ts being '0' or '?', because the orchestrator's mcast
 # block enables HW packet timestamping at receiver start; this script is a
 # standby diagnostic that runs between benchmark invocations.
 EXIT_CODE=0

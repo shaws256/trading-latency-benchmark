@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A stand-in for the `aws` CLI that answers the calls run_benchmark.sh makes.
+"""A stand-in for the `aws` CLI that answers the calls the orchestrator (tgw_bench) makes.
 
 It does not run the instance-side commands. It recognises each by a stable token
 and answers from a scenario file, and it records every SSM command so a test can
@@ -12,6 +12,9 @@ Environment:
 import json
 import os
 import re
+import fcntl
+import hashlib
+import base64
 import shutil
 import sys
 
@@ -26,12 +29,13 @@ def arg(name, default=None):
 
 
 def counter(key):
+    """Increment and return a named counter; the lock keeps parallel invocations from sharing a number."""
     path = os.path.join(STATE, "count." + re.sub(r"\W", "_", key))
-    n = int(open(path).read()) + 1 if os.path.exists(path) else 1
-    open(path, "w").write(str(n))
+    with open(os.path.join(STATE, "lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        n = int(open(path).read()) + 1 if os.path.exists(path) else 1
+        open(path, "w").write(str(n))
     return n
-
-
 def out(text):
     sys.stdout.write(text if text.endswith("\n") or not text else text + "\n")
 
@@ -49,17 +53,30 @@ def respond(inst, cmd):
         lines = ["ENV=" + per_instance("env", inst, "READY"), "NATIVE=" + state]
         if state == "ready":
             lines.append("NATIVE_BUILD=commit=%s repo=r ref=main" % per_instance("commit", inst, "abc123"))
+        lines.append("BOOT_ID=" + per_instance("boot_ids", inst, "boot-1"))
+        lines += ["IID=" + SC.get("iid_override", {}).get(inst, inst), "AZ=" + SC["az"].get(inst, "us-east-1a"), "PRIVATE_IP=" + SC["ips"].get(inst, "10.0.0.9"),
+                  "AMI=ami-0123456789abcdef0", "ITYPE=" + SC.get("instance_type", "m7i.large")]
         return "\n".join(lines)
     if "benchmark-native-build.log" in cmd:
         return SC.get("build_log", "make: *** [mcast_recv] Error 1")
-    if "preflight.sh --max-offset-us" in cmd:   # upload + gate + context, as one command
-        ctx = per_instance("context", inst, "kernel=6.1.0\ncpu_model=EPYC\ncpuidle_states=POLL:0us C1:1us C2:800us")
-        return (per_instance("preflight", inst, "phc_enable=1\nsystem_time_us=0.1\nPASS")
-                + "\n=====CONTEXT=====\n" + ctx)
-    if "base64 -d" in cmd:
+    if "base64 -d" in cmd:   # one helper file installed on the instance; remember its hash
+        m = re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d > \S+/(\S+)", cmd)
+        path = os.path.join(STATE, "files", inst + ".json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        files = json.load(open(path)) if os.path.exists(path) else {}
+        files[m.group(2)] = hashlib.sha256(base64.b64decode(m.group(1))).hexdigest()
+        json.dump(files, open(path, "w"))
         return "UPLOADED"
-    if "preflight.sh --context" in cmd:
-        return per_instance("context", inst, "kernel=6.1.0\ncpu_model=EPYC\ncpuidle_states=POLL:0us C1:1us C2:800us")
+    if "preflight.sh --static" in cmd:   # static checks and the context, one command
+        ctx = per_instance("context", inst, "kernel=6.1.0\ncpu_model=EPYC\ncpuidle_states=POLL:0us C1:1us C2:800us")
+        return ("=====STATIC=====\n" + per_instance("static", inst, "phc_enable=1\nPASS")
+                + "\n=====CONTEXT=====\n" + ctx + "\nchrony_system_time_us=0.5")
+    if "preflight.sh --gate" in cmd:   # boot id, helper hashes, then the per-run clock gate
+        path = os.path.join(STATE, "files", inst + ".json")
+        files = json.load(open(path)) if os.path.exists(path) else {}
+        head = ["BOOT_ID=" + per_instance("boot_ids", inst, "boot-1")]
+        head += ["SHA_%s=%s" % (k, v) for k, v in files.items()]
+        return "\n".join(head + ["=====GATE=====", per_instance("preflight", inst, "system_time_us=0.1\nPASS")])
     if "=====RESULT=====" in cmd:   # one command: wait for the receiver, result, detail upload, clock
         res = per_instance("results", inst, "")
         if isinstance(res, list):  # one entry per collection, the last repeats
@@ -128,6 +145,8 @@ if sys.argv[1] == "__ssh__":
     sys.exit(1 if status_for(inst, cmd) == "Failed" else 0)
 
 svc, op = sys.argv[1], sys.argv[2]
+with open(os.path.join(STATE, "api.log"), "a") as _f:   # every non-command call, for "no EC2 or CloudFormation on a repeat run"
+    _f.write(svc + " " + op + "\n")
 query = arg("--query", "")
 
 if svc == "cloudformation" and not query:
@@ -150,9 +169,7 @@ elif svc == "ec2":
             ids.append(tok)
         rows = []
         for i in ids:
-            rows.append("\t".join([i, SC["az"].get(i, "us-east-1a"), SC["ips"].get(i, "10.0.0.9"),
-                                   "ami-0123456789abcdef0", SC.get("instance_type", "m7i.large"),
-                                   SC.get("public_ips", {}).get(i, "None")]))
+            rows.append("\t".join([i, SC.get("public_ips", {}).get(i, "None")]))
         out("\n".join(rows))
     elif "ImageId" in query:
         out("ami-0123456789abcdef0")
@@ -174,9 +191,12 @@ elif svc == "ssm" and op == "describe-instance-information":
     else:
         out("Online")
 elif svc == "ssm" and op == "send-command":
+    inst = arg("--instance-ids")
+    if inst in SC.get("gone", []):   # a terminated or replaced instance
+        sys.stderr.write("An error occurred (InvalidInstanceId) when calling the SendCommand operation\n")
+        sys.exit(254)
     n = counter("cmdid")
     cmd = json.loads(arg("--parameters"))["commands"][0]
-    inst = arg("--instance-ids")
     with open(os.path.join(STATE, "calls.jsonl"), "a") as f:
         f.write(json.dumps({"id": n, "instance": inst, "command": cmd}) + "\n")
     with open(os.path.join(STATE, "cmd.%d.json" % n), "w") as f:
