@@ -50,10 +50,12 @@ def respond(inst, cmd):
         return "\n".join(lines)
     if "benchmark-native-build.log" in cmd:
         return SC.get("build_log", "make: *** [mcast_recv] Error 1")
+    if "preflight.sh --max-offset-us" in cmd:   # upload + gate + context, as one command
+        ctx = per_instance("context", inst, "kernel=6.1.0\ncpu_model=EPYC\ncpuidle_states=POLL:0us C1:1us C2:800us")
+        return (per_instance("preflight", inst, "phc_enable=1\nsystem_time_us=0.1\nPASS")
+                + "\n=====CONTEXT=====\n" + ctx)
     if "base64 -d" in cmd:
         return "UPLOADED"
-    if "preflight.sh --max-offset-us" in cmd:
-        return per_instance("preflight", inst, "phc_enable=1\nsystem_time_us=0.1\nPASS")
     if "preflight.sh --context" in cmd:
         return per_instance("context", inst, "kernel=6.1.0\ncpu_model=EPYC\ncpuidle_states=POLL:0us C1:1us C2:800us")
     if "preflight.sh --clock" in cmd:
@@ -96,7 +98,11 @@ def status_for(inst, cmd):
 svc, op = sys.argv[1], sys.argv[2]
 query = arg("--query", "")
 
-if svc == "cloudformation":
+if svc == "cloudformation" and not query:
+    sys.stdout.write(json.dumps({"Stacks": [{
+        "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/S/guid",
+        "Outputs": [{"OutputKey": k, "OutputValue": v} for k, v in SC["outputs"].items()]}]}))
+elif svc == "cloudformation":
     if "StackId" in query:
         out("arn:aws:cloudformation:us-east-1:123456789012:stack/S/guid")
     else:
@@ -113,7 +119,11 @@ elif svc == "ec2":
     else:
         out(SC.get("instance_type", "m7i.large"))
 elif svc == "ssm" and op == "describe-instance-information":
-    out("Online")
+    if "Online" in query:   # the ids of the online instances among those asked for
+        ids = arg("--filters").split("Values=")[1].split(",")
+        out("\t".join(i for i in ids if i not in SC.get("ssm_offline", [])))
+    else:
+        out("Online")
 elif svc == "ssm" and op == "send-command":
     n = counter("cmdid")
     cmd = json.loads(arg("--parameters"))["commands"][0]
@@ -128,8 +138,11 @@ elif svc == "ssm" and op == "get-command-invocation":
     rec = json.load(open(os.path.join(STATE, "cmd.%d.json" % n)))
     if query == "Status":
         out(status_for(rec["instance"], rec["command"]))
-    else:
+    elif query:
         out(respond(rec["instance"], rec["command"]))
+    else:   # no --query: the full JSON document, as the orchestrator's single poll call reads it
+        sys.stdout.write(json.dumps({"Status": status_for(rec["instance"], rec["command"]),
+                                     "StandardOutputContent": respond(rec["instance"], rec["command"])}))
 elif svc == "s3" and op == "cp":
     dest = sys.argv[4]
     os.makedirs(dest, exist_ok=True)

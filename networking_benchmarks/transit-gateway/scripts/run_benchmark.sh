@@ -40,6 +40,7 @@ MAX_LOSS_PCT=2
 MAX_CLOCK_OFFSET_US=10
 DETAIL_DIR=""
 RUNS_DIR=""
+SENDER_CPU=""
 
 VALID_TOOLS=(mcast sockperf iperf3)
 TOOL_ORDER=(mcast sockperf iperf3)
@@ -48,7 +49,7 @@ SSM_POLL_INTERVAL=10
 SSM_POLL_MAX_ATTEMPTS=60
 READY_POLL_INTERVAL=10
 READY_POLL_MAX_ATTEMPTS=60
-SSM_WAIT_INTERVAL=2
+SSM_WAIT_INTERVAL=1
 RECEIVER_SETTLE_SECS=5
 
 NATIVE_BIN=/opt/benchmark-native/bin
@@ -86,6 +87,7 @@ Options:
   --placement  STRAT   Placement strategy              [default: single-az-cpg]
   --notes      TEXT    Additional notes for report
   --detail-dir DIR     Keep the receivers' histogram files here
+  --sender-cpu N       Pin the multicast sender to CPU N (taskset)  [default: unpinned]
   --runs-dir DIR       Where --save-report writes             [default: ../runs]
   --save-report        Save markdown report to runs/   [default: off]
 
@@ -117,6 +119,7 @@ while [[ $# -gt 0 ]]; do
     --max-clock-offset-us) MAX_CLOCK_OFFSET_US="$2"; shift 2 ;;
     --detail-dir)    DETAIL_DIR="$2";    shift 2 ;;
     --runs-dir)      RUNS_DIR="$2";      shift 2 ;;
+    --sender-cpu)    SENDER_CPU="$2";    shift 2 ;;
     --tool)
       IFS=',' read -ra _parts <<< "$2"
       for _t in "${_parts[@]}"; do
@@ -159,6 +162,7 @@ require_num() { [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "ERROR: $1 must be a
 require_int --port "$PORT"
 require_int --rate "$RATE"
 require_int --duration "$DURATION"
+[[ -z "$SENDER_CPU" || "$SENDER_CPU" =~ ^[0-9]+$ ]] || { echo "ERROR: --sender-cpu must be a CPU number, got '$SENDER_CPU'" >&2; exit 1; }
 require_num --max-loss-pct "$MAX_LOSS_PCT"
 require_num --max-clock-offset-us "$MAX_CLOCK_OFFSET_US"
 [[ "$GROUP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "ERROR: --group must be an IPv4 address, got '$GROUP'" >&2; exit 1; }
@@ -211,6 +215,19 @@ trap 'rm -rf "$WORK"' EXIT
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# stack_value <OutputKey|@StackId>: value from the describe-stacks document saved in $WORK/stack.json.
+stack_value() {
+  python3 - "$WORK/stack.json" "$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))["Stacks"][0]
+key = sys.argv[2]
+if key == "@StackId":
+    print(d["StackId"])
+else:
+    print(next((o["OutputValue"] for o in d.get("Outputs", []) if o["OutputKey"] == key), ""))
+PY
+}
+
 get_stack_output() {
   aws cloudformation describe-stacks \
     --stack-name "$STACK_NAME" \
@@ -231,23 +248,40 @@ ssm_send_command() {
     --output text
 }
 
-ssm_stdout() {
-  aws ssm get-command-invocation --command-id "$1" --instance-id "$2" \
-    --query "StandardOutputContent" --output text 2>/dev/null || true
+# ssm_run <instance> <timeout-secs> <command>; stdout goes to SSM_OUT, returns 1 on failure.
+SSM_OUT=""
+SSM_CALLS=0
+# phase_mark <name>: one "# timing" line per phase with the elapsed seconds and SSM calls since the last mark.
+PHASE_T0=$SECONDS
+PHASE_CALLS0=0
+phase_mark() {
+  echo "# timing: $1 took $((SECONDS - PHASE_T0))s, $((SSM_CALLS - PHASE_CALLS0)) SSM calls"
+  PHASE_T0=$SECONDS
+  PHASE_CALLS0=$SSM_CALLS
 }
-
-# ssm_wait_command <command-id> <instance> <max-secs>; sets SSM_STATUS
-SSM_STATUS=""
-ssm_wait_command() {
-  local command_id="$1" instance_id="$2" max_wait="$3" elapsed=0
-  while [[ $elapsed -lt $max_wait ]]; do
-    SSM_STATUS=$(aws ssm get-command-invocation \
-      --command-id "$command_id" --instance-id "$instance_id" \
-      --query "Status" --output text 2>/dev/null || echo "Pending")
+# One get-command-invocation call per poll returns the status and the output together.
+ssm_run() {
+  local id elapsed=0 max=$(($2 + 30)) resp
+  SSM_CALLS=$((SSM_CALLS + 1))
+  SSM_OUT=""
+  SSM_STATUS=""
+  id=$(ssm_send_command "$1" "$3" "$2") || return 1
+  while [[ $elapsed -lt $max ]]; do
+    resp=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$1" --output json 2>/dev/null \
+      | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    sys.stdout.write(d.get("Status", "Pending") + "\n" + d.get("StandardOutputContent", ""))
+except ValueError:
+    sys.stdout.write("Pending")
+') || resp="Pending"
+    SSM_STATUS="${resp%%$'\n'*}"
+    if [[ "$resp" == *$'\n'* ]]; then SSM_OUT="${resp#*$'\n'}"; else SSM_OUT=""; fi
     case "$SSM_STATUS" in
       Success) return 0 ;;
       Failed|TimedOut|Cancelled)
-        echo "ERROR: SSM command $command_id on $instance_id finished with status: $SSM_STATUS" >&2
+        echo "ERROR: SSM command $id on $1 finished with status: $SSM_STATUS" >&2
         return 1
         ;;
     esac
@@ -255,22 +289,27 @@ ssm_wait_command() {
     elapsed=$((elapsed + SSM_WAIT_INTERVAL))
   done
   SSM_STATUS="WaitTimeout"
-  echo "ERROR: Timed out waiting for SSM command $command_id on $instance_id" >&2
+  echo "ERROR: Timed out waiting for SSM command $id on $1" >&2
   return 1
 }
 
-# ssm_run <instance> <timeout-secs> <command>; stdout goes to SSM_OUT, returns 1 on failure.
-SSM_OUT=""
-ssm_run() {
-  local id
-  SSM_OUT=""
-  id=$(ssm_send_command "$1" "$3" "$2") || return 1
-  if ssm_wait_command "$id" "$1" "$(($2 + 30))"; then
-    SSM_OUT=$(ssm_stdout "$id" "$1")
-    return 0
-  fi
-  SSM_OUT=$(ssm_stdout "$id" "$1")
-  return 1
+# par_run <function> <id...>: run "<function> <id>" for every id at the same time. Each one's
+# output is shown in id order afterwards; returns 1 if any failed. Workers run in subshells,
+# so they hand results back through files under $WORK.
+par_run() {
+  local fn="$1" id rc=0 i
+  local pids=() ids=()
+  shift
+  for id in "$@"; do
+    ( "$fn" "$id" ) > "$WORK/par.$fn.$id" 2>&1 &
+    pids+=($!)
+    ids+=("$id")
+  done
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" || rc=1
+    cat "$WORK/par.$fn.${ids[$i]}"
+  done
+  return $rc
 }
 
 # ssm_upload <instance> <local file> <remote path>
@@ -339,6 +378,89 @@ PY
 }
 
 # ---------------------------------------------------------------------------
+# Per-instance workers for par_run. They read run_all's variables (bash scopes locals
+# dynamically) and write what the caller needs to files under $WORK.
+# ---------------------------------------------------------------------------
+ready_worker() {
+  local id="$1" attempt=0
+  while true; do
+    ssm_run "$id" 30 "$READY_CMD" || true
+    if [[ "$SSM_OUT" == *"ENV=READY"* ]]; then
+      printf '%s\n' "$SSM_OUT" > "$WORK/ready.$id"
+      echo "  $id - environment ready"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    if [[ $attempt -ge $READY_POLL_MAX_ATTEMPTS ]]; then
+      echo "ERROR: $id environment not ready after $((READY_POLL_MAX_ATTEMPTS * READY_POLL_INTERVAL))s" >&2
+      return 1
+    fi
+    sleep "$READY_POLL_INTERVAL"
+  done
+}
+
+# Upload preflight.sh, run the gate, then record the host state, in one SSM call per instance.
+pre_worker() {
+  local id="$1" b64 out
+  b64=$(python3 -c 'import base64,sys; sys.stdout.write(base64.b64encode(open(sys.argv[1],"rb").read()).decode())' "$SCRIPT_DIR/preflight.sh")
+  ssm_run "$id" 90 "echo '$b64' | base64 -d > /tmp/preflight.sh && chmod +x /tmp/preflight.sh && bash /tmp/preflight.sh --max-offset-us $MAX_CLOCK_OFFSET_US; echo '=====CONTEXT====='; bash /tmp/preflight.sh --context" || true
+  out="$SSM_OUT"
+  printf '%s\n' "${out%%=====CONTEXT=====*}" > "$WORK/pre.$id"
+  if [[ "$out" == *"=====CONTEXT====="* ]]; then
+    printf '%s\n' "${out#*=====CONTEXT=====}" > "$WORK/ctx.$id"
+  else
+    : > "$WORK/ctx.$id"
+  fi
+  aws ec2 describe-instances --instance-ids "$id" --query "Reservations[0].Instances[0].ImageId" --output text > "$WORK/ami.$id"
+}
+
+py_upload_worker() {
+  local id="$1"
+  ssm_upload "$id" "$SCRIPT_DIR/mcast_recv.py" /tmp/mcast_recv.py || { echo "ERROR: upload to $id failed" >&2; return 1; }
+  ssm_upload "$id" "$SCRIPT_DIR/mcast_send.py" /tmp/mcast_send.py || { echo "ERROR: upload to $id failed" >&2; return 1; }
+}
+
+# Start a subscriber's receiver and wait until it is listening; one retry, then fail.
+recv_worker() {
+  local id="$1" attempt=0
+  while true; do
+    attempt=$((attempt + 1))
+    ssm_run "$id" 60 "$stop_cmd" || true
+    ssm_run "$id" 60 "$start_cmd" || true
+    ssm_run "$id" 60 "$READY_WAIT_CMD" || true
+    if [[ "$SSM_OUT" == *"RECV=READY"* ]]; then
+      echo "  $id - multicast receiver ready"
+      return 0
+    fi
+    if [[ $attempt -ge 2 ]]; then
+      echo "ERROR: receiver on $id did not become ready after $attempt attempts:" >&2
+      echo "$SSM_OUT" | sed 's/^/    /' >&2
+      return 1
+    fi
+    echo "  $id - receiver not ready (${SSM_OUT%%$'\n'*}); retrying once"
+  done
+}
+
+# After the send: wait for the receiver to finish, then fetch its result and upload its detail file.
+collect_worker() {
+  local id="$1"
+  ssm_run "$id" 60 "$DONE_CMD" || true
+  [[ "$SSM_OUT" == *"RECV=INTERRUPTED"* ]] && echo "  $id - receiver had to be interrupted (end marker never arrived?)"
+  ssm_run "$id" 30 "cat /tmp/mcast_result.json 2>/dev/null; true" || true
+  printf '%s\n' "$SSM_OUT" > "$WORK/res.$id"
+  if [[ "$RECEIVER_IMPL" == "native" ]]; then
+    ssm_run "$id" 60 "if [ -f /tmp/mcast_recv_detail.json ]; then aws s3 cp /tmp/mcast_recv_detail.json $DETAIL_PREFIX/$id.detail.json --region $REGION --only-show-errors && echo DETAIL=UPLOADED; else echo DETAIL=MISSING; fi" || true
+    [[ "$SSM_OUT" == *"DETAIL=UPLOADED"* ]] || echo "  WARN $id - detail file not uploaded; pooled percentiles will be unavailable"
+  fi
+  return 0
+}
+
+clock_worker() {
+  ssm_run "$1" 30 "bash /tmp/preflight.sh --clock" || true
+  printf '%s\n' "$SSM_OUT" > "$WORK/post.$1"
+}
+
+# ---------------------------------------------------------------------------
 # The run itself. Its output is the raw stream; the verdict is computed from it afterwards.
 # ---------------------------------------------------------------------------
 run_all() {
@@ -359,15 +481,18 @@ run_all() {
 
   # --- Step 1: stack outputs ---
   echo ">>> Querying CloudFormation stack outputs..."
-  local PUBLISHER_ID SUBSCRIBER_IDS_CSV S3_BUCKET STACK_ID REGION
-  PUBLISHER_ID=$(get_stack_output "PublisherInstanceId")
-  SUBSCRIBER_IDS_CSV=$(get_stack_output "SubscriberInstanceIds")
-  S3_BUCKET=$(get_stack_output "S3BucketName")
-  STACK_ID=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].StackId" --output text)
+  local PUBLISHER_ID SUBSCRIBER_IDS_CSV S3_BUCKET STACK_ID REGION STACK_GROUP STACK_PORT
+  # One describe-stacks call carries every output and the stack id.
+  aws cloudformation describe-stacks --stack-name "$STACK_NAME" --output json > "$WORK/stack.json"
+  PUBLISHER_ID=$(stack_value PublisherInstanceId)
+  SUBSCRIBER_IDS_CSV=$(stack_value SubscriberInstanceIds)
+  S3_BUCKET=$(stack_value S3BucketName)
+  STACK_GROUP=$(stack_value MulticastGroup)
+  STACK_PORT=$(stack_value MulticastPort)
+  STACK_ID=$(stack_value @StackId)
   REGION=$(echo "$STACK_ID" | cut -d: -f4)
-  echo "  Stack multicast group: $(get_stack_output "MulticastGroup")"
-  echo "  Stack multicast port:  $(get_stack_output "MulticastPort")"
-
+  echo "  Stack multicast group: $STACK_GROUP"
+  echo "  Stack multicast port:  $STACK_PORT"
   local SUBSCRIBER_IDS ALL_INSTANCE_IDS
   IFS=',' read -ra SUBSCRIBER_IDS <<< "$SUBSCRIBER_IDS_CSV"
   ALL_INSTANCE_IDS=("$PUBLISHER_ID" "${SUBSCRIBER_IDS[@]}")
@@ -381,29 +506,33 @@ run_all() {
   echo "  S3 Bucket:   $S3_BUCKET"
   echo ""
 
+  phase_mark "stack query"
   # --- Step 2: SSM online ---
   echo ">>> Waiting for all instances to be SSM-ready..."
-  local attempt ping_status
-  for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-    attempt=0
-    while true; do
-      ping_status=$(aws ssm describe-instance-information \
-        --filters "Key=InstanceIds,Values=${instance_id}" \
-        --query "InstanceInformationList[0].PingStatus" --output text 2>/dev/null || echo "None")
-      if [[ "$ping_status" == "Online" ]]; then
-        echo "  $instance_id - SSM online"
-        break
-      fi
-      attempt=$((attempt + 1))
-      if [[ $attempt -ge $SSM_POLL_MAX_ATTEMPTS ]]; then
-        echo "ERROR: $instance_id did not become SSM-ready after $((SSM_POLL_MAX_ATTEMPTS * SSM_POLL_INTERVAL))s" >&2
-        exit 1
-      fi
-      sleep "$SSM_POLL_INTERVAL"
+  local attempt online missing
+  attempt=0
+  while true; do
+    online=$(aws ssm describe-instance-information \
+      --filters "Key=InstanceIds,Values=$(IFS=,; echo "${ALL_INSTANCE_IDS[*]}")" \
+      --query "InstanceInformationList[?PingStatus=='Online'].InstanceId" --output text 2>/dev/null || echo "")
+    missing=""
+    for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
+      [[ " ${online//[$'\t']/ } " == *" $instance_id "* ]] || missing="$missing $instance_id"
     done
+    if [[ -z "$missing" ]]; then
+      for instance_id in "${ALL_INSTANCE_IDS[@]}"; do echo "  $instance_id - SSM online"; done
+      break
+    fi
+    attempt=$((attempt + 1))
+    if [[ $attempt -ge $SSM_POLL_MAX_ATTEMPTS ]]; then
+      echo "ERROR:$missing did not become SSM-ready after $((SSM_POLL_MAX_ATTEMPTS * SSM_POLL_INTERVAL))s" >&2
+      exit 1
+    fi
+    sleep "$SSM_POLL_INTERVAL"
   done
   echo ""
 
+  phase_mark "SSM online check"
   # --- Step 3: environment readiness, and native build state ---
   echo ">>> Waiting for benchmark environment readiness on all instances..."
   # shellcheck disable=SC2016
@@ -411,21 +540,9 @@ run_all() {
 if [ -f /opt/benchmark-native-ready ]; then echo NATIVE=ready; echo "NATIVE_BUILD=$(cat /opt/benchmark-native/BUILD_INFO 2>/dev/null)"
 elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NATIVE=absent; fi'
   local native_commit first_commit="" first_build="" native_state build_line
+  par_run ready_worker "${ALL_INSTANCE_IDS[@]}" || exit 1
   for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-    attempt=0
-    while true; do
-      ssm_run "$instance_id" 30 "$READY_CMD" || true
-      if [[ "$SSM_OUT" == *"ENV=READY"* ]]; then
-        echo "  $instance_id - environment ready"
-        break
-      fi
-      attempt=$((attempt + 1))
-      if [[ $attempt -ge $READY_POLL_MAX_ATTEMPTS ]]; then
-        echo "ERROR: $instance_id environment not ready after $((READY_POLL_MAX_ATTEMPTS * READY_POLL_INTERVAL))s" >&2
-        exit 1
-      fi
-      sleep "$READY_POLL_INTERVAL"
-    done
+    SSM_OUT=$(cat "$WORK/ready.$instance_id")
     if [[ "$NEEDS_NATIVE" == "true" ]]; then
       native_state=$(echo "$SSM_OUT" | sed -n 's/^NATIVE=//p' | head -1)
       if [[ "$native_state" != "ready" ]]; then
@@ -452,14 +569,13 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
   [[ -n "$first_build" ]] && echo "Native-Build: $first_build"
   echo ""
 
+  phase_mark "environment readiness"
   # --- Step 4: preflight (clock + NIC), identical script on every instance ---
   echo ">>> Preflight: PHC, hardware timestamping and clock offset on all instances..."
   local PTP_FAIL=0
+  par_run pre_worker "${ALL_INSTANCE_IDS[@]}" || true
   for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-    ssm_upload "$instance_id" "$SCRIPT_DIR/preflight.sh" /tmp/preflight.sh || { echo "ERROR: could not upload preflight.sh to $instance_id" >&2; exit 1; }
-    ssm_run "$instance_id" 60 "bash /tmp/preflight.sh --max-offset-us $MAX_CLOCK_OFFSET_US" || true
-    printf '%s\n' "$SSM_OUT" > "$WORK/pre.$instance_id"
-    if [[ "$SSM_OUT" == *PASS* ]]; then
+    if grep -q '^PASS' "$WORK/pre.$instance_id"; then
       echo "  $instance_id - clock and NIC ready ($(grep '^system_time_us=' "$WORK/pre.$instance_id" | head -1))"
     else
       echo "  FAIL $instance_id - preflight failed:" >&2
@@ -480,25 +596,20 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     emit_clock_block "$instance_id" pre "$WORK/pre.$instance_id"
   done
   echo ""
-  # The host and NIC state the numbers were taken under (read-only).
-  local ami
+  phase_mark "preflight"
+  # The host and NIC state the numbers were taken under (read-only; collected with the preflight).
   for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-    ssm_run "$instance_id" 60 "bash /tmp/preflight.sh --context" || true
-    printf '%s\n' "$SSM_OUT" > "$WORK/ctx.$instance_id"
-    ami=$(aws ec2 describe-instances --instance-ids "$instance_id" --query "Reservations[0].Instances[0].ImageId" --output text)
-    emit_context_block "$instance_id" "$ami" "$WORK/ctx.$instance_id"
+    emit_context_block "$instance_id" "$(cat "$WORK/ami.$instance_id")" "$WORK/ctx.$instance_id"
   done
   echo ""
+  phase_mark "context"
 
   # --- mcast ---
   if tools_has mcast; then
     local send_bin recv_cmd start_cmd
     if [[ "$NEEDS_PYTHON" == "true" ]]; then
       echo ">>> Uploading Python multicast helpers..."
-      for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-        ssm_upload "$instance_id" "$SCRIPT_DIR/mcast_recv.py" /tmp/mcast_recv.py || { echo "ERROR: upload to $instance_id failed" >&2; exit 1; }
-        ssm_upload "$instance_id" "$SCRIPT_DIR/mcast_send.py" /tmp/mcast_send.py || { echo "ERROR: upload to $instance_id failed" >&2; exit 1; }
-      done
+      par_run py_upload_worker "${ALL_INSTANCE_IDS[@]}" || exit 1
       echo "  Scripts uploaded."
       echo ""
     fi
@@ -533,32 +644,14 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     local batch=0 incomplete s_id sender_out sender_ok
     while true; do
     batch=$((batch + 1))
-    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-      attempt=0
-      while true; do
-        attempt=$((attempt + 1))
-        ssm_run "$sub_id" 60 "$stop_cmd" || true
-        ssm_run "$sub_id" 60 "$start_cmd" || true
-        ssm_run "$sub_id" 60 "$READY_WAIT_CMD" || true
-        if [[ "$SSM_OUT" == *"RECV=READY"* ]]; then
-          echo "  $sub_id - multicast receiver ready"
-          break
-        fi
-        if [[ $attempt -ge 2 ]]; then
-          echo "ERROR: receiver on $sub_id did not become ready after $attempt attempts:" >&2
-          echo "$SSM_OUT" | sed 's/^/    /' >&2
-          exit 1
-        fi
-        echo "  $sub_id - receiver not ready (${SSM_OUT%%$'\n'*}); retrying once"
-      done
-    done
-
+    par_run recv_worker "${SUBSCRIBER_IDS[@]}" || exit 1
     echo "  Sending ${RATE} pps multicast for ${DURATION}s..."
     if [[ "$SENDER_IMPL" == "native" ]]; then
       send_bin="$NATIVE_BIN/mcast_send"
     else
       send_bin="python3 /tmp/mcast_send.py"
     fi
+    [[ -n "$SENDER_CPU" ]] && send_bin="taskset -c $SENDER_CPU $send_bin"
     sender_ok=true
     if ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "$send_bin $GROUP $PORT $RATE $DURATION $PUB_IP"; then
       sender_out="$SSM_OUT"
@@ -574,20 +667,7 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     # any that are still running so they write what they have.
     local DONE_CMD="for i in \$(seq 1 30); do pgrep -f '[m]cast_recv' >/dev/null || { echo RECV=DONE; exit 0; }; sleep 1; done; pkill -INT -f '[m]cast_recv'; sleep 3; echo RECV=INTERRUPTED"
     local DETAIL_PREFIX="s3://$S3_BUCKET/runs/$RUN_ID"
-    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-      ssm_run "$sub_id" 60 "$DONE_CMD" || true
-      [[ "$SSM_OUT" == *"RECV=INTERRUPTED"* ]] && echo "  $sub_id - receiver had to be interrupted (end marker never arrived?)"
-    done
-
-    # Pull each subscriber's result and its detail (histograms) file.
-    for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-      ssm_run "$sub_id" 30 "cat /tmp/mcast_result.json 2>/dev/null; true" || true
-      printf '%s\n' "$SSM_OUT" > "$WORK/res.$sub_id"
-      if [[ "$RECEIVER_IMPL" == "native" ]]; then
-        ssm_run "$sub_id" 60 "if [ -f /tmp/mcast_recv_detail.json ]; then aws s3 cp /tmp/mcast_recv_detail.json $DETAIL_PREFIX/$sub_id.detail.json --region $REGION --only-show-errors && echo DETAIL=UPLOADED; else echo DETAIL=MISSING; fi" || true
-        [[ "$SSM_OUT" == *"DETAIL=UPLOADED"* ]] || echo "  WARN $sub_id - detail file not uploaded; pooled percentiles will be unavailable"
-      fi
-    done
+    par_run collect_worker "${SUBSCRIBER_IDS[@]}" || true
     if [[ "$RECEIVER_IMPL" == "native" ]]; then
       mkdir -p "$DETAIL_DIR"
       aws s3 cp "$DETAIL_PREFIX/" "$DETAIL_DIR/" --recursive --region "$REGION" --only-show-errors || echo "  WARN could not download detail files from $DETAIL_PREFIX/"
@@ -600,6 +680,7 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     if [[ $incomplete -eq 0 || $batch -ge 2 ]]; then break; fi
     echo "  Phase A incomplete (the sender or a subscriber produced no usable result); rerunning the whole batch once"
     done
+    phase_mark "receiver start, send and collect (includes the ${DURATION}s send)"
     echo "--- SENDER $PUBLISHER_ID ---"
     cat "$WORK/sender.out"
     echo "--- END SENDER $PUBLISHER_ID ---"
@@ -614,14 +695,14 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     echo ""
 
     # Clock state after the run
+    par_run clock_worker "${ALL_INSTANCE_IDS[@]}" || true
     for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-      ssm_run "$instance_id" 30 "bash /tmp/preflight.sh --clock" || true
-      printf '%s\n' "$SSM_OUT" > "$WORK/post.$instance_id"
       emit_clock_block "$instance_id" post "$WORK/post.$instance_id"
     done
     echo ""
   fi
 
+  phase_mark "post-run clock state"
   # --- sockperf: unicast RTT baseline (no TGW) ---
   if tools_has sockperf; then
     echo ">>> Phase B: Unicast latency measurement (sockperf under-load)..."

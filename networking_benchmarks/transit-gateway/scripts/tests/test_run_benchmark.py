@@ -256,6 +256,13 @@ def test_bad_arguments_rejected_before_any_aws_call(lab, args):
     assert not lab.calls()
 
 
+def test_sender_can_be_pinned_to_a_cpu(lab):
+    p = lab.run("--sender-cpu", "1")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert lab.commands("taskset -c 1 /opt/benchmark-native/bin/mcast_send 239.1.1.1")
+    assert not lab.run("--sender-cpu", "x").returncode == 0
+
+
 def test_unicast_tools_still_produce_subscriber_blocks(lab):
     p = lab.run(tools="sockperf")
     assert p.returncode == 0, p.stdout + (p.stdout + p.stderr)
