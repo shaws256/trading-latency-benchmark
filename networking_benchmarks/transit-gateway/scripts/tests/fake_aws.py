@@ -42,6 +42,8 @@ def per_instance(table, inst, default):
 
 def respond(inst, cmd):
     """Output of one SSM command on one instance."""
+    if "echo SSH=OK" in cmd:
+        return "SSH=OK"
     if "ENV=READY" in cmd:
         state = per_instance("native", inst, "ready")
         lines = ["ENV=" + per_instance("env", inst, "READY"), "NATIVE=" + state]
@@ -58,30 +60,30 @@ def respond(inst, cmd):
         return "UPLOADED"
     if "preflight.sh --context" in cmd:
         return per_instance("context", inst, "kernel=6.1.0\ncpu_model=EPYC\ncpuidle_states=POLL:0us C1:1us C2:800us")
-    if "preflight.sh --clock" in cmd:
-        return "system_time_us=%s\nleap=Normal" % per_instance("post_clock", inst, "0.2")
-    if "nohup" in cmd and "mcast_recv" in cmd:
-        return "STARTED"
-    if "RECV=READY" in cmd:
-        seq = SC.get("recv_ready", {}).get(inst, ["RECV=READY"])
-        n = counter("ready." + inst)
-        return seq[min(n, len(seq)) - 1]
-    if "RECV=DONE" in cmd:
-        return per_instance("recv_done", inst, "RECV=DONE")
-    if "cat /tmp/mcast_result.json 2>/dev/null; true" in cmd:
+    if "=====RESULT=====" in cmd:   # one command: wait for the receiver, result, detail upload, clock
         res = per_instance("results", inst, "")
         if isinstance(res, list):  # one entry per collection, the last repeats
             n = counter("result." + inst)
-            return res[min(n, len(res)) - 1]
-        return res
-    if "mcast_recv_detail.json" in cmd and "s3 cp" in cmd:
-        if inst in SC.get("detail_missing", []):
-            return "DETAIL=MISSING"
-        m = re.search(r"s3://\S+/(\S+\.detail\.json)", cmd)
-        os.makedirs(BUCKET_DIR, exist_ok=True)
-        with open(os.path.join(BUCKET_DIR, os.path.basename(m.group(1))), "w") as f:
-            json.dump(SC.get("details", {}).get(inst, {}), f)
-        return "DETAIL=UPLOADED"
+            res = res[min(n, len(res)) - 1]
+        if "DETAIL=SKIPPED" in cmd:
+            detail = "DETAIL=SKIPPED"
+        elif inst in SC.get("detail_missing", []):
+            detail = "DETAIL=MISSING"
+        else:
+            m = re.search(r"s3://\S+/(\S+\.detail\.json)", cmd)
+            os.makedirs(BUCKET_DIR, exist_ok=True)
+            with open(os.path.join(BUCKET_DIR, os.path.basename(m.group(1))), "w") as f:
+                json.dump(SC.get("details", {}).get(inst, {}), f)
+            detail = "DETAIL=UPLOADED"
+        return "\n".join([per_instance("recv_done", inst, "RECV=DONE"), "=====RESULT=====", res,
+                          "=====DETAIL=====", detail, "=====CLOCK=====",
+                          "system_time_us=%s\nleap=Normal" % per_instance("post_clock", inst, "0.2")])
+    if "preflight.sh --clock" in cmd:
+        return "system_time_us=%s\nleap=Normal" % per_instance("post_clock", inst, "0.2")
+    if "RECV=READY" in cmd:         # one command: stop an old receiver, start this one, wait until ready
+        seq = SC.get("recv_ready", {}).get(inst, ["RECV=READY"])
+        n = counter("ready." + inst)
+        return seq[min(n, len(seq)) - 1]
     if re.search(r"mcast_send(\.py)? \d", cmd):
         return SC.get("sender", "")
     if "sockperf under-load" in cmd or "cat /tmp/sockperf_result.txt" in cmd:
@@ -94,6 +96,36 @@ def status_for(inst, cmd):
         return SC["sender_status"]
     return "Success"
 
+
+if sys.argv[1] == "__ssh__":
+    # Stand-in for `ssh [options] user@host bash -s`: the script arrives on stdin.
+    args = sys.argv[2:]
+    if "-O" in args:
+        sys.exit(0)
+    positional, i = [], 0
+    while i < len(args):
+        if args[i] in ("-i", "-o", "-S", "-p", "-l", "-F"):
+            i += 2
+            continue
+        if args[i].startswith("-"):
+            i += 1
+            continue
+        positional.append(args[i])
+        i += 1
+    host = positional[0].split("@")[-1]
+    inst = next((k for k, v in SC.get("public_ips", {}).items() if v == host), None)
+    if inst is None:
+        sys.stderr.write("fake ssh: unknown host %s\n" % host)
+        sys.exit(255)
+    failures = SC.get("ssh_fail_first", {}).get(inst, 0)
+    if counter("sshconn." + inst) <= failures:
+        sys.stderr.write("Permission denied (publickey).\n")
+        sys.exit(255)
+    cmd = sys.stdin.read()
+    with open(os.path.join(STATE, "calls.jsonl"), "a") as f:
+        f.write(json.dumps({"id": counter("cmdid"), "instance": inst, "command": cmd, "transport": "ssh"}) + "\n")
+    out(respond(inst, cmd))
+    sys.exit(1 if status_for(inst, cmd) == "Failed" else 0)
 
 svc, op = sys.argv[1], sys.argv[2]
 query = arg("--query", "")
@@ -110,7 +142,19 @@ elif svc == "cloudformation":
         out(SC["outputs"][key])
 elif svc == "ec2":
     inst = arg("--instance-ids")
-    if "ImageId" in query:
+    if "PublicIpAddress" in query and "InstanceId" in query:   # the whole table, one row per instance
+        ids = []
+        for tok in sys.argv[sys.argv.index("--instance-ids") + 1:]:
+            if tok.startswith("--"):
+                break
+            ids.append(tok)
+        rows = []
+        for i in ids:
+            rows.append("\t".join([i, SC["az"].get(i, "us-east-1a"), SC["ips"].get(i, "10.0.0.9"),
+                                   "ami-0123456789abcdef0", SC.get("instance_type", "m7i.large"),
+                                   SC.get("public_ips", {}).get(i, "None")]))
+        out("\n".join(rows))
+    elif "ImageId" in query:
         out("ami-0123456789abcdef0")
     elif "PrivateIpAddress" in query:
         out(SC["ips"].get(inst, "10.0.0.9"))
@@ -118,6 +162,11 @@ elif svc == "ec2":
         out(SC["az"].get(inst, "us-east-1a"))
     else:
         out(SC.get("instance_type", "m7i.large"))
+elif svc == "ec2-instance-connect":
+    inst = arg("--instance-id")
+    with open(os.path.join(STATE, "calls.jsonl"), "a") as f:
+        f.write(json.dumps({"id": counter("cmdid"), "instance": inst, "command": "__push_key__"}) + "\n")
+    out("True")
 elif svc == "ssm" and op == "describe-instance-information":
     if "Online" in query:   # the ids of the online instances among those asked for
         ids = arg("--filters").split("Values=")[1].split(",")

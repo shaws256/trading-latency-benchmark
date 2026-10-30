@@ -352,6 +352,28 @@ histograms** (not an average of per-subscriber percentiles), per path. Without
 the detail files the report says so and gives only exact quantities: counts, a
 sample-weighted mean, and the worst subscriber's p99.
 
+### Transport: SSM or SSH
+
+By default every command reaches the instances through SSM Run Command, which is what a
+production deployment should use (no inbound port, IAM-audited, works in private subnets).
+Each SSM command costs about 4 s of round trip. For development, `--transport ssh` sends the
+same commands over SSH instead:
+
+```bash
+scripts/run_benchmark.sh --stack-name TgwMulticastBenchmark --transport ssh ...
+```
+
+- A throwaway key is generated per run (or pass `--ssh-key PATH`), pushed to each instance with
+  EC2 Instance Connect (`ec2-instance-connect:SendSSHPublicKey`), and one SSH connection per
+  instance is reused for every command. Commands run as root through `sudo bash -s`, like SSM.
+- It needs public IPs and inbound port 22 (the stack's security group opens it), so it is a
+  development option only.
+- Both transports run the same scripts and produce the same raw stream. On an m7a.xlarge pair a
+  10 s run took 48 s over SSM and 37 s over SSH (the send is 10 s of that); the difference is
+  mostly per-command round trips. A run needs five command rounds: readiness, preflight and
+  context, receiver start (stop, start and ready-wait together), the send, and collection (wait,
+  result, detail upload and clock together).
+
 ### Comparing runs
 
 One run says little about whether two configurations differ; the run-to-run spread on identical

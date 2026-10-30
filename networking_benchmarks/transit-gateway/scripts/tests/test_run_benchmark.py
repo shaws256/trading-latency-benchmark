@@ -42,12 +42,14 @@ class Lab:
                         "S3BucketName": "bkt", "MulticastGroup": "239.1.1.1", "MulticastPort": "5001"},
             "az": {PUB: "us-east-1a", SUBS[0]: "us-east-1a", SUBS[1]: "us-east-1a"},
             "ips": {PUB: "10.0.0.5"},
+            "public_ips": {PUB: "54.0.0.1", SUBS[0]: "54.0.0.2", SUBS[1]: "54.0.0.3"},
             "sender": json.dumps(SENDER_OK),
             "results": {s: json.dumps(recv()) for s in SUBS},
             "details": {s: {"hist_hw_latency": _hist_json([150_000 + 1000 * i for i in range(200)])} for s in SUBS},
         }
         for name, body in (
             ("aws", f'#!/bin/sh\nexec "{sys.executable}" "{HERE / "fake_aws.py"}" "$@"\n'),
+            ("ssh", f'#!/bin/sh\nexec "{sys.executable}" "{HERE / "fake_aws.py"}" __ssh__ "$@"\n'),
             ("sleep", "#!/bin/sh\nexit 0\n"),
         ):
             p = self.bin / name
@@ -267,3 +269,72 @@ def test_unicast_tools_still_produce_subscriber_blocks(lab):
     p = lab.run(tools="sockperf")
     assert p.returncode == 0, p.stdout + (p.stdout + p.stderr)
     assert p.stdout.count("--- SUBSCRIBER ") == 2 and "avg-rtt=80.0" in p.stdout
+
+
+# ---------------------------------------------------------------------------
+# Merged command groups and the transport
+# ---------------------------------------------------------------------------
+
+def _runs(lab):
+    return [c for c in lab.calls() if c["command"] != "__push_key__"]
+
+
+def test_a_native_run_needs_five_command_rounds_and_twelve_commands(lab):
+    p = lab.run()
+    assert p.returncode == 0, p.stdout + p.stderr
+    # readiness, preflight (+context) and collection (+clock) once per instance; receiver start
+    # (stop, start and ready-wait together) once per subscriber; the sender once
+    assert len(_runs(lab)) == 3 + 3 + 2 + 1 + 3
+    assert len([c for c in _runs(lab) if "pkill" in c["command"] and "nohup" in c["command"]]) == 2
+
+
+def test_collection_command_returns_result_detail_and_clock_together(lab):
+    p = lab.run()
+    assert p.returncode == 0, p.stdout + p.stderr
+    sub_collect = [c for c in _runs(lab) if "=====RESULT=====" in c["command"]]
+    assert {c["instance"] for c in sub_collect} == set(SUBS)         # the publisher only reads its clock
+    assert all(f"/{c['instance']}.detail.json" in c["command"] for c in sub_collect)
+    clocks = tr.parse_clock(p.stdout)
+    assert set(clocks) == {PUB, *SUBS} and all("post" in v for v in clocks.values())
+
+
+def test_ssh_transport_runs_the_same_flow_without_ssm(lab):
+    p = lab.run("--transport", "ssh")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "Transport: ssh" in p.stdout and "RUN VALID" in p.stdout
+    runs = _runs(lab)
+    assert all(c.get("transport") == "ssh" for c in runs)
+    assert len([c for c in runs if "SSH=OK" in c["command"]]) == 3     # one connection check per instance
+    assert len(runs) == 3 + 12                                          # plus the same twelve commands as over SSM
+    pushes = [c for c in lab.calls() if c["command"] == "__push_key__"]
+    assert {c["instance"] for c in pushes} == {PUB, *SUBS}
+    assert len(tr.parse_subscribers(p.stdout)) == 2 and all(s.ok for s in tr.parse_subscribers(p.stdout))
+
+
+def test_ssh_transport_pushes_the_key_again_after_a_failed_connection(lab):
+    lab.scenario["ssh_fail_first"] = {SUBS[0]: 1}
+    p = lab.run("--transport", "ssh")
+    assert p.returncode == 0, p.stdout + p.stderr
+    pushes = [c for c in lab.calls() if c["command"] == "__push_key__" and c["instance"] == SUBS[0]]
+    assert len(pushes) == 2
+
+
+def test_ssh_transport_refuses_instances_without_a_public_ip(lab):
+    del lab.scenario["public_ips"][SUBS[1]]
+    p = lab.run("--transport", "ssh")
+    assert p.returncode != 0 and "no public IP" in p.stdout + p.stderr and "--transport ssm" in p.stdout + p.stderr
+
+
+def test_ssh_transport_leaves_no_control_sockets_behind(lab):
+    import glob
+    before = set(glob.glob("/tmp/tgwcm.*"))
+    assert lab.run("--transport", "ssh").returncode == 0
+    assert set(glob.glob("/tmp/tgwcm.*")) == before
+
+
+def test_bad_transport_and_key_arguments_are_rejected_early(lab):
+    assert lab.run("--transport", "telnet").returncode != 0
+    assert not lab.calls()
+    p = lab.run("--transport", "ssh", "--ssh-key", "/nonexistent/key")
+    assert p.returncode != 0 and "--ssh-key needs both" in p.stdout + p.stderr
+    assert lab.run("--ssh-user", "root; id").returncode != 0

@@ -41,6 +41,9 @@ MAX_CLOCK_OFFSET_US=10
 DETAIL_DIR=""
 RUNS_DIR=""
 SENDER_CPU=""
+TRANSPORT="ssm"
+SSH_KEY=""
+SSH_USER="ec2-user"
 
 VALID_TOOLS=(mcast sockperf iperf3)
 TOOL_ORDER=(mcast sockperf iperf3)
@@ -88,6 +91,13 @@ Options:
   --notes      TEXT    Additional notes for report
   --detail-dir DIR     Keep the receivers' histogram files here
   --sender-cpu N       Pin the multicast sender to CPU N (taskset)  [default: unpinned]
+  --transport T        How commands reach the instances: ssm (SSM Run Command) or
+                       ssh (dev only: EC2 Instance Connect key push + one reused SSH
+                       connection per instance; about 5x faster per command, needs
+                       public IPs and port 22).               [default: ssm]
+  --ssh-key PATH       Private key for --transport ssh (PATH.pub is pushed per run)
+                       [default: a throwaway key generated for the run]
+  --ssh-user USER      Login user for --transport ssh        [default: ec2-user]
   --runs-dir DIR       Where --save-report writes             [default: ../runs]
   --save-report        Save markdown report to runs/   [default: off]
 
@@ -120,6 +130,9 @@ while [[ $# -gt 0 ]]; do
     --detail-dir)    DETAIL_DIR="$2";    shift 2 ;;
     --runs-dir)      RUNS_DIR="$2";      shift 2 ;;
     --sender-cpu)    SENDER_CPU="$2";    shift 2 ;;
+    --transport)     TRANSPORT="$2";     shift 2 ;;
+    --ssh-key)       SSH_KEY="$2";       shift 2 ;;
+    --ssh-user)      SSH_USER="$2";      shift 2 ;;
     --tool)
       IFS=',' read -ra _parts <<< "$2"
       for _t in "${_parts[@]}"; do
@@ -162,6 +175,8 @@ require_num() { [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "ERROR: $1 must be a
 require_int --port "$PORT"
 require_int --rate "$RATE"
 require_int --duration "$DURATION"
+[[ "$TRANSPORT" == "ssm" || "$TRANSPORT" == "ssh" ]] || { echo "ERROR: --transport must be ssm or ssh, got '$TRANSPORT'" >&2; exit 1; }
+[[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "ERROR: --ssh-user has unexpected characters" >&2; exit 1; }
 [[ -z "$SENDER_CPU" || "$SENDER_CPU" =~ ^[0-9]+$ ]] || { echo "ERROR: --sender-cpu must be a CPU number, got '$SENDER_CPU'" >&2; exit 1; }
 require_num --max-loss-pct "$MAX_LOSS_PCT"
 require_num --max-clock-offset-us "$MAX_CLOCK_OFFSET_US"
@@ -200,6 +215,7 @@ tools_has mcast && { [[ "$SENDER_IMPL" == "python" || "$RECEIVER_IMPL" == "pytho
 [[ -z "$RUNS_DIR" ]] && RUNS_DIR="$TGW_DIR/runs"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tgw_bench.XXXXXXXX")"
+trap cleanup EXIT
 RAW_OUTPUT_FILE="$WORK/raw.txt"
 KEEP_DETAIL=false
 if [[ -n "$DETAIL_DIR" ]]; then
@@ -210,7 +226,7 @@ elif [[ "$SAVE_REPORT" == "true" ]]; then
 else
   DETAIL_DIR="$WORK/details"
 fi
-trap 'rm -rf "$WORK"' EXIT
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -248,23 +264,22 @@ ssm_send_command() {
     --output text
 }
 
-# ssm_run <instance> <timeout-secs> <command>; stdout goes to SSM_OUT, returns 1 on failure.
-SSM_OUT=""
-SSM_CALLS=0
-# phase_mark <name>: one "# timing" line per phase with the elapsed seconds and SSM calls since the last mark.
+# ssm_exec <instance> <timeout-secs> <command>: the SSM backend of remote_run.
+REMOTE_OUT=""
+REMOTE_CALLS=0
+# phase_mark <name>: one "# timing" line per phase with the elapsed seconds and remote calls since the last mark.
 PHASE_T0=$SECONDS
 PHASE_CALLS0=0
 phase_mark() {
-  echo "# timing: $1 took $((SECONDS - PHASE_T0))s, $((SSM_CALLS - PHASE_CALLS0)) SSM calls"
+  echo "# timing: $1 took $((SECONDS - PHASE_T0))s, $((REMOTE_CALLS - PHASE_CALLS0)) remote calls"
   PHASE_T0=$SECONDS
-  PHASE_CALLS0=$SSM_CALLS
+  PHASE_CALLS0=$REMOTE_CALLS
 }
 # One get-command-invocation call per poll returns the status and the output together.
-ssm_run() {
+ssm_exec() {
   local id elapsed=0 max=$(($2 + 30)) resp
-  SSM_CALLS=$((SSM_CALLS + 1))
-  SSM_OUT=""
-  SSM_STATUS=""
+  REMOTE_OUT=""
+  REMOTE_STATUS=""
   id=$(ssm_send_command "$1" "$3" "$2") || return 1
   while [[ $elapsed -lt $max ]]; do
     resp=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$1" --output json 2>/dev/null \
@@ -276,21 +291,106 @@ try:
 except ValueError:
     sys.stdout.write("Pending")
 ') || resp="Pending"
-    SSM_STATUS="${resp%%$'\n'*}"
-    if [[ "$resp" == *$'\n'* ]]; then SSM_OUT="${resp#*$'\n'}"; else SSM_OUT=""; fi
-    case "$SSM_STATUS" in
+    REMOTE_STATUS="${resp%%$'\n'*}"
+    if [[ "$resp" == *$'\n'* ]]; then REMOTE_OUT="${resp#*$'\n'}"; else REMOTE_OUT=""; fi
+    case "$REMOTE_STATUS" in
       Success) return 0 ;;
       Failed|TimedOut|Cancelled)
-        echo "ERROR: SSM command $id on $1 finished with status: $SSM_STATUS" >&2
+        echo "ERROR: SSM command $id on $1 finished with status: $REMOTE_STATUS" >&2
         return 1
         ;;
     esac
     sleep "$SSM_WAIT_INTERVAL"
     elapsed=$((elapsed + SSM_WAIT_INTERVAL))
   done
-  SSM_STATUS="WaitTimeout"
+  REMOTE_STATUS="WaitTimeout"
   echo "ERROR: Timed out waiting for SSM command $id on $1" >&2
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# SSH backend (dev): EC2 Instance Connect pushes a throwaway public key (valid for 60 s, which
+# only has to cover opening the connection) and one SSH connection per instance is reused for
+# every command. The command text goes in on stdin to `sudo bash -s`: SSM Run Command runs as
+# root, and the scripts need root (clock step, NIC timestamping, /sys). Because the text is on
+# stdin, quoting is not an issue and the remote process list never contains it (pkill -f stays safe).
+# ---------------------------------------------------------------------------
+SSH_CTL_DIR=""
+SSH_BASE=()
+ssh_setup() {
+  local t
+  for t in ssh ssh-keygen perl; do
+    command -v "$t" >/dev/null 2>&1 || { echo "ERROR: --transport ssh needs '$t' on this machine" >&2; exit 1; }
+  done
+  SSH_CTL_DIR=$(mktemp -d /tmp/tgwcm.XXXXXX)     # short path: unix socket paths are limited to ~104 bytes
+  if [[ -z "$SSH_KEY" ]]; then
+    SSH_KEY="$SSH_CTL_DIR/key"
+    ssh-keygen -q -t ed25519 -N "" -f "$SSH_KEY" >/dev/null
+  elif [[ ! -f "$SSH_KEY" || ! -f "$SSH_KEY.pub" ]]; then
+    echo "ERROR: --ssh-key needs both $SSH_KEY and $SSH_KEY.pub" >&2
+    exit 1
+  fi
+  SSH_BASE=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+            -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+            -o ControlMaster=auto -o ControlPersist=300 -o "ControlPath=$SSH_CTL_DIR/%C")
+}
+
+ssh_push_key() {
+  aws ec2-instance-connect send-ssh-public-key --instance-id "$1" --instance-os-user "$SSH_USER" \
+    --ssh-public-key "file://$SSH_KEY.pub" --query Success --output text >/dev/null
+}
+
+# ssh_exec <instance> <timeout-secs> <command>: the SSH backend of remote_run.
+ssh_exec() {
+  local id="$1" ip rc=0 retried=0
+  REMOTE_OUT=""
+  REMOTE_STATUS=""
+  ip=$(inst_field "$id" 6)
+  if [[ -z "$ip" || "$ip" == "None" ]]; then
+    echo "ERROR: $id has no public IP; use --transport ssm" >&2
+    REMOTE_STATUS="Failed"
+    return 1
+  fi
+  while true; do
+    rc=0
+    REMOTE_OUT=$(printf '%s\n' "$3" | perl -e 'alarm shift; exec @ARGV' "$(($2 + 30))" \
+      ssh "${SSH_BASE[@]}" "$SSH_USER@$ip" sudo bash -s 2> "$WORK/ssh.err.$id") || rc=$?
+    # 255 is a connection or authentication failure. The pushed key only authorizes a new
+    # connection for 60 s, so push again and retry once.
+    if [[ $rc -eq 255 && $retried -eq 0 ]]; then
+      retried=1
+      ssh_push_key "$id" || true
+      continue
+    fi
+    break
+  done
+  case $rc in
+    0) REMOTE_STATUS="Success"; return 0 ;;
+    142) REMOTE_STATUS="TimedOut"; echo "ERROR: command on $id timed out" >&2; return 1 ;;
+    *) REMOTE_STATUS="Failed"
+       echo "ERROR: command on $id failed (exit $rc)" >&2
+       [[ -s "$WORK/ssh.err.$id" ]] && sed 's/^/    ssh: /' "$WORK/ssh.err.$id" >&2
+       return 1 ;;
+  esac
+}
+
+# remote_run <instance> <timeout-secs> <command>: run a shell script on an instance over the
+# selected transport. Stdout goes to REMOTE_OUT, the outcome to REMOTE_STATUS; returns 1 unless
+# it succeeded. Callers that tolerate failure append `|| true`.
+remote_run() {
+  REMOTE_CALLS=$((REMOTE_CALLS + 1))
+  if [[ "$TRANSPORT" == "ssh" ]]; then ssh_exec "$@"; else ssm_exec "$@"; fi
+}
+
+cleanup() {
+  local sock
+  if [[ -n "$SSH_CTL_DIR" && -d "$SSH_CTL_DIR" ]]; then
+    for sock in "$SSH_CTL_DIR"/*; do
+      [[ -S "$sock" ]] && ssh -o "ControlPath=$sock" -O exit placeholder >/dev/null 2>&1
+    done
+    rm -rf "$SSH_CTL_DIR"
+  fi
+  rm -rf "$WORK"
 }
 
 # par_run <function> <id...>: run "<function> <id>" for every id at the same time. Each one's
@@ -312,23 +412,24 @@ par_run() {
   return $rc
 }
 
-# ssm_upload <instance> <local file> <remote path>
-ssm_upload() {
+# remote_upload <instance> <local file> <remote path>
+remote_upload() {
   local b64
   b64=$(python3 -c 'import base64,sys; sys.stdout.write(base64.b64encode(open(sys.argv[1],"rb").read()).decode())' "$2")
-  ssm_run "$1" 30 "echo '$b64' | base64 -d > '$3' && chmod +x '$3' && echo UPLOADED" || return 1
-  [[ "$SSM_OUT" == *UPLOADED* ]]
+  remote_run "$1" 30 "echo '$b64' | base64 -d > '$3' && chmod +x '$3' && echo UPLOADED" || return 1
+  [[ "$REMOTE_OUT" == *UPLOADED* ]]
 }
 
-get_private_ip() {
-  aws ec2 describe-instances --instance-ids "$1" \
-    --query "Reservations[0].Instances[0].PrivateIpAddress" --output text
+# One describe-instances call fills $WORK/inst.tsv: id, availability zone, private IP,
+# AMI, instance type, public IP (tab separated).
+load_instances() {
+  aws ec2 describe-instances --instance-ids "$@" \
+    --query "Reservations[].Instances[].[InstanceId,Placement.AvailabilityZone,PrivateIpAddress,ImageId,InstanceType,PublicIpAddress]" \
+    --output text > "$WORK/inst.tsv"
 }
-
-get_az() {
-  aws ec2 describe-instances --instance-ids "$1" \
-    --query "Reservations[0].Instances[0].Placement.AvailabilityZone" --output text
-}
+inst_field() { awk -F'\t' -v id="$1" -v c="$2" '$1 == id {print $c; exit}' "$WORK/inst.tsv"; }
+get_private_ip() { inst_field "$1" 3; }
+get_az() { inst_field "$1" 2; }
 
 # emit_clock_block <instance> <pre|post> <file with key=value lines>
 emit_clock_block() {
@@ -381,12 +482,19 @@ PY
 # Per-instance workers for par_run. They read run_all's variables (bash scopes locals
 # dynamically) and write what the caller needs to files under $WORK.
 # ---------------------------------------------------------------------------
+ssh_open_worker() {
+  local id="$1"
+  ssh_push_key "$id" || { echo "ERROR: could not push an SSH key to $id (needs ec2-instance-connect:SendSSHPublicKey)" >&2; return 1; }
+  remote_run "$id" 30 "echo SSH=OK" || return 1
+  [[ "$REMOTE_OUT" == *SSH=OK* ]] && echo "  $id - SSH connected"
+}
+
 ready_worker() {
   local id="$1" attempt=0
   while true; do
-    ssm_run "$id" 30 "$READY_CMD" || true
-    if [[ "$SSM_OUT" == *"ENV=READY"* ]]; then
-      printf '%s\n' "$SSM_OUT" > "$WORK/ready.$id"
+    remote_run "$id" 30 "$READY_CMD" || true
+    if [[ "$REMOTE_OUT" == *"ENV=READY"* ]]; then
+      printf '%s\n' "$REMOTE_OUT" > "$WORK/ready.$id"
       echo "  $id - environment ready"
       return 0
     fi
@@ -403,61 +511,63 @@ ready_worker() {
 pre_worker() {
   local id="$1" b64 out
   b64=$(python3 -c 'import base64,sys; sys.stdout.write(base64.b64encode(open(sys.argv[1],"rb").read()).decode())' "$SCRIPT_DIR/preflight.sh")
-  ssm_run "$id" 90 "echo '$b64' | base64 -d > /tmp/preflight.sh && chmod +x /tmp/preflight.sh && bash /tmp/preflight.sh --max-offset-us $MAX_CLOCK_OFFSET_US; echo '=====CONTEXT====='; bash /tmp/preflight.sh --context" || true
-  out="$SSM_OUT"
+  remote_run "$id" 90 "echo '$b64' | base64 -d > /tmp/preflight.sh && chmod +x /tmp/preflight.sh && bash /tmp/preflight.sh --max-offset-us $MAX_CLOCK_OFFSET_US; echo '=====CONTEXT====='; bash /tmp/preflight.sh --context" || true
+  out="$REMOTE_OUT"
   printf '%s\n' "${out%%=====CONTEXT=====*}" > "$WORK/pre.$id"
   if [[ "$out" == *"=====CONTEXT====="* ]]; then
     printf '%s\n' "${out#*=====CONTEXT=====}" > "$WORK/ctx.$id"
   else
     : > "$WORK/ctx.$id"
   fi
-  aws ec2 describe-instances --instance-ids "$id" --query "Reservations[0].Instances[0].ImageId" --output text > "$WORK/ami.$id"
+  inst_field "$id" 4 > "$WORK/ami.$id"
 }
 
 py_upload_worker() {
   local id="$1"
-  ssm_upload "$id" "$SCRIPT_DIR/mcast_recv.py" /tmp/mcast_recv.py || { echo "ERROR: upload to $id failed" >&2; return 1; }
-  ssm_upload "$id" "$SCRIPT_DIR/mcast_send.py" /tmp/mcast_send.py || { echo "ERROR: upload to $id failed" >&2; return 1; }
+  remote_upload "$id" "$SCRIPT_DIR/mcast_recv.py" /tmp/mcast_recv.py || { echo "ERROR: upload to $id failed" >&2; return 1; }
+  remote_upload "$id" "$SCRIPT_DIR/mcast_send.py" /tmp/mcast_send.py || { echo "ERROR: upload to $id failed" >&2; return 1; }
 }
 
 # Start a subscriber's receiver and wait until it is listening; one retry, then fail.
 recv_worker() {
-  local id="$1" attempt=0
+  local id="$1" attempt=0 status
   while true; do
     attempt=$((attempt + 1))
-    ssm_run "$id" 60 "$stop_cmd" || true
-    ssm_run "$id" 60 "$start_cmd" || true
-    ssm_run "$id" 60 "$READY_WAIT_CMD" || true
-    if [[ "$SSM_OUT" == *"RECV=READY"* ]]; then
+    remote_run "$id" 90 "$RECV_START_CMD" || true
+    status=$(echo "$REMOTE_OUT" | grep -m1 '^RECV=' || true)
+    if [[ "$status" == "RECV=READY" ]]; then
       echo "  $id - multicast receiver ready"
       return 0
     fi
     if [[ $attempt -ge 2 ]]; then
       echo "ERROR: receiver on $id did not become ready after $attempt attempts:" >&2
-      echo "$SSM_OUT" | sed 's/^/    /' >&2
+      echo "$REMOTE_OUT" | sed 's/^/    /' >&2
       return 1
     fi
-    echo "  $id - receiver not ready (${SSM_OUT%%$'\n'*}); retrying once"
+    echo "  $id - receiver not ready (${status:-no status}); retrying once"
   done
 }
 
-# After the send: wait for the receiver to finish, then fetch its result and upload its detail file.
+# After the send, one command per instance: a subscriber waits for its receiver to finish, prints
+# its result, uploads its detail file and reads the clock; the publisher only reads the clock.
 collect_worker() {
-  local id="$1"
-  ssm_run "$id" 60 "$DONE_CMD" || true
-  [[ "$SSM_OUT" == *"RECV=INTERRUPTED"* ]] && echo "  $id - receiver had to be interrupted (end marker never arrived?)"
-  ssm_run "$id" 30 "cat /tmp/mcast_result.json 2>/dev/null; true" || true
-  printf '%s\n' "$SSM_OUT" > "$WORK/res.$id"
-  if [[ "$RECEIVER_IMPL" == "native" ]]; then
-    ssm_run "$id" 60 "if [ -f /tmp/mcast_recv_detail.json ]; then aws s3 cp /tmp/mcast_recv_detail.json $DETAIL_PREFIX/$id.detail.json --region $REGION --only-show-errors && echo DETAIL=UPLOADED; else echo DETAIL=MISSING; fi" || true
-    [[ "$SSM_OUT" == *"DETAIL=UPLOADED"* ]] || echo "  WARN $id - detail file not uploaded; pooled percentiles will be unavailable"
+  local id="$1" rest res det
+  if [[ "$id" == "$PUBLISHER_ID" ]]; then
+    remote_run "$id" 30 "bash /tmp/preflight.sh --clock" || true
+    printf '%s\n' "$REMOTE_OUT" > "$WORK/post.$id"
+    return 0
+  fi
+  remote_run "$id" 120 "${COLLECT_CMD//@ID@/$id}" || true
+  [[ "$REMOTE_OUT" == *"RECV=INTERRUPTED"* ]] && echo "  $id - receiver had to be interrupted (end marker never arrived?)"
+  rest="${REMOTE_OUT#*=====RESULT=====}"
+  printf '%s\n' "${rest%%=====DETAIL=====*}" > "$WORK/res.$id"
+  rest="${rest#*=====DETAIL=====}"
+  det="${rest%%=====CLOCK=====*}"
+  printf '%s\n' "${rest#*=====CLOCK=====}" > "$WORK/post.$id"
+  if [[ "$RECEIVER_IMPL" == "native" && "$det" != *"DETAIL=UPLOADED"* ]]; then
+    echo "  WARN $id - detail file not uploaded; pooled percentiles will be unavailable"
   fi
   return 0
-}
-
-clock_worker() {
-  ssm_run "$1" 30 "bash /tmp/preflight.sh --clock" || true
-  printf '%s\n' "$SSM_OUT" > "$WORK/post.$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -497,10 +607,11 @@ run_all() {
   IFS=',' read -ra SUBSCRIBER_IDS <<< "$SUBSCRIBER_IDS_CSV"
   ALL_INSTANCE_IDS=("$PUBLISHER_ID" "${SUBSCRIBER_IDS[@]}")
 
+  load_instances "${ALL_INSTANCE_IDS[@]}"
   local ITYPE="$INSTANCE_TYPE"
-  [[ -z "$ITYPE" ]] && ITYPE=$(aws ec2 describe-instances --instance-ids "$PUBLISHER_ID" \
-    --query "Reservations[0].Instances[0].InstanceType" --output text)
+  [[ -z "$ITYPE" ]] && ITYPE=$(inst_field "$PUBLISHER_ID" 5)
   echo "Instance-Type: $ITYPE"
+  echo "Transport: $TRANSPORT"
   echo "  Publisher:   $PUBLISHER_ID"
   echo "  Subscribers: ${SUBSCRIBER_IDS[*]}"
   echo "  S3 Bucket:   $S3_BUCKET"
@@ -510,29 +621,33 @@ run_all() {
   # --- Step 2: SSM online ---
   echo ">>> Waiting for all instances to be SSM-ready..."
   local attempt online missing
-  attempt=0
-  while true; do
-    online=$(aws ssm describe-instance-information \
-      --filters "Key=InstanceIds,Values=$(IFS=,; echo "${ALL_INSTANCE_IDS[*]}")" \
-      --query "InstanceInformationList[?PingStatus=='Online'].InstanceId" --output text 2>/dev/null || echo "")
-    missing=""
-    for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-      [[ " ${online//[$'\t']/ } " == *" $instance_id "* ]] || missing="$missing $instance_id"
+  if [[ "$TRANSPORT" == "ssh" ]]; then
+    par_run ssh_open_worker "${ALL_INSTANCE_IDS[@]}" || exit 1
+  else
+      attempt=0
+    while true; do
+      online=$(aws ssm describe-instance-information \
+        --filters "Key=InstanceIds,Values=$(IFS=,; echo "${ALL_INSTANCE_IDS[*]}")" \
+        --query "InstanceInformationList[?PingStatus=='Online'].InstanceId" --output text 2>/dev/null || echo "")
+      missing=""
+      for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
+        [[ " ${online//[$'\t']/ } " == *" $instance_id "* ]] || missing="$missing $instance_id"
+      done
+      if [[ -z "$missing" ]]; then
+        for instance_id in "${ALL_INSTANCE_IDS[@]}"; do echo "  $instance_id - SSM online"; done
+        break
+      fi
+      attempt=$((attempt + 1))
+      if [[ $attempt -ge $SSM_POLL_MAX_ATTEMPTS ]]; then
+        echo "ERROR:$missing did not become SSM-ready after $((SSM_POLL_MAX_ATTEMPTS * SSM_POLL_INTERVAL))s" >&2
+        exit 1
+      fi
+      sleep "$SSM_POLL_INTERVAL"
     done
-    if [[ -z "$missing" ]]; then
-      for instance_id in "${ALL_INSTANCE_IDS[@]}"; do echo "  $instance_id - SSM online"; done
-      break
-    fi
-    attempt=$((attempt + 1))
-    if [[ $attempt -ge $SSM_POLL_MAX_ATTEMPTS ]]; then
-      echo "ERROR:$missing did not become SSM-ready after $((SSM_POLL_MAX_ATTEMPTS * SSM_POLL_INTERVAL))s" >&2
-      exit 1
-    fi
-    sleep "$SSM_POLL_INTERVAL"
-  done
+  fi
   echo ""
 
-  phase_mark "SSM online check"
+  phase_mark "transport check"
   # --- Step 3: environment readiness, and native build state ---
   echo ">>> Waiting for benchmark environment readiness on all instances..."
   # shellcheck disable=SC2016
@@ -542,20 +657,20 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
   local native_commit first_commit="" first_build="" native_state build_line
   par_run ready_worker "${ALL_INSTANCE_IDS[@]}" || exit 1
   for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
-    SSM_OUT=$(cat "$WORK/ready.$instance_id")
+    REMOTE_OUT=$(cat "$WORK/ready.$instance_id")
     if [[ "$NEEDS_NATIVE" == "true" ]]; then
-      native_state=$(echo "$SSM_OUT" | sed -n 's/^NATIVE=//p' | head -1)
+      native_state=$(echo "$REMOTE_OUT" | sed -n 's/^NATIVE=//p' | head -1)
       if [[ "$native_state" != "ready" ]]; then
         echo "ERROR: $instance_id has no native build (state: ${native_state:-unknown})." >&2
         echo "       Refusing to continue: a silent fallback to Python would change what is measured." >&2
-        if ssm_run "$instance_id" 30 "tail -n 20 /var/log/benchmark-native-build.log 2>/dev/null; true"; then
-          echo "$SSM_OUT" | sed 's/^/       | /' >&2
+        if remote_run "$instance_id" 30 "tail -n 20 /var/log/benchmark-native-build.log 2>/dev/null; true"; then
+          echo "$REMOTE_OUT" | sed 's/^/       | /' >&2
         fi
         echo "       Fix the build (native_repo / native_ref must be reachable and contain the sources)" >&2
         echo "       or run with --impl python." >&2
         exit 1
       fi
-      build_line=$(echo "$SSM_OUT" | sed -n 's/^NATIVE_BUILD=//p' | head -1)
+      build_line=$(echo "$REMOTE_OUT" | sed -n 's/^NATIVE_BUILD=//p' | head -1)
       native_commit=$(echo "$build_line" | sed -n 's/^commit=\([0-9a-f]*\).*/\1/p')
       if [[ -z "$first_commit" ]]; then
         first_commit="$native_commit"
@@ -632,13 +747,15 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     # Wait for the receiver to be listening. Native receivers write a ready file after they
     # join the group and enable stamping; the Python receiver has no such signal, so it gets
     # a fixed settle time and a liveness check.
-    local READY_WAIT_CMD
+    local READY_WAIT_CMD RECV_START_CMD COLLECT_CMD
     if [[ "$RECEIVER_IMPL" == "native" ]]; then
       READY_WAIT_CMD="for i in \$(seq 1 50); do [ -f /tmp/mcast_recv.ready ] && { echo RECV=READY; exit 0; }; pgrep -f '[m]cast_recv' >/dev/null || { echo RECV=DEAD; cat /tmp/mcast_result.json /tmp/mcast_recv.err 2>/dev/null; exit 0; }; sleep 0.2; done; echo RECV=TIMEOUT"
     else
       READY_WAIT_CMD="sleep $RECEIVER_SETTLE_SECS; pgrep -f '[m]cast_recv' >/dev/null && echo RECV=READY || { echo RECV=DEAD; cat /tmp/mcast_result.json /tmp/mcast_recv.err 2>/dev/null; }"
     fi
 
+    # Stop any old receiver, start this one and wait until it is listening: one command, one round trip.
+    RECV_START_CMD="$stop_cmd"$'\n'"$start_cmd"$'\n'"$READY_WAIT_CMD"
     # The whole batch (start receivers, send, collect) runs again once if the sender or any
     # subscriber produced no usable result; the second outcome is the one reported.
     local batch=0 incomplete s_id sender_out sender_ok
@@ -653,11 +770,11 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     fi
     [[ -n "$SENDER_CPU" ]] && send_bin="taskset -c $SENDER_CPU $send_bin"
     sender_ok=true
-    if ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "$send_bin $GROUP $PORT $RATE $DURATION $PUB_IP"; then
-      sender_out="$SSM_OUT"
+    if remote_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "$send_bin $GROUP $PORT $RATE $DURATION $PUB_IP"; then
+      sender_out="$REMOTE_OUT"
     else
       sender_ok=false
-      sender_out="{\"error\":\"sender command did not complete (SSM status: ${SSM_STATUS:-unknown})\"}"
+      sender_out="{\"error\":\"sender command did not complete (SSM status: ${REMOTE_STATUS:-unknown})\"}"
     fi
     printf '%s\n' "$sender_out" > "$WORK/sender.out"
     [[ "$sender_ok" == "true" ]] && echo "  Multicast send complete." || echo "  Multicast send FAILED." >&2
@@ -665,9 +782,20 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
 
     # Receivers finish on their own after the end marker. Give them a moment, then interrupt
     # any that are still running so they write what they have.
-    local DONE_CMD="for i in \$(seq 1 30); do pgrep -f '[m]cast_recv' >/dev/null || { echo RECV=DONE; exit 0; }; sleep 1; done; pkill -INT -f '[m]cast_recv'; sleep 3; echo RECV=INTERRUPTED"
     local DETAIL_PREFIX="s3://$S3_BUCKET/runs/$RUN_ID"
-    par_run collect_worker "${SUBSCRIBER_IDS[@]}" || true
+    local DETAIL_CMD="echo DETAIL=SKIPPED"
+    if [[ "$RECEIVER_IMPL" == "native" ]]; then
+      DETAIL_CMD="if [ -f /tmp/mcast_recv_detail.json ]; then aws s3 cp /tmp/mcast_recv_detail.json $DETAIL_PREFIX/@ID@.detail.json --region $REGION --only-show-errors && echo DETAIL=UPLOADED; else echo DETAIL=MISSING; fi"
+    fi
+    COLLECT_CMD="for i in \$(seq 1 30); do pgrep -f '[m]cast_recv' >/dev/null || break; sleep 1; done
+if pgrep -f '[m]cast_recv' >/dev/null; then pkill -INT -f '[m]cast_recv'; sleep 3; echo RECV=INTERRUPTED; else echo RECV=DONE; fi
+echo '=====RESULT====='
+cat /tmp/mcast_result.json 2>/dev/null
+echo '=====DETAIL====='
+$DETAIL_CMD
+echo '=====CLOCK====='
+bash /tmp/preflight.sh --clock"
+    par_run collect_worker "${ALL_INSTANCE_IDS[@]}" || true
     if [[ "$RECEIVER_IMPL" == "native" ]]; then
       mkdir -p "$DETAIL_DIR"
       aws s3 cp "$DETAIL_PREFIX/" "$DETAIL_DIR/" --recursive --region "$REGION" --only-show-errors || echo "  WARN could not download detail files from $DETAIL_PREFIX/"
@@ -694,8 +822,7 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     done
     echo ""
 
-    # Clock state after the run
-    par_run clock_worker "${ALL_INSTANCE_IDS[@]}" || true
+    # Clock state after the run was read together with the results.
     for instance_id in "${ALL_INSTANCE_IDS[@]}"; do
       emit_clock_block "$instance_id" post "$WORK/post.$instance_id"
     done
@@ -709,29 +836,29 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     local sub_ip result_output
     for sub_id in "${SUBSCRIBER_IDS[@]}"; do
       sub_ip=$(get_private_ip "$sub_id")
-      ssm_run "$sub_id" 60 "pkill -f 'sockperf server' 2>/dev/null || true; pkill -f '[m]cast_recv' 2>/dev/null || true; fuser -k ${PORT}/udp 2>/dev/null || true; sleep 2; nohup sockperf server --ip ${sub_ip} --port ${PORT} > /tmp/sockperf_server.txt 2>&1 < /dev/null &" || true
+      remote_run "$sub_id" 60 "pkill -f 'sockperf server' 2>/dev/null || true; pkill -f '[m]cast_recv' 2>/dev/null || true; fuser -k ${PORT}/udp 2>/dev/null || true; sleep 2; nohup sockperf server --ip ${sub_ip} --port ${PORT} > /tmp/sockperf_server.txt 2>&1 < /dev/null &" || true
       echo "  $sub_id ($sub_ip) - sockperf server started"
     done
     sleep "$RECEIVER_SETTLE_SECS"
     for sub_id in "${SUBSCRIBER_IDS[@]}"; do
-      ssm_run "$sub_id" 30 "cat /tmp/sockperf_server.txt 2>/dev/null; ss -ulnp | grep ${PORT}" || true
-      echo "  $sub_id server status: $SSM_OUT"
+      remote_run "$sub_id" 30 "cat /tmp/sockperf_server.txt 2>/dev/null; ss -ulnp | grep ${PORT}" || true
+      echo "  $sub_id server status: $REMOTE_OUT"
     done
     for sub_id in "${SUBSCRIBER_IDS[@]}"; do
       sub_ip=$(get_private_ip "$sub_id")
       echo "  Running sockperf under-load -> $sub_id ($sub_ip)..."
       result_output=""
-      if ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "sockperf under-load --ip ${sub_ip} --port ${PORT} --mps ${RATE} --time ${DURATION} --reply-every 1 --full-rtt 2>&1 | tee /tmp/sockperf_result.txt"; then
-        ssm_run "$PUBLISHER_ID" 60 "cat /tmp/sockperf_result.txt" || true
-        result_output="$SSM_OUT"
+      if remote_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "sockperf under-load --ip ${sub_ip} --port ${PORT} --mps ${RATE} --time ${DURATION} --reply-every 1 --full-rtt 2>&1 | tee /tmp/sockperf_result.txt"; then
+        remote_run "$PUBLISHER_ID" 60 "cat /tmp/sockperf_result.txt" || true
+        result_output="$REMOTE_OUT"
       else
-        result_output="ERROR: sockperf did not complete (SSM status: ${SSM_STATUS:-unknown})"
+        result_output="ERROR: sockperf did not complete (SSM status: ${REMOTE_STATUS:-unknown})"
       fi
       echo "--- SUBSCRIBER $sub_id ---"
       echo "$result_output"
       echo "--- END $sub_id ---"
       echo ""
-      ssm_run "$sub_id" 30 "pkill -f 'sockperf server' || true" || true
+      remote_run "$sub_id" 30 "pkill -f 'sockperf server' || true" || true
     done
   fi
 
@@ -741,18 +868,18 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
     local sub_ip result_output
     for sub_id in "${SUBSCRIBER_IDS[@]}"; do
       sub_ip=$(get_private_ip "$sub_id")
-      ssm_run "$sub_id" 60 "pkill -f 'iperf3 -s' 2>/dev/null || true; fuser -k ${PORT}/udp 2>/dev/null || true; sleep 2; nohup iperf3 -s -p ${PORT} > /tmp/benchmark_result.txt 2>&1 < /dev/null &" || true
+      remote_run "$sub_id" 60 "pkill -f 'iperf3 -s' 2>/dev/null || true; fuser -k ${PORT}/udp 2>/dev/null || true; sleep 2; nohup iperf3 -s -p ${PORT} > /tmp/benchmark_result.txt 2>&1 < /dev/null &" || true
       echo "  $sub_id ($sub_ip) - iperf3 server started"
     done
     sleep "$RECEIVER_SETTLE_SECS"
     for sub_id in "${SUBSCRIBER_IDS[@]}"; do
       sub_ip=$(get_private_ip "$sub_id")
       echo "  Running iperf3 -> $sub_id ($sub_ip)..."
-      ssm_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "iperf3 -c ${sub_ip} -u -p ${PORT} -b ${RATE}k -t ${DURATION} 2>&1 | tee /tmp/iperf3_result.txt" || true
-      if ssm_run "$sub_id" 60 "pkill -f 'iperf3 -s' || true; sleep 1; cat /tmp/benchmark_result.txt"; then
-        result_output="$SSM_OUT"
+      remote_run "$PUBLISHER_ID" "$SENDER_TIMEOUT" "iperf3 -c ${sub_ip} -u -p ${PORT} -b ${RATE}k -t ${DURATION} 2>&1 | tee /tmp/iperf3_result.txt" || true
+      if remote_run "$sub_id" 60 "pkill -f 'iperf3 -s' || true; sleep 1; cat /tmp/benchmark_result.txt"; then
+        result_output="$REMOTE_OUT"
       else
-        result_output="ERROR: iperf3 did not complete (SSM status: ${SSM_STATUS:-unknown})"
+        result_output="ERROR: iperf3 did not complete (SSM status: ${REMOTE_STATUS:-unknown})"
       fi
       echo "--- SUBSCRIBER $sub_id ---"
       echo "$result_output"
@@ -768,6 +895,7 @@ elif [ -f /opt/benchmark-native-failed ]; then echo NATIVE=failed; else echo NAT
 # ---------------------------------------------------------------------------
 # Run, then judge. run_all's output is both shown and kept as the raw stream.
 # ---------------------------------------------------------------------------
+if [[ "$TRANSPORT" == "ssh" ]]; then ssh_setup; fi
 set +e
 run_all 2>&1 | tee "$RAW_OUTPUT_FILE"
 RUN_RC=${PIPESTATUS[0]}
