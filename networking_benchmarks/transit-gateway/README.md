@@ -171,7 +171,7 @@ The native sender/receiver is built **on each instance at launch** by a sparse
 from the instances: a local, unpushed branch cannot be built. To test a branch
 from a fork, push it and pass `-c native_repo=<fork url> -c native_ref=<branch>`.
 During development you can instead copy the working tree to a running host and rebuild
-(`tar czf` the `scripts/native` directory, `scp` it, `make BUILD=/opt/benchmark-native/bin all`);
+(`tar czf` the `scripts/native` directory, `scp` it, `make -B BUILD=/opt/benchmark-native/bin all`; `-B` is needed because the archive keeps old file times and plain `make` can decide the binaries are current);
 the instances have no key pair, so push a temporary key with
 `aws ec2-instance-connect send-ssh-public-key` first. The orchestrator then reports
 `repo=scp-working-tree` in `Native-Build`.

@@ -43,7 +43,7 @@ Reference implementation: `networking_benchmarks/af_xdp/` (merged), plus the loc
 | P1-5 readiness | Done for native (ready file, one retry, then abort); the Python receiver keeps a fixed settle plus a liveness check | `run_benchmark.sh` |
 | P1-6 loss accounting | Done and verified on EC2 (duplicates, out-of-order, socket drops, 2% gate) | `native/`, `tgw_results.py` |
 | P1-7 native sender/receiver | Done, wired, verified on EC2 (built on the instances; dev sync by SCP also works) | `stacks/benchmark_stack.py`, `run_benchmark.sh` |
-| P1-8 host tuning | Open by design: outline only, nothing implemented | below |
+| P1-8 host tuning | Evaluated on EC2, nothing built: IRQ pinning, `irqbalance` off and C2 off showed no effect beyond noise; see P1-8 | below |
 | P2-1 repeats and warm-up | Mostly done. The receiver drops the first 2 s from latency statistics (`MCAST_WARMUP_SECS`, loss still counted); p99.9 is withheld under 100,000 samples; `compare_runs.py` reports the per-run spread and a bootstrap interval over runs (5+ runs per group, otherwise the min-max spread). Repeats are still launched by hand | `native/`, `tgw_results.py`, `compare_runs.py` |
 | P2-2 clock uncertainty | Open by request. Only the before/after System time gate exists | |
 | P2-3 report and parser bugs | Done. Header regex, instance type, stale default, and a single sockperf parser verified against real output (see the found-bugs note) | `tgw_results.py`, `tests/fixtures/sockperf_under_load.txt` |
@@ -175,7 +175,7 @@ Measured with the native tools; every run was valid with 0 or negligible loss.
 - **Not covered by container tests.** The real `SIOCSHWTSTAMP` path and raw hardware stamp, ENA behavior, real x86 hardware timing, and any real latency number. These need the EC2 run.
 - **Effort.** Sender S-M, receiver M-L. Do the sender first.
 
-### P1-8. Host and NIC tuning (outline only, not implemented)
+### P1-8. Host and NIC tuning (evaluated on EC2; nothing implemented)
 
 **Issue.** The stack applies only sysctls (`rmem_max`, `rp_filter`, `busy_poll=busy_read=50`). The af_xdp AMI (`bake-ami.sh`) additionally pins IRQs, disables coalescing, sets low-latency NAPI, isolates cores, limits C-states and forces a clock step. The live TGW hosts show: adaptive RX coalescing on (rx-usecs 20, tx-usecs 64), `irqbalance` active, `napi_defer_hard_irqs=0`, the `C2` idle state advertised at 800 µs, no cpufreq governor (AMD guest), no kernel command-line tuning, and one IRQ pair spread over both vCPUs.
 
@@ -193,9 +193,24 @@ Measured with the native tools; every run was valid with 0 or negligible loss.
 
 Not recommended for this case: `isolcpus`/`nohz_full`/`rcu_nocbs`/`nosmt`/hugepages and the `ena-xdp-queues` and busy-poll NAPI units (they serve AF_XDP busy-polling); receive coalescing off and `max_cstate` limits (they change the software stamp, not the headline) unless the goal becomes endpoint-to-endpoint latency.
 
-**Experiment before building anything (cheap, reversible, no reboot).** The open question is where the 1k/10k level shifts come from. Disable the `C2` state at runtime on the sender only (`echo 1 > /sys/devices/system/cpu/cpu*/cpuidle/state2/disable`) and repeat 1k pps five times against five without it; then do the same on the receivers. If the level shifts disappear only with the sender change, the sender wake-up is implicated; if neither changes them, look at host placement and the TGW path. Use `compare_runs.py` for the comparison.
+**Experiments run (EC2, ap-northeast-1, native tools, 2 subscribers, 10 s runs, 5 runs per arm, arms interleaved, 95% bootstrap interval of the difference of means):**
 
-- **Effort.** S for the IRQ/irqbalance/pinning items once the experiment says they matter; no AMI work needed.
+| Experiment | Hosts | Result | Interval |
+|---|---|---|---|
+| `irqbalance` stopped, NIC IRQs pinned to CPU0, sender pinned to CPU1; 100,000 pps | m7a.large (2 vCPU) | median 141 vs 151 µs untuned (-9.6) | -47 to +30: no effect shown |
+| same | m7a.xlarge (4 vCPU) | median 94 vs 106 µs untuned (-11.5) | -47 to +25: no effect shown |
+| sender's C2 idle state disabled (usage counter confirmed frozen during the runs); 1,000 pps | m7a.xlarge | median 104 vs 93 µs with C2 on (+11.5) | -19 to +41: no effect shown |
+| m7a.xlarge against m7a.large, untuned arm, 100,000 pps | | median 106 vs 151 µs (-45) | -92 to +1: borderline, not shown |
+
+Conclusions the data support:
+- None of the three interventions produces a difference larger than the run-to-run noise at 5 runs per arm. The tuned P99 looks better on both sizes, but it is driven by single spikes in the untuned arm (one run had a 2.4 ms P99) and its interval includes 0 as well.
+- The slow runs still occur with C2 disabled (122 and 141 µs with C2 off, against 68-96 µs for the fast ones), so a sender wake-up from C2 does not explain the level shifts. Together with the constant software-minus-hardware gap, the sender idle state and the receiver are both ruled out; the level is set elsewhere (host placement or the TGW path) and is not yet identified.
+- 4 vCPUs did not remove the 100k pps tail: untuned P99 stayed at 130-477 µs on the xlarge hosts, and 42-114 packets were lost per run on both sizes (the same count on both subscribers, so lost before the receivers).
+- With a bimodal run-to-run level (about 58-143 µs medians on one set of hosts), 5 runs per arm only detects an intervention that removes the slow level outright. A smaller effect needs more runs or a design that controls the level (for example a fixed host pair, with the arms alternated many times).
+
+Not recommended on this evidence: building the IRQ pinning or C-state changes into the stack. Revisit if the level shifts are traced to the sender host.
+
+- **Effort.** None unless the level shifts are traced to the host; the experiments above found nothing worth building.
 
 ---
 ## P2 - repeatability and interpretability
